@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<!--
+  dvision2-ctrl: FlightGear generic UDP input protocol.
+  Bridge sends: throttle,aileron,elevator,rudder,latitude,longitude,
+  altitude-ft,heading-deg,roll-deg,pitch-deg
+  (one CSV line per frame).
+  FG listens on the port given by the generic socket,in argument.
+-->
+<PropertyList>
+  <generic>
+    <input>
+      <line_separator>newline</line_separator>
+      <var_separator>,</var_separator>
+
+      <chunk>
+        <name>throttle</name>
+        <node>/controls/engines/engine/throttle</node>
+        <type>float</type>
+      </chunk>
+
+      <chunk>
+        <name>aileron</name>
+        <node>/controls/flight/aileron</node>
+        <type>float</type>
+      </chunk>
+
+      <chunk>
+        <name>elevator</name>
+        <node>/controls/flight/elevator</node>
+        <type>float</type>
+      </chunk>
+
+      <chunk>
+        <name>rudder</name>
+        <node>/controls/flight/rudder</node>
+        <type>float</type>
+      </chunk>
+
+      <chunk>
+        <name>latitude</name>
+        <node>/position/latitude-deg</node>
+        <type>double</type>
+      </chunk>
+
+      <chunk>
+        <name>longitude</name>
+        <node>/position/longitude-deg</node>
+        <type>double</type>
+      </chunk>
+
+      <chunk>
+        <name>altitude-ft</name>
+        <node>/position/altitude-ft</node>
+        <type>double</type>
+      </chunk>
+
+      <chunk>
+        <name>heading-deg</name>
+        <node>/orientation/heading-deg</node>
+        <type>double</type>
+      </chunk>
+
+      <chunk>
+        <name>roll-deg</name>
+        <node>/orientation/roll-deg</node>
+        <type>double</type>
+      </chunk>
+
+      <chunk>
+        <name>pitch-deg</name>
+        <node>/orientation/pitch-deg</node>
+        <type>double</type>
+      </chunk>
+
+    </input>
+  </generic>
+</PropertyList>

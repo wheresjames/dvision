@@ -1,0 +1,8 @@
+name            dvision
+version         0.1.0
+description     Simple drone simulator.
+company         wheresjames
+author          Robert Umbehant
+email           dvision@wheresjames.com
+url             https://github.com/wheresjames/dvision
+license         MIT

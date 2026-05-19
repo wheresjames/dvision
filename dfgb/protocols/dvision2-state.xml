@@ -1,0 +1,103 @@
+<?xml version="1.0"?>
+<!--
+  dvision2-state  —  FlightGear generic UDP output protocol
+  FG sends one CSV line per frame to the bridge state socket.
+  Field order must match FGState parsing in dfgb.py.
+-->
+<PropertyList>
+  <generic>
+    <output>
+      <line_separator>newline</line_separator>
+      <var_separator>,</var_separator>
+
+      <chunk>
+        <name>latitude</name>
+        <node>/position/latitude-deg</node>
+        <type>double</type>
+        <format>%.9f</format>
+      </chunk>
+
+      <chunk>
+        <name>longitude</name>
+        <node>/position/longitude-deg</node>
+        <type>double</type>
+        <format>%.9f</format>
+      </chunk>
+
+      <!-- altitude in feet; bridge converts to metres -->
+      <chunk>
+        <name>altitude-ft</name>
+        <node>/position/altitude-ft</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <chunk>
+        <name>roll-deg</name>
+        <node>/orientation/roll-deg</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <chunk>
+        <name>pitch-deg</name>
+        <node>/orientation/pitch-deg</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <chunk>
+        <name>heading-deg</name>
+        <node>/orientation/heading-deg</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <!-- world-frame velocities in ft/s; bridge converts to m/s -->
+      <chunk>
+        <name>speed-north-fps</name>
+        <node>/velocities/speed-north-fps</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <chunk>
+        <name>speed-east-fps</name>
+        <node>/velocities/speed-east-fps</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <chunk>
+        <name>speed-down-fps</name>
+        <node>/velocities/speed-down-fps</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <!-- groundspeed in knots; bridge converts to m/s -->
+      <chunk>
+        <name>groundspeed-kt</name>
+        <node>/velocities/groundspeed-kt</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <!-- body-frame velocities in ft/s for the velocity controller -->
+      <chunk>
+        <name>uBody-fps</name>
+        <node>/velocities/uBody-fps</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+      <chunk>
+        <name>vBody-fps</name>
+        <node>/velocities/vBody-fps</node>
+        <type>double</type>
+        <format>%.4f</format>
+      </chunk>
+
+    </output>
+  </generic>
+</PropertyList>
