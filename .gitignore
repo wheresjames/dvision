@@ -15,11 +15,12 @@ ComfyUI
 coqui_local
 /tmp/
 dfgb-*.log
-
+/reports/
 /assets/lang/audio/
 /assets/lang/images/
 /tools/itemaudio/audio/
 /tools/itemimages/images/
+NEXT*
 
 ## Java
 *.class

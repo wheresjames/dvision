@@ -67,6 +67,7 @@ daic/
 tests/
   flight_test.py            End-to-end headless flight runner
   vision_debug_report.py    Vision/map diagnostic summary from flight logs
+  benchmark_diagnosis.py    Route/control cause summary + failure classification hints
   test_daic_*.py            DAIC detector, planner, map, avoidance tests
   test_dctl_controls.py     Manual control tests
   test_dsim_crash_reset.py  Simulator collision/reset tests
@@ -162,6 +163,22 @@ Headless run with a vision diagnostic log:
 python3 tests/flight_test.py --map dsim/assets/maps/maze_002.txt --duration 20 --fps 20 --log /tmp/maze002.jsonl
 python3 tests/vision_debug_report.py /tmp/maze002.jsonl
 ```
+
+Permanent benchmark run with route/control diagnosis (why is the drone still
+in `SEARCH`? — perception miss, map noise/trap, planning miss, control stall,
+or target-reacquisition miss):
+
+```sh
+python3 tests/flight_test.py --map dsim/assets/maps/maze_002.txt --duration 30 --fps 20 \
+    --report-dir reports/benchmarks/<run-id>
+python3 tests/benchmark_diagnosis.py reports/benchmarks/<run-id>
+```
+
+`--report-dir` writes `summary.json` (with a nested `diagnosis` block),
+`diagnosis.txt`, `report.md`/`report.html`, and the occupancy snapshot gallery
+together so a run can be classified without re-running anything. Confirm the
+script's classification hints against the `occ_*.png` gallery — they are
+heuristic pointers, not a verdict.
 
 ## Simulator: dsim
 

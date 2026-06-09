@@ -233,15 +233,6 @@ class Planner:
         else:
             self._approach_count = 0
 
-        # GPS-guided navigation when target coordinates are known.
-        gps_ctrl = self._gps_nav_to_target(status)
-        if gps_ctrl is not None:
-            dist = _gps_dist_to_target(status)
-            return PlannerOutput(state=State.SEARCH,
-                                 command_type="velocity",
-                                 command_fields=gps_ctrl.as_command_fields(),
-                                 status_text=f"GPS nav {dist:.0f} m to target")
-
         ctrl = self._expanding_square(now)
         return PlannerOutput(state=State.SEARCH,
                              command_type="velocity",

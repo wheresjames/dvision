@@ -36,6 +36,17 @@ def _status(armed="1", mode="GUIDED", z=3.0, battery=100.0, heading=270.0):
         "drone.heading_deg": str(heading),
     }
 
+def _status_with_target_gps():
+    status = _status()
+    status.update({
+        "drone.lat_deg": "52.0000000",
+        "drone.lon_deg": "13.0000000",
+        "target.lat_deg": "52.0000800",
+        "target.lon_deg": "13.0000000",
+        "drone.compass_deg": "0.0",
+    })
+    return status
+
 def _new_planner():
     return Planner(img_w=640, img_h=480)
 
@@ -124,6 +135,17 @@ def test_search_sends_velocity():
     p._state_entered = time.monotonic()
     out = p.tick(_no_det(), _status(z=SEARCH_ALT_M))
     assert out.command_type == "velocity"
+
+
+def test_search_does_not_emit_gps_nav_velocity_when_target_gps_known():
+    p = _new_planner()
+    p._state = State.SEARCH
+    p._state_entered = time.monotonic()
+
+    out = p.tick(_no_det(), _status_with_target_gps())
+
+    assert out.command_type == "velocity"
+    assert "GPS nav" not in out.status_text
 
 
 def test_search_transitions_to_approach_on_lock():

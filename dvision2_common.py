@@ -18,6 +18,7 @@ STATUS_KEYS = [
     "sim.id",
     "sim.map",
     "sim.time_s",
+    "sim.report_dir",
     "drone.armed",
     "drone.mode",
     "drone.x_m",
@@ -54,6 +55,20 @@ STATUS_KEYS = [
     "camera.height_px",
     "camera.fps",
 ]
+
+def memkv_aligned_name_len(min_name_len: int, max_value_len: int) -> int:
+    """Round ``min_name_len`` up so pymembus' memkv record stride is 8-byte aligned.
+
+    pymembus computes the per-record stride as
+    ``2 * sizeof(int64_t) + max_name_len + 1 + max_value_len + 1`` and rejects
+    ``memkv.create``/``open`` with "invalid shared-memory layout" unless that
+    stride is a multiple of ``alignof(int64_t)`` (8 on x86_64).
+    """
+    name_len = min_name_len
+    while (2 * 8 + name_len + 1 + max_value_len + 1) % 8 != 0:
+        name_len += 1
+    return name_len
+
 
 BERLIN_CENTER_LAT_DEG = 52.5200
 BERLIN_CENTER_LON_DEG = 13.4050

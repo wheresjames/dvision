@@ -641,7 +641,7 @@ class DroneController:
         self.last_video_seq = seq
         slot  = self.video.getPtr(-1)
         frame = np.array(self.video[slot], copy=False)
-        image = Image.fromarray(frame[::-1], "RGB")
+        image = Image.fromarray(frame, "RGB")
         max_w = self.args.width or self.video.getWidth()
         max_h = self.args.height or self.video.getHeight()
         image.thumbnail((max_w, max_h))

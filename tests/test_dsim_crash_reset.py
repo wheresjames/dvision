@@ -35,6 +35,8 @@ def _sim() -> DroneSimulator:
     sim.target_x = None
     sim.target_y = None
     sim.started = 0.0
+    sim.report_root = "reports/test"
+    sim.crash_pos = None
     sim.status = None
     sim.state = DroneState(sim.start_x, sim.start_y, sim.start_alt)
     return sim
@@ -44,7 +46,7 @@ def test_wall_collision_latches_crashed_state():
     sim = _sim()
     sim.state.armed = True
     sim.state.mode = "GUIDED"
-    sim.state.yaw_deg = 0.0
+    sim.state.yaw_deg = 180.0
     sim.state.cmd_forward = 10.0
     sim.integrate(0.1)
 

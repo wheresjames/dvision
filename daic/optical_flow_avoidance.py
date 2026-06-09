@@ -31,6 +31,7 @@ _MIN_TTC_RATIO = 0.002
 _MIN_RANGE_M = 0.6
 _MAX_RANGE_M = 8.0
 _TTC_RANGE_GAIN = 8.0
+_MIN_PLAUSIBLE_RANGE_M = 1.0
 
 
 class OpticalFlowAvoidance:
@@ -61,9 +62,8 @@ class OpticalFlowAvoidance:
         if None in (vx, vy, yaw):
             self._forward_speed_mps = 0.0
             return
-        yaw_rad = math.radians(float(yaw))
-        self._forward_speed_mps = (
-            float(vx) * math.cos(yaw_rad) + float(vy) * math.sin(yaw_rad)
+        self._forward_speed_mps = _body_forward_speed(
+            float(vx), float(vy), float(yaw),
         )
 
     def detect_obstacles(self, frame_rgb: np.ndarray) -> ObstacleSectors:
@@ -138,11 +138,17 @@ def _persist_sectors(previous: ObstacleSectors,
         right=previous.right * _PERSIST_DECAY,
         confidence=previous.confidence * _PERSIST_CONF_DECAY,
         method="flow:persist",
-        front_range_m=previous.front_range_m,
-        front_left_range_m=previous.front_left_range_m,
-        front_right_range_m=previous.front_right_range_m,
-        left_range_m=previous.left_range_m,
-        right_range_m=previous.right_range_m,
+        # Persisted risk is a fading memory, not a fresh measurement — carrying
+        # its range estimate forward verbatim lets a single stale close-range
+        # reading "stick" to the drone indefinitely (fuse_obstacle_sectors
+        # always prefers the nearest of the valid ranges). Only a live
+        # detection should claim a distance; persistence keeps risk alive
+        # through brief dropouts without pretending to know how far away it is.
+        front_range_m=None,
+        front_left_range_m=None,
+        front_right_range_m=None,
+        left_range_m=None,
+        right_range_m=None,
     )
     fused = fuse_obstacle_sectors(decayed, current)
     if fused.confidence < 0.05:
@@ -182,6 +188,19 @@ def _cv2():
 
 def _flow_to_sectors(flow: np.ndarray, forward_speed_mps: float = 0.0,
                      dt_s: float | None = None) -> ObstacleSectors:
+    # Optical "expansion" toward an obstacle requires the camera to translate
+    # toward the scene. Yaw-scanning (forward_speed_mps ~= 0, the dominant
+    # SEARCH-state motion) sweeps the off-axis-mounted camera through a small
+    # arc, and the nearby floor parallaxes hard against the distant scene --
+    # producing flow with the same radially-symmetric, ~zero-median signature
+    # as genuine expansion (median subtraction can't tell them apart). Gating
+    # on forward speed is the only reliable split: a benchmark run showed front
+    # risk reads 0.86 median while forward_speed_mps < 0.06 (floor-parallax
+    # noise) vs. 0.14 median once it isn't (real signal). `_persist_sectors`
+    # still carries a genuine close-range reading through brief stops.
+    if forward_speed_mps < _MIN_RANGE_SPEED_MPS:
+        return ObstacleSectors(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "flow:no_translation")
+
     h, w = flow.shape[:2]
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     cx = (w - 1) / 2.0
@@ -266,8 +285,20 @@ def _sector_metrics(expansion: np.ndarray, ratio: np.ndarray,
     strong_ratio = float(np.percentile(vals, 45))
     if strong_ratio < _MIN_TTC_RATIO:
         return risk, None
-    range_m = (range_scale_m / strong_ratio) * _TTC_RANGE_GAIN
-    return risk, float(np.clip(range_m, _MIN_RANGE_M, _MAX_RANGE_M))
+    range_m = float(np.clip((range_scale_m / strong_ratio) * _TTC_RANGE_GAIN,
+                            _MIN_RANGE_M, _MAX_RANGE_M))
+    if range_m < _MIN_PLAUSIBLE_RANGE_M:
+        # Phase 6.1: a TTC range this short is far more often the floor
+        # parallaxing close beneath the pitched-forward camera during genuine
+        # forward translation (the same near-field surface _flow_to_sectors's
+        # ROI comment names as a "permanently close surface") than a real
+        # navigable obstacle -- anything that close to a route-relevant wall
+        # would already be inside direct collision-braking range. Keep the
+        # risk (it still drives avoidance) but drop the implausible distance
+        # so the local map falls back to its conservative default instead of
+        # planting a phantom wall in the drone's own grid cell.
+        return risk, None
+    return risk, range_m
 
 
 def _range_scale_m(forward_speed_mps: float, dt_s: float | None) -> float | None:
@@ -276,6 +307,15 @@ def _range_scale_m(forward_speed_mps: float, dt_s: float | None) -> float | None
     if forward_speed_mps < _MIN_RANGE_SPEED_MPS:
         return None
     return forward_speed_mps * dt_s
+
+
+def _body_forward_speed(vx_mps: float, vy_mps: float,
+                        heading_deg: float) -> float:
+    """Project map velocity onto dsim's compass-style heading vector."""
+    heading_rad = math.radians(heading_deg)
+    fwd_x = math.sin(heading_rad)
+    fwd_y = -math.cos(heading_rad)
+    return vx_mps * fwd_x + vy_mps * fwd_y
 
 
 def _nearest_range(items: list[ObstacleSectors], attr: str) -> float | None:

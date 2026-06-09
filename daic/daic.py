@@ -30,7 +30,7 @@ from dvision2_common import (
 from daic.detector import detect, Detection
 from daic.planner import Planner, State
 from daic.flight_log import FlightLogger
-from daic.avoidance import apply_obstacle_avoidance
+from daic.avoidance import apply_obstacle_avoidance, apply_search_approach_brake
 from daic.optical_flow_avoidance import (
     OpticalFlowAvoidance, fuse_obstacle_sectors,
 )
@@ -221,6 +221,58 @@ _BORDER    = "#30363d"
 _BTN_BG    = "#21262d"
 _BTN_ACT   = "#30363d"
 _VIDEO_BG  = "#010409"
+_SEARCH_HOLD_YAW_DPS = 18.0
+_APPROACH_BLOCK_RISK = 0.25
+_APPROACH_BLOCK_FRONT_OCC_M = 1.5
+
+
+def _search_hold_scan_fields() -> dict:
+    return {
+        "forward_mps": 0.0,
+        "right_mps": 0.0,
+        "up_mps": 0.0,
+        "yaw_rate_dps": _SEARCH_HOLD_YAW_DPS,
+    }
+
+
+def _frontish_risk(sectors) -> float:
+    def risk(name: str) -> float:
+        try:
+            return max(0.0, min(1.0, float(getattr(sectors, name, 0.0))))
+        except (TypeError, ValueError):
+            return 0.0
+
+    return max(
+        risk("front"),
+        risk("front_left") * 0.7,
+        risk("front_right") * 0.7,
+    )
+
+
+def _approach_gate_reason(sectors, local_map_diag: dict | None) -> str | None:
+    front_risk = _frontish_risk(sectors)
+    if front_risk >= _APPROACH_BLOCK_RISK:
+        return f"front risk {front_risk:.2f}"
+
+    if local_map_diag is not None:
+        try:
+            front_occ_m = local_map_diag.get("front_block_occ_m")
+            if front_occ_m is None:
+                front_occ_m = local_map_diag.get("front_occ_m")
+            if front_occ_m is not None and float(front_occ_m) <= _APPROACH_BLOCK_FRONT_OCC_M:
+                return f"front occ {float(front_occ_m):.2f}m"
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
+def _approach_block_fields(fields: dict) -> dict:
+    blocked = dict(fields)
+    blocked["forward_mps"] = 0.0
+    blocked["right_mps"] = 0.0
+    blocked["up_mps"] = 0.0
+    return blocked
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +333,23 @@ def _annotate(frame_rgb: np.ndarray, detection: Detection) -> np.ndarray:
 
 
 def _client_rgb_frame(frame: np.ndarray) -> np.ndarray:
+    """Convert shared-memory renderer output to daic's interpreted RGB frame."""
+    return np.ascontiguousarray(frame)
+
+
+def _display_rgb_frame(frame: np.ndarray) -> np.ndarray:
     """Convert shared-memory renderer output to daic's displayed RGB frame."""
-    return np.ascontiguousarray(frame[::-1, ::-1])
+    return np.ascontiguousarray(frame)
+
+
+def _display_detection(detection: Detection, width: int) -> Detection:
+    """Convert an interpreted-frame detection into display coordinates."""
+    return detection
+
+
+def _display_sectors(sectors: ObstacleSectors) -> ObstacleSectors:
+    """Convert interpreted-frame sector risks into display HUD coordinates."""
+    return sectors
 
 
 def _annotate_slam(frame_rgb: np.ndarray,
@@ -436,9 +503,15 @@ class DaicController:
         self.ai_enabled = False
         self._last_heartbeat = 0.0
         self._pending_enable_ai = args.enable_ai
+        self._auto_log = not bool(args.log_file)
         self.logger: FlightLogger | None = (
             FlightLogger(args.log_file) if args.log_file else None
         )
+        self._enable_reporting = args.enable_ai
+        self.reporter = None   # RunReporter | None — created from sim.report_dir
+        self._last_planner_state_name = "IDLE"
+        self._last_target_dist_m: float | None = None
+        self._last_annotated_frame: np.ndarray | None = None
 
         # Tk UI — all tk.*Var objects must come after tk.Tk()
         self.root = tk.Tk()
@@ -671,8 +744,29 @@ class DaicController:
                 self.status_epoch = kv.getEpoch()
                 self.last_status_time = time.monotonic()
                 self.health.ok("status", "connected")
+                if self._auto_log and self.logger is None:
+                    self._init_logger_from_status()
+                self._init_reporter_from_status()
             else:
                 self.health.wait("status", "waiting")
+
+    def _init_logger_from_status(self) -> None:
+        if self.status is None or self.logger is not None:
+            return
+        report_dir = self.status.getAll().get("sim.report_dir", "")
+        if report_dir:
+            log_path = Path(report_dir) / "daic" / "flight.jsonl"
+            self.logger = FlightLogger(log_path)
+
+    def _init_reporter_from_status(self) -> None:
+        if self.reporter is not None or not self._enable_reporting:
+            return
+        if self.status is None:
+            return
+        report_dir = self.status.getAll().get("sim.report_dir", "")
+        if report_dir:
+            from daic.run_reporter import RunReporter
+            self.reporter = RunReporter(Path(report_dir) / "daic")
 
     def run(self) -> None:
         self.root.after(50, self.tick)
@@ -707,6 +801,7 @@ class DaicController:
         slot  = self.video.getPtr(-1)
         frame = np.array(self.video[slot], copy=False)
         rgb   = _client_rgb_frame(frame)
+        display_rgb = _display_rgb_frame(frame)
 
         # Run detector on every new frame.
         try:
@@ -753,11 +848,15 @@ class DaicController:
             self._last_sectors = slam_sectors
 
         # Annotate and display.
-        annotated = _annotate(rgb, self.last_detection)
+        display_detection = _display_detection(
+            self.last_detection, display_rgb.shape[1],
+        )
+        annotated = _annotate(display_rgb, display_detection)
         annotated = _annotate_slam(
-            annotated, self._last_sectors,
+            annotated, _display_sectors(self._last_sectors),
             sd.tracking_state, sd.n_map_points, sd.scale,
         )
+        self._last_annotated_frame = annotated
         image = Image.fromarray(annotated, "RGB")
         max_w = self.args.display_w or self.video.getWidth()
         max_h = self.args.display_h or self.video.getHeight()
@@ -833,6 +932,9 @@ class DaicController:
         else:
             self._detect_var.set("no target")
 
+        target_xy = target_xy_from_status(status_snap)
+        avoiding  = False
+        effective_status = out.status_text
         if out.send_command:
             fields = dict(out.command_fields)
             if self._alt_lock.get() and out.command_type == "velocity":
@@ -840,29 +942,77 @@ class DaicController:
                     fields["up_mps"] = min(0.0, fields.get("up_mps", 0.0))
                 else:
                     fields["up_mps"] = 0.0
-            target_visible = self.last_detection.visible
-            if (out.command_type == "velocity" and out.state == State.SEARCH
-                    and not target_visible):
-                planned = self._local_route_command(status_snap)
+            if out.command_type == "velocity" and out.state == State.SEARCH:
+                planned = None
+                if pose is not None and target_xy is not None:
+                    planned = self._local_route_command(status_snap)
                 if planned is not None:
                     fields = planned.fields
                     self._last_route_status = {
                         "pose": pose,
-                        "target_xy": target_xy_from_status(status_snap),
+                        "target_xy": target_xy,
                     }
+                    effective_status = planned.status
                     self.health.ok("planner", planned.status[:40])
-            if (out.command_type == "velocity" and out.state == State.SEARCH
-                    and not target_visible):
-                fields, avoiding = apply_obstacle_avoidance(fields, self._last_sectors)
+                elif pose is not None and target_xy is not None:
+                    fields = _search_hold_scan_fields()
+                    effective_status = "local route unavailable, yaw scan"
+                    self.health.warn("planner", "local route unavailable")
+            if out.command_type == "velocity" and out.state == State.SEARCH:
+                front_block_m = None
+                if pose is not None:
+                    front_block_m = self.local_map.diagnostics(
+                        pose, target_xy).get("front_block_occ_m")
+                fields, avoiding = apply_search_approach_brake(
+                    fields, self._last_sectors, front_block_m)
                 if avoiding:
                     self.health.warn("planner", f"avoid {self._last_sectors.method}")
+                    effective_status = f"{effective_status}; avoid {self._last_sectors.method}"
+            if out.command_type == "velocity" and out.state == State.APPROACH:
+                local_diag = (
+                    self.local_map.diagnostics(pose, target_xy)
+                    if pose is not None else None
+                )
+                gate_reason = _approach_gate_reason(self._last_sectors, local_diag)
+                if gate_reason is not None:
+                    planned = None
+                    if pose is not None and target_xy is not None:
+                        planned = self._local_route_command(status_snap)
+                    if planned is not None:
+                        fields = planned.fields
+                        effective_status = f"approach gated ({gate_reason}); {planned.status}"
+                    else:
+                        fields = _approach_block_fields(fields)
+                        effective_status = f"approach gated ({gate_reason}); yaw hold"
+                    self.health.warn("planner", effective_status[:40])
+            self._planner_var.set(effective_status)
             self._send(out.command_type, **fields)
+
+        self._last_planner_state_name = out.state.name
+        if pose is not None and target_xy is not None:
+            self._last_target_dist_m = math.hypot(
+                target_xy[0] - pose.x, target_xy[1] - pose.y)
 
         if self.logger is not None:
             self.logger.log_tick(now, out.state.name, self.last_detection,
                                  out.command_type, fields if out.send_command else {},
-                                 status_snap, out.status_text,
+                                 status_snap, effective_status,
                                  self._vision_debug(status_snap))
+
+        if self.reporter is not None:
+            try:
+                slam_snap = self.slam_detector.get_map_snapshot()
+            except Exception:
+                slam_snap = (None, None, -1)
+            self.reporter.tick(
+                pose=pose,
+                target_xy=target_xy,
+                sectors=self._last_sectors,
+                local_map_snap=self.local_map.snapshot(),
+                slam_snapshot=slam_snap,
+                annotated_frame=self._last_annotated_frame,
+                avoiding=avoiding,
+            )
 
         # Heartbeat roughly every second regardless.
         if now - self._last_heartbeat >= 1.0:
@@ -1186,7 +1336,15 @@ class DaicController:
             if self.slam_detector is not None:
                 self.slam_detector.stop()
             if self.logger is not None:
-                self.logger.close()
+                self.logger.close()  # flush flight.jsonl before reporter reads it
+            if self.reporter is not None:
+                try:
+                    crashed = (self.status.getAll().get("drone.crashed", "0") == "1"
+                               if self.status else False)
+                    self.reporter.close(self._last_planner_state_name,
+                                        crashed, self._last_target_dist_m)
+                except Exception as exc:
+                    print(f"daic: reporter close: {exc}", file=sys.stderr)
             for handle in (self.status, self.command, self.video):
                 if handle is not None:
                     handle.close()
@@ -1220,9 +1378,14 @@ class HeadlessAgent:
         self._alt_lock = True
         self._last_heartbeat = 0.0
         self._pending_enable_ai = args.enable_ai
+        self._auto_log = not bool(args.log_file)
         self.logger: FlightLogger | None = (
             FlightLogger(args.log_file) if args.log_file else None
         )
+        self._enable_reporting = args.enable_ai
+        self.reporter = None   # RunReporter | None
+        self._last_planner_state_name = "IDLE"
+        self._last_target_dist_m: float | None = None
         vocab = getattr(args, "slam_vocab", None)
         if vocab:
             self.slam_detector: ORBSLAM3Detector | MiniSLAMDetector = ORBSLAM3Detector(
@@ -1256,6 +1419,27 @@ class HeadlessAgent:
                 self.status = kv
                 self.status_epoch = kv.getEpoch()
                 self.last_status_time = time.monotonic()
+                if self._auto_log and self.logger is None:
+                    self._init_logger_from_status()
+                self._init_reporter_from_status()
+
+    def _init_logger_from_status(self) -> None:
+        if self.status is None or self.logger is not None:
+            return
+        report_dir = self.status.getAll().get("sim.report_dir", "")
+        if report_dir:
+            log_path = Path(report_dir) / "daic" / "flight.jsonl"
+            self.logger = FlightLogger(log_path)
+
+    def _init_reporter_from_status(self) -> None:
+        if self.reporter is not None or not self._enable_reporting:
+            return
+        if self.status is None:
+            return
+        report_dir = self.status.getAll().get("sim.report_dir", "")
+        if report_dir:
+            from daic.run_reporter import RunReporter
+            self.reporter = RunReporter(Path(report_dir) / "daic")
 
     def run(self) -> None:
         frame_period = 1.0 / max(1, self.args.fps)
@@ -1353,6 +1537,9 @@ class HeadlessAgent:
         if self.args.verbose and out.status_text:
             print(f"  [{out.state.name}] {out.status_text}", file=sys.stderr)
 
+        target_xy = target_xy_from_status(status_snap)
+        avoiding  = False
+        effective_status = out.status_text
         if out.send_command:
             fields = dict(out.command_fields)
             if self._alt_lock and out.command_type == "velocity":
@@ -1360,23 +1547,69 @@ class HeadlessAgent:
                     fields["up_mps"] = min(0.0, fields.get("up_mps", 0.0))
                 else:
                     fields["up_mps"] = 0.0
-            target_visible = self.last_detection.visible
-            if (out.command_type == "velocity" and out.state == State.SEARCH
-                    and not target_visible):
-                planned = self._local_route_command(status_snap)
+            if out.command_type == "velocity" and out.state == State.SEARCH:
+                planned = None
+                if pose is not None and target_xy is not None:
+                    planned = self._local_route_command(status_snap)
                 if planned is not None:
                     fields = planned.fields
-            if (out.command_type == "velocity" and out.state == State.SEARCH
-                    and not target_visible):
-                fields, _avoiding = apply_obstacle_avoidance(fields, self._last_sectors)
+                    effective_status = planned.status
+                elif pose is not None and target_xy is not None:
+                    fields = _search_hold_scan_fields()
+                    effective_status = "local route unavailable, yaw scan"
+            if out.command_type == "velocity" and out.state == State.SEARCH:
+                front_block_m = None
+                if pose is not None:
+                    front_block_m = self.local_map.diagnostics(
+                        pose, target_xy).get("front_block_occ_m")
+                fields, avoiding = apply_search_approach_brake(
+                    fields, self._last_sectors, front_block_m)
+                if avoiding:
+                    effective_status = f"{effective_status}; avoid {self._last_sectors.method}"
+            if out.command_type == "velocity" and out.state == State.APPROACH:
+                local_diag = (
+                    self.local_map.diagnostics(pose, target_xy)
+                    if pose is not None else None
+                )
+                gate_reason = _approach_gate_reason(self._last_sectors, local_diag)
+                if gate_reason is not None:
+                    planned = None
+                    if pose is not None and target_xy is not None:
+                        planned = self._local_route_command(status_snap)
+                    if planned is not None:
+                        fields = planned.fields
+                        effective_status = f"approach gated ({gate_reason}); {planned.status}"
+                    else:
+                        fields = _approach_block_fields(fields)
+                        effective_status = f"approach gated ({gate_reason}); yaw hold"
             self._send(out.command_type, **fields)
+
+        self._last_planner_state_name = out.state.name
+        if pose is not None and target_xy is not None:
+            self._last_target_dist_m = math.hypot(
+                target_xy[0] - pose.x, target_xy[1] - pose.y)
 
         if self.logger is not None:
             self.logger.log_tick(now, out.state.name, self.last_detection,
                                  out.command_type,
                                  fields if out.send_command else {},
-                                 status_snap, out.status_text,
+                                 status_snap, effective_status,
                                  self._vision_debug(status_snap))
+
+        if self.reporter is not None:
+            try:
+                slam_snap = self.slam_detector.get_map_snapshot()
+            except Exception:
+                slam_snap = (None, None, -1)
+            self.reporter.tick(
+                pose=pose,
+                target_xy=target_xy,
+                sectors=self._last_sectors,
+                local_map_snap=self.local_map.snapshot(),
+                slam_snapshot=slam_snap,
+                annotated_frame=None,
+                avoiding=avoiding,
+            )
 
         # Heartbeat once per second.
         if now - self._last_heartbeat >= 1.0:
@@ -1424,7 +1657,15 @@ class HeadlessAgent:
             if self.slam_detector is not None:
                 self.slam_detector.stop()
             if self.logger is not None:
-                self.logger.close()
+                self.logger.close()  # flush flight.jsonl before reporter reads it
+            if self.reporter is not None:
+                try:
+                    crashed = (self.status.getAll().get("drone.crashed", "0") == "1"
+                               if self.status else False)
+                    self.reporter.close(self._last_planner_state_name,
+                                        crashed, self._last_target_dist_m)
+                except Exception as exc:
+                    print(f"daic: reporter close: {exc}", file=sys.stderr)
             for handle in (self.status, self.command, self.video):
                 if handle is not None:
                     try:

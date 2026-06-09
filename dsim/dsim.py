@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import math
 import random
 import signal
 import sys
 import time
 import tkinter as tk
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk
@@ -29,6 +31,7 @@ from dvision2_common import (
     decode_command,
     load_map,
     load_pymembus,
+    memkv_aligned_name_len,
     local_to_gps,
     restore_window_pos,
     save_window_pos,
@@ -327,7 +330,7 @@ class Panda3DRenderer:
         if self._tex.hasRamImage():
             data = self._tex.getRamImageAs("RGB")
             arr  = np.frombuffer(bytes(data), dtype=np.uint8)
-            out_frame[:] = arr.reshape((self._height, self._width, 3))[:, ::-1]
+            out_frame[:] = arr.reshape((self._height, self._width, 3))[::-1, ::-1]
 
     def close(self) -> None:
         try:
@@ -419,6 +422,22 @@ class DroneSimulator:
         self.ui = None
         self.p3d: Panda3DRenderer | None = None
 
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.run_id = f"{ts}-{uuid.uuid4().hex[:8]}"
+        if getattr(args, "report_dir", None):
+            report_root = Path(args.report_dir)
+            if not report_root.is_absolute():
+                report_root = ROOT / report_root
+            self.report_root = report_root
+            self.run_id = report_root.name
+        else:
+            self.report_root = ROOT / "reports" / self.run_id
+        self.dsim_report_dir = self.report_root / "dsim"
+        self.dsim_report_dir.mkdir(parents=True, exist_ok=True)
+
+        self.flight_positions: list[tuple[float, float, float]] = []  # (x, y, elapsed_s)
+        self.crash_pos: tuple[float, float] | None = None
+
     def _find_target_position(self) -> tuple[float | None, float | None]:
         for obj in self.map.objects:
             if obj.kind == "target":
@@ -472,9 +491,12 @@ class DroneSimulator:
             )
 
         self.status = pm.memkv()
-        max_name_len = max(len(k) for k in STATUS_KEYS) + 1
+        max_value_len = 512
+        max_name_len = memkv_aligned_name_len(
+            max(len(k) for k in STATUS_KEYS) + 1, max_value_len
+        )
         if not self.status.create(self.names["status"], len(STATUS_KEYS),
-                                  max_name_len, 128, True):
+                                  max_name_len, max_value_len, True):
             raise RuntimeError(
                 f"failed to create status buffer {self.names['status']}: "
                 f"{pm.last_error_message()}"
@@ -487,6 +509,11 @@ class DroneSimulator:
         self.publish_status()
 
     def close(self) -> None:
+        if self.flight_positions:
+            try:
+                self._save_flight_image(self.dsim_report_dir / "flight_path.png")
+            except Exception as exc:
+                print(f"dsim: flight image error: {exc}", file=sys.stderr)
         if self.ui is not None:
             self.ui.close()
         if self.p3d is not None:
@@ -521,6 +548,8 @@ class DroneSimulator:
                 last = now
                 self.drain_commands()
                 self.integrate(dt)
+                self.flight_positions.append(
+                    (self.state.x, self.state.y, now - self.started))
                 self.publish_frame(now)
                 self.publish_status()
                 if self.ui is not None:
@@ -610,6 +639,8 @@ class DroneSimulator:
 
     def crash(self) -> None:
         st = self.state
+        if self.crash_pos is None:
+            self.crash_pos = (st.x, st.y)
         self.zero_motion()
         st.target_alt = None
         st.armed = False
@@ -657,22 +688,26 @@ class DroneSimulator:
         st.yaw_deg  = (st.yaw_deg + st.yaw_rate * dt) % 360.0
 
         yaw_rad = math.radians(st.yaw_deg)
-        cos_y   = math.cos(yaw_rad)
-        sin_y   = math.sin(yaw_rad)
+        cos_y   = math.sin(yaw_rad)
+        sin_y   = math.cos(yaw_rad)
 
         # ── Horizontal velocity (first-order lag in body frame) ───────────
         # Decompose world velocity into body-frame components.
-        v_fwd   =  st.vx * cos_y + st.vy * sin_y
-        v_right = -st.vx * sin_y + st.vy * cos_y
+        # v_fwd   =  st.vx * cos_y + st.vy * sin_y
+        # v_right = -st.vx * sin_y + st.vy * cos_y
+        v_fwd   = -st.vx * sin_y + st.vy * cos_y
+        v_right =  st.vx * cos_y + st.vy * sin_y
 
         # Drive each toward its setpoint with a lag filter.
         alpha_h  = 1.0 - math.exp(-dt / _TAU_H)
         v_fwd   += (st.cmd_forward - v_fwd)   * alpha_h
-        v_right += (st.cmd_right   - v_right) * alpha_h
+        v_right += (-st.cmd_right   - v_right) * alpha_h
 
         # Rotate back to world frame using the *updated* yaw.
-        st.vx = v_fwd * cos_y - v_right * sin_y
-        st.vy = v_fwd * sin_y + v_right * cos_y
+        # st.vx = v_fwd * cos_y - v_right * sin_y
+        # st.vy = v_fwd * sin_y + v_right * cos_y
+        st.vx = v_right * cos_y - v_fwd * sin_y
+        st.vy = v_right * sin_y + v_fwd * cos_y
 
         # ── Vertical velocity ─────────────────────────────────────────────
         alpha_v = 1.0 - math.exp(-dt / _TAU_V)
@@ -681,8 +716,8 @@ class DroneSimulator:
         # ── Visual attitude (roll / pitch for renderer) ───────────────────
         # Target tilt is proportional to actual body-frame velocity so the
         # camera leans into the motion naturally and levels out on hover.
-        target_pitch = clamp( v_fwd    * _TILT_GAIN, -_MAX_TILT, _MAX_TILT)
-        target_roll  = clamp(-v_right  * _TILT_GAIN, -_MAX_TILT, _MAX_TILT)
+        target_pitch = clamp(v_fwd    * _TILT_GAIN, -_MAX_TILT, _MAX_TILT)
+        target_roll  = clamp(v_right  * _TILT_GAIN, -_MAX_TILT, _MAX_TILT)
         alpha_att    = 1.0 - math.exp(-dt / _TAU_ATT)
         st.pitch_deg += (target_pitch - st.pitch_deg) * alpha_att
         st.roll_deg  += (target_roll  - st.roll_deg)  * alpha_att
@@ -755,6 +790,7 @@ class DroneSimulator:
             "sim.id":                self.args.id,
             "sim.map":               str(self.map.path),
             "sim.time_s":            f"{time.monotonic() - self.started:.3f}",
+            "sim.report_dir":        str(self.report_root),
             "drone.armed":           "1" if st.armed else "0",
             "drone.mode":            st.mode,
             "drone.x_m":             f"{st.x:.3f}",
@@ -768,8 +804,8 @@ class DroneSimulator:
             "target.alt_m":          target_alt_s,
             "drone.roll_deg":        f"{st.roll_deg:.2f}",
             "drone.pitch_deg":       f"{st.pitch_deg:.2f}",
-            "drone.heading_deg":     f"{st.yaw_deg:.2f}",
-            "drone.compass_deg":     f"{(st.yaw_deg + 90.0) % 360.0:.2f}",
+            "drone.heading_deg":     f"{(270.0 - st.yaw_deg) % 360.0:.2f}",
+            "drone.compass_deg":     f"{(270.0 - st.yaw_deg) % 360.0:.2f}",
             "drone.vx_mps":          f"{st.vx:.3f}",
             "drone.vy_mps":          f"{st.vy:.3f}",
             "drone.vz_mps":          f"{st.vz:.3f}",
@@ -805,6 +841,150 @@ class DroneSimulator:
         self.video.setVpts(slot, pts)
         self.video.setApts(slot, pts)
         self.video.next(1)
+
+    def save_snapshot(self) -> None:
+        ts = datetime.datetime.now().strftime("%H%M%S")
+        path = self.dsim_report_dir / f"snapshot_{ts}.png"
+        try:
+            self._save_flight_image(path)
+        except Exception as exc:
+            print(f"dsim: snapshot error: {exc}", file=sys.stderr)
+
+    def _save_flight_image(self, path: Path) -> None:
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            from matplotlib.collections import LineCollection
+            from matplotlib.patches import Circle, Rectangle
+        except ImportError:
+            print("dsim: matplotlib not installed — skipping flight path image",
+                  file=sys.stderr)
+            return
+
+        sim_map = self.map
+        aspect = sim_map.height / max(sim_map.width, 1)
+        fig = Figure(figsize=(10, max(4.0, 10.0 * aspect)), facecolor="#0d1117")
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111, facecolor="#161b22")
+        ax.set_xlim(0, sim_map.width)
+        ax.set_ylim(sim_map.height, 0)  # row 0 at top, matches the UI
+        ax.set_aspect("equal")
+        ax.tick_params(colors="#8b949e")
+        for sp in ax.spines.values():
+            sp.set_color("#30363d")
+        ax.set_xlabel("X (m)", color="#8b949e")
+        ax.set_ylabel("Y (m)", color="#8b949e")
+
+        # Grid
+        for x in range(sim_map.width + 1):
+            ax.axvline(x, color="#21262d", linewidth=0.4, zorder=0)
+        for y in range(sim_map.height + 1):
+            ax.axhline(y, color="#21262d", linewidth=0.4, zorder=0)
+
+        # Map objects
+        for obj in sim_map.objects:
+            if obj.kind == "wall":
+                rect = Rectangle((obj.x - 0.5, obj.y - 0.5), 1.0, 1.0,
+                                  facecolor="#6e7681", edgecolor="#8b949e",
+                                  linewidth=0.5, zorder=1)
+                ax.add_patch(rect)
+            elif obj.kind == "tree":
+                circ = Circle((obj.x, obj.y), 0.36,
+                               facecolor="#238636", edgecolor="#3fb950",
+                               linewidth=0.5, zorder=1)
+                ax.add_patch(circ)
+            elif obj.kind == "target":
+                circ = Circle((obj.x, obj.y), 0.34,
+                               facecolor="#da3633", edgecolor="#f85149",
+                               linewidth=1.0, zorder=2)
+                ax.add_patch(circ)
+                r = 0.34
+                ax.plot([obj.x - r, obj.x + r], [obj.y, obj.y],
+                        "w-", linewidth=1.0, zorder=3)
+                ax.plot([obj.x, obj.x], [obj.y - r, obj.y + r],
+                        "w-", linewidth=1.0, zorder=3)
+
+        # Flight path
+        positions = list(self.flight_positions)
+        if len(positions) >= 2:
+            # Collect 10-second tick marks from full position list before subsampling.
+            tick_interval = 10.0
+            next_tick = tick_interval
+            tick_marks: list[tuple[int, float, float, float]] = []  # (idx, x, y, t)
+            for i, (px, py, pt) in enumerate(positions):
+                if pt >= next_tick:
+                    tick_marks.append((i, px, py, pt))
+                    next_tick += tick_interval
+
+            # Subsample for line rendering.
+            if len(positions) > 4000:
+                step = len(positions) // 4000
+                positions = positions[::step]
+            xs = np.array([p[0] for p in positions])
+            ys = np.array([p[1] for p in positions])
+            pts = np.c_[xs, ys].reshape(-1, 1, 2)
+            segments = np.concatenate([pts[:-1], pts[1:]], axis=1)
+            t = np.linspace(0.0, 1.0, len(segments))
+            lc = LineCollection(segments, cmap="cool", linewidth=2.0,
+                                alpha=0.9, zorder=4)
+            lc.set_array(t)
+            ax.add_collection(lc)
+
+            ax.plot(xs[0], ys[0], "o", color="#3fb950", markersize=9,
+                    markeredgecolor="#e6edf3", markeredgewidth=1.5,
+                    zorder=6, label="Start")
+            end_col = "#f85149" if self.state.crashed else "#f2cc60"
+            ax.plot(xs[-1], ys[-1], "s", color=end_col, markersize=9,
+                    markeredgecolor="#e6edf3", markeredgewidth=1.5,
+                    zorder=6, label="End")
+
+            # Draw 10-second tick marks perpendicular to the path.
+            tick_len = max(sim_map.width, sim_map.height) * 0.018
+            full = self.flight_positions
+            for idx, tx, ty, tt in tick_marks:
+                # Local direction from the position before to the one after.
+                i0 = max(0, idx - 3)
+                i1 = min(len(full) - 1, idx + 3)
+                dx = full[i1][0] - full[i0][0]
+                dy = full[i1][1] - full[i0][1]
+                mag = math.hypot(dx, dy)
+                if mag < 1e-6:
+                    continue
+                # Perpendicular unit vector (rotate 90° CCW).
+                px2, py2 = -dy / mag, dx / mag
+                ax.plot(
+                    [tx - px2 * tick_len, tx + px2 * tick_len],
+                    [ty - py2 * tick_len, ty + py2 * tick_len],
+                    "-", color="#8b949e", linewidth=1.2, zorder=5,
+                )
+                ax.annotate(
+                    f"{int(tt)}s",
+                    (tx + px2 * tick_len * 1.5, ty + py2 * tick_len * 1.5),
+                    ha="center", va="center",
+                    color="#8b949e", fontsize=6, zorder=5,
+                )
+
+        # Crash marker
+        if self.crash_pos is not None:
+            ax.plot(self.crash_pos[0], self.crash_pos[1], "x",
+                    color="#f85149", markersize=18, markeredgewidth=4,
+                    zorder=7, label="Crash")
+
+        elapsed = time.monotonic() - self.started
+        crashed_str = "  [CRASHED]" if self.state.crashed else ""
+        ax.set_title(
+            f"dsim {self.args.id}  |  {Path(self.args.map).name}"
+            f"  |  {elapsed:.1f} s{crashed_str}  |  run {self.run_id}",
+            color="#e6edf3", fontsize=8, pad=8,
+        )
+        if positions:
+            ax.legend(facecolor="#21262d", edgecolor="#30363d",
+                      labelcolor="#e6edf3", fontsize=8)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.print_figure(str(path), dpi=150, bbox_inches="tight",
+                            facecolor="#0d1117")
+        print(f"dsim: flight path → {path}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -854,9 +1034,12 @@ class TopDownUi:
                   style="HeaderDim.TLabel").grid(row=0, column=0, sticky="ew")
         ttk.Label(footer, textvariable=self.command_var, anchor="w",
                   style="HeaderDim.TLabel").grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(footer, text="Save Snapshot", command=self.sim.save_snapshot,
+                   style="TButton").grid(row=0, column=1, rowspan=2,
+                                         sticky="e", padx=(12, 0))
         ttk.Button(footer, text="Reset drone", command=self.sim.reset_drone,
-                   style="Accent.TButton").grid(row=0, column=1, rowspan=2,
-                                                sticky="e", padx=(12, 0))
+                   style="Accent.TButton").grid(row=0, column=2, rowspan=2,
+                                                sticky="e", padx=(8, 0))
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
 
@@ -946,7 +1129,7 @@ class TopDownUi:
 
         st  = self.sim.state
         cx, cy = self.xy(st.x, st.y)
-        yaw  = math.radians(st.yaw_deg)
+        yaw  = math.radians((180.0 - st.yaw_deg) % 360.0)
         size = self.cell * 0.34
         nose  = (cx + math.cos(yaw) * size, cy + math.sin(yaw) * size)
         left  = (cx + math.cos(yaw + 2.45) * size, cy + math.sin(yaw + 2.45) * size)
@@ -1021,6 +1204,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="ground altitude in meters for the center of the map")
     parser.add_argument("--frames",   type=int,
                         help="run for a fixed number of frames, for smoke tests")
+    parser.add_argument("--report-dir", default=None,
+                        help="write run artifacts to this exact directory")
     parser.add_argument("--no-ui",    action="store_true",
                         help="disable the top-down simulator UI")
     parser.add_argument("--verbose",  action="store_true")
