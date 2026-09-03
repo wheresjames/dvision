@@ -9,8 +9,8 @@ Coordinate convention (body frame, matches dsim velocity command):
   up_mps       +  = climb, - = descend
   yaw_rate_dps +  = clockwise from above
 
-Two-phase approach with distance estimation
--------------------------------------------
+Approach and descent, with distance estimation
+----------------------------------------------
 The camera is forward-facing with a 5° downward tilt.  A naïve servo fails
 for a ground target because the camera geometry makes cy_err unreliable as
 a distance signal, and unthrottled descent fires too early.
@@ -20,12 +20,12 @@ Distance estimation
   the detected radius in pixels and the camera focal length, we can estimate
   the horizontal distance to the target at any point in the approach.
 
-Phase 1 — approach (d_horiz > _APPROACH_GATE_M)
+Approach (d_horiz > _APPROACH_GATE_M)
   Target is far.  Fly forward at a speed that decelerates proportionally as
   the distance closes so the drone arrives at the gate with low momentum.
   Lateral correction (cx_err) active; descent suppressed.
 
-Phase 2 — overhead descent (d_horiz ≤ _APPROACH_GATE_M, cy_err ≥ 0)
+Overhead descent (d_horiz ≤ _APPROACH_GATE_M, cy_err ≥ 0)
   Target is close and below camera centre.  Coupled descent with a
   trajectory-intercept forward correction:
     forward = descent_rate × (d_horiz / altitude)
@@ -33,8 +33,8 @@ Phase 2 — overhead descent (d_horiz ≤ _APPROACH_GATE_M, cy_err ≥ 0)
   to the target, exactly compensating for the remaining horizontal offset.
   Without it the drone descends straight down and lands short.
 
-The cy_err ≥ 0 guard keeps phase 1 active when the drone is at ground level
-with the target still ahead (target appears above camera centre due to
+The cy_err ≥ 0 guard keeps the approach active when the drone is at ground
+level with the target still ahead (target appears above camera centre due to
 shallow angle), preventing the drone from stalling before it reaches the
 target.
 """
@@ -51,30 +51,30 @@ from .detector import Detection
 # Tuning constants
 # ---------------------------------------------------------------------------
 
-# Pixel-error gains (pre-scaled; dsim multiplies forward/right by 0.1).
-_K_LATERAL = 0.047
+# Pixel-error gains in actual m/s and deg/s.
+_K_LATERAL = 0.0047
 _K_YAW     = 0.06   # suppressed when nearly centred
 
-# Phase-1 maximum approach speed (pre-scaled).  dsim × 0.1 → actual m/s.
-_APPROACH_FWD_SPEED = 8.0
+# Maximum approach speed in m/s.
+_APPROACH_FWD_SPEED = 0.8
 
-# Distance (m) at which phase 1 → phase 2 transition occurs.
-# Phase 2 also requires cy_err ≥ 0 (target below camera centre).
+# Distance (m) at which the approach hands over to the overhead descent.
+# The descent also requires cy_err ≥ 0 (target below camera centre).
 _APPROACH_GATE_M = 2.0
 
-# Start decelerating in phase 1 when within this distance.
+# Start decelerating the approach when within this distance.
 _DECEL_START_M = 4.0
 
-# Minimum phase-1 forward speed (pre-scaled) — keeps the drone moving.
-_APPROACH_MIN_SPEED = 1.5
+# Minimum approach forward speed — keeps the drone moving.
+_APPROACH_MIN_SPEED = 0.15
 
-# Phase-1 target position at which we start trading forward speed for descent.
+# Approach target position at which we start trading forward speed for descent.
 _BOTTOM_SLOW_START = 0.35
 _BOTTOM_SLOW_FULL  = 0.85
 _BOTTOM_DESCENT_RATE = -0.6
 
-# Descent rates (m/s, NOT pre-scaled — dsim uses cmd_up directly).
-_DESCENT_RATE_FAST = -4.0   # when target is small within phase 2
+# Descent rates in m/s.
+_DESCENT_RATE_FAST = -4.0   # when target is small within the descent
 _DESCENT_RATE_SLOW = -1.8   # when target fills >25% of frame height
 
 # Fade radius for coupled descent (normalised centre distance).
@@ -86,14 +86,14 @@ _REF_ALT_M = 2.5
 # Floor for altitude-based lateral gain reduction.
 _MIN_ALT_SCALE = 0.25
 
-# Search / transit speed (pre-scaled).
-_SEARCH_SPEED = 5.0
+# Search / transit speed in m/s.
+_SEARCH_SPEED = 0.5
 
-# Hard command limits (pre-scaled unless noted).
-_MAX_FORWARD =  12.0
-_MAX_BACK    = -12.0
-_MAX_RIGHT   =  10.0
-_MAX_LEFT    = -10.0
+# Hard command limits in m/s except yaw in deg/s.
+_MAX_FORWARD =  1.2
+_MAX_BACK    = -1.2
+_MAX_RIGHT   =  1.0
+_MAX_LEFT    = -1.0
 _MAX_UP      =   6.0
 _MAX_DOWN    =  -8.0
 _MAX_YAW     =  45.0
@@ -194,15 +194,15 @@ def servo(detection: Detection,
     if d_horiz == 0.0 and d_horiz_override is not None:
         d_horiz = d_horiz_override
 
-    # ── Phase selection ───────────────────────────────────────────────
-    # Phase 2 requires the target to be close (d_horiz ≤ gate) AND appearing
-    # below camera centre (cy_err ≥ 0).  The cy_err guard keeps the drone
-    # flying forward when at ground level with the target still ahead — at
-    # that point the target appears above the downward-aimed camera centre.
-    in_phase2 = d_horiz <= _APPROACH_GATE_M and cy_err >= 0
+    # ── Approach or descent ───────────────────────────────────────────
+    # The descent requires the target to be close (d_horiz ≤ gate) AND
+    # appearing below camera centre (cy_err ≥ 0).  The cy_err guard keeps the
+    # drone flying forward when at ground level with the target still ahead —
+    # at that point the target appears above the downward-aimed camera centre.
+    in_descent = d_horiz <= _APPROACH_GATE_M and cy_err >= 0
 
-    # ── Phase 1: approach with distance-proportional deceleration ─────
-    if not in_phase2:
+    # ── Approach with distance-proportional deceleration ──────────────
+    if not in_descent:
         # Decelerate linearly from full speed at _DECEL_START_M to minimum
         # at the gate, so the drone arrives with low residual momentum.
         if d_horiz < _DECEL_START_M:
@@ -224,10 +224,10 @@ def servo(detection: Detection,
                              up_mps=up, yaw_rate_dps=yaw,
                              descending=False, horiz_dist_m=d_horiz)
 
-    # ── Phase 2: trajectory-intercept descent ─────────────────────────
+    # ── Overhead descent with trajectory intercept ────────────────────
     size_scale  = max(0.25, 1.0 - size_frac * 1.8)
     horiz_scale = alt_scale * size_scale
-    horiz_limit = max(6.0, _MAX_FORWARD * horiz_scale)
+    horiz_limit = max(0.6, _MAX_FORWARD * horiz_scale)
 
     right = _clamp(_K_LATERAL * cx_err * horiz_scale, -horiz_limit, horiz_limit)
 
@@ -241,9 +241,8 @@ def servo(detection: Detection,
     up = _clamp(up, _MAX_DOWN, _MAX_UP)
 
     # Do not descend faster than the available forward speed can intercept.
-    # Forward/right commands are scaled by dsim (x0.1), while cmd_up is not.
     if up < 0.0 and altitude_m > 0.1 and d_horiz > 0.0:
-        max_forward_actual = max(0.0, horiz_limit - abs(right)) * 0.1
+        max_forward_actual = max(0.0, horiz_limit - abs(right))
         max_descent_for_intercept = max_forward_actual * altitude_m / d_horiz
         up = -min(abs(up), max_descent_for_intercept)
 
@@ -252,12 +251,10 @@ def servo(detection: Detection,
     # vertical.  Adding forward = |descent| × (d_horiz / altitude) steers the
     # drone along the straight line to the target rather than straight down,
     # eliminating the "lands short" offset.
-    # NOTE: cmd_up is actual m/s; forward is pre-scaled (dsim × 0.1 → actual).
     if altitude_m > 0.1 and d_horiz > 0.0:
         actual_descent = abs(up)   # m/s actual (cmd_up is not scaled)
         intercept_actual = actual_descent * d_horiz / altitude_m
-        # Convert actual → pre-scaled (dsim applies × 0.1 to forward/right).
-        forward = _clamp(intercept_actual / 0.1, 0.0, horiz_limit)
+        forward = _clamp(intercept_actual, 0.0, horiz_limit)
     else:
         forward = 0.0
 
@@ -266,12 +263,12 @@ def servo(detection: Detection,
                          descending=up < -0.1, horiz_dist_m=d_horiz)
 
 
-# GPS navigation constants (pre-scaled where noted; dsim × 0.1 for forward/right)
+# GPS navigation constants in SI units.
 _GPS_YAW_GAIN     = 0.8    # deg/s per degree of yaw error
 _GPS_MAX_YAW_DPS  = 35.0
 _GPS_ALIGN_DEG    = 25.0   # start forward motion below this yaw error
-_GPS_NAV_SPEED    = 6.0    # pre-scaled full-speed
-_GPS_NAV_MIN      = 2.0    # pre-scaled minimum speed (close to target)
+_GPS_NAV_SPEED    = 0.6
+_GPS_NAV_MIN      = 0.2
 _GPS_DECEL_DIST_M = 12.0   # distance at which deceleration begins
 
 

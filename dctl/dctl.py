@@ -11,6 +11,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
+_MODULE_STARTED = time.perf_counter()
+
 import numpy as np
 from PIL import Image, ImageTk
 
@@ -18,26 +20,29 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dcmn import theme
+from dcmn.tktheme import apply_theme
 from dvision2_common import (
-    STATUS_KEYS, encode_command, load_pymembus, restore_window_pos,
-    save_window_pos, shared_names, validate_id,
+    STATUS_KEYS, controlled_command, load_pymembus, new_control_identity,
+    restore_window_pos, save_window_pos, shared_names, validate_id,
 )
 
 # ---------------------------------------------------------------------------
 # Dark theme palette
 # ---------------------------------------------------------------------------
-_BG        = "#0d1117"   # window / frame background
-_BG_PANEL  = "#161b22"   # panel surface
-_BG_ENTRY  = "#21262d"   # entry / spinbox field
-_FG        = "#e6edf3"   # primary text
-_FG_DIM    = "#8b949e"   # secondary / key labels
-_ACCENT    = "#58a6ff"   # focus / primary actions
-_ACCENT_OK = "#3fb950"
-_ACCENT_BAD = "#f85149"
-_BORDER    = "#30363d"   # widget borders
-_BTN_BG    = "#21262d"   # button resting
-_BTN_ACT   = "#30363d"   # button hover
-_VIDEO_BG  = "#010409"   # video viewport background
+# One palette, in dcmn.theme, so every window's map is the same colour.
+_BG        = theme.BG          # window / frame background
+_BG_PANEL  = theme.PANEL       # panel surface
+_BG_ENTRY  = theme.ENTRY       # entry / spinbox field
+_FG        = theme.TEXT        # primary text
+_FG_DIM    = theme.DIM         # secondary / key labels
+_ACCENT    = theme.ACCENT      # focus / primary actions
+_ACCENT_OK = theme.OK
+_ACCENT_BAD = theme.DANGER
+_BORDER    = theme.GRID        # widget borders
+_BTN_BG    = theme.BUTTON      # button resting
+_BTN_ACT   = theme.BUTTON_ACTIVE   # button hover
+_VIDEO_BG  = theme.CANVAS      # video viewport background
 
 _MANUAL_YAW_RATE_DPS = 45.0
 
@@ -71,6 +76,7 @@ class JoystickManager:
         self._enabled = False
         self._joystick = None
         self.name = ""
+        self.error = ""
         self._axes: list[float] = []
         self._buttons: dict[int, bool] = {}
         self._prev_buttons: dict[int, bool] = {}
@@ -86,8 +92,8 @@ class JoystickManager:
             pygame.joystick.init()
             self._pygame = pygame
             self._enabled = True
-        except Exception:
-            pass
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
 
     @property
     def available(self) -> bool:
@@ -163,7 +169,7 @@ class JoystickManager:
 
     def status_str(self) -> str:
         if not self._enabled:
-            return "no pygame"
+            return "pygame unavailable"
         if self._joystick is None:
             return "none"
         return self.name[:28]
@@ -193,8 +199,12 @@ def _clamp(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
 class DroneController:
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.pymembus = load_pymembus()
+        # Potentially slow optional-interface discovery is deferred until the
+        # window has painted. Shared-memory *connection* never gates window
+        # creation; open_missing() keeps retrying it from the Tk loop.
+        self.pymembus = None
         self.names = shared_names(args.id)
+        self.control_source, self.control_lease = new_control_identity(f"dctl-{args.id}")
         self.video = None
         self.command = None
         self.status = None
@@ -205,43 +215,149 @@ class DroneController:
         self.running = True
         self._joy_legend_shown = None  # None = not yet determined
         self._held_velocity_active = False
+        self._last_heartbeat = 0.0
+        self._last_open_attempt = 0.0
 
-        self.joy = JoystickManager() if not args.no_joystick else _DisabledJoystick()
+        self.joy = _DisabledJoystick()
+        self._interfaces_initializing = True
+        self._ui_ready = False
+        self._dashboard_scheduled = False
 
+        stage_started = time.perf_counter()
         self.root = tk.Tk()
+        self._trace(f"Tk created in {time.perf_counter() - stage_started:.3f}s")
         self.root.title(f"dctl {args.id}")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Map>", self._on_window_mapped, add="+")
+        self._window_mapped = False
         self.photo = None
         self.status_vars: dict[str, tk.StringVar] = {}
         self.log_var = tk.StringVar(value="starting")
-        self.conn_var = tk.StringVar(value="connecting")
+        self.conn_var = tk.StringVar(
+            value="window ready; initializing interfaces, waiting for dsim")
         self.armed_var = tk.StringVar(value="unknown")
         self.takeoff_alt = tk.DoubleVar(value=3.0)
         self._joy_name_var = tk.StringVar(value="")
-        self.build_ui()
+        self._build_startup_window()
         restore_window_pos(self.root, f"dctl.{args.id}")
+
+    def _build_startup_window(self) -> None:
+        """A cheap first frame that does not depend on dashboard layout."""
+        self._apply_dark_theme()
+        self.root.configure(background=_BG)
+        # Keep the top-level at its dashboard size from its first map. Resetting
+        # a mapped 640x180 splash to the widgets' requested size caused a second
+        # multi-second geometry transaction on some X11 window managers.
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        window_w = max(320, min(1280, screen_w - 80))
+        window_h = max(320, min(800, screen_h - 80))
+        self.root.geometry(f"{window_w}x{window_h}")
+        self.root.minsize(min(900, window_w), min(600, window_h))
+        frame = ttk.Frame(self.root, padding=24)
+        self._startup_frame = frame
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"dctl  {self.args.id}", style="Brand.TLabel").pack(
+            anchor="w")
+        ttk.Label(frame, textvariable=self.conn_var, style="HeaderDim.TLabel").pack(
+            anchor="w", pady=(12, 0))
+        ttk.Label(frame, text="Connecting video; controls are loading…",
+                  style="Dim.TLabel").pack(anchor="w", pady=(8, 8))
+        self.video_label = ttk.Label(
+            frame, text="waiting for dsim video", anchor="center",
+            style="Video.TLabel")
+        self.video_label.pack(fill="both", expand=True)
+        ttk.Button(frame, text="Load controls now",
+                   command=self._schedule_dashboard).pack(anchor="e", pady=(8, 0))
+
+    def _on_window_mapped(self, event) -> None:
+        """Begin external probing only after the actual toplevel is visible."""
+        if event.widget is not self.root or self._window_mapped:
+            return
+        self._window_mapped = True
+        self._trace(
+            f"window mapped after {time.perf_counter() - _MODULE_STARTED:.3f}s")
+        # Transport/video comes first. The expensive dashboard realization is
+        # deliberately later so it cannot hide the first available frame.
+        self.root.after(25, self._initialize_interfaces)
+
+    def _schedule_dashboard(self, delay_ms: int = 0) -> None:
+        if self._dashboard_scheduled or self._ui_ready:
+            return
+        self._dashboard_scheduled = True
+        self.root.after(delay_ms, self._finish_window)
+
+    def _finish_window(self) -> None:
+        if not self.running:
+            return
+        stage_started = time.perf_counter()
+        width = max(1, self.root.winfo_width())
+        height = max(1, self.root.winfo_height())
+        dashboard = ttk.Frame(self.root)
+        self._dashboard_host = dashboard
+        # Realize the large widget tree outside the visible top-level while the
+        # startup viewport remains mapped with its most recent video frame.
+        dashboard.place(x=-width * 2, y=0, width=width, height=height)
+        self.build_ui(dashboard)
+        dashboard.update_idletasks()
+        if self.photo is not None:
+            self.video_label.configure(image=self.photo, text="")
+        dashboard.place_configure(x=0, y=0, relwidth=1, relheight=1,
+                                  width=0, height=0)
+        dashboard.lower(self._startup_frame)
+        self._trace(
+            f"dashboard staged in {time.perf_counter() - stage_started:.3f}s")
+        # Mapping the large tree is asynchronous and is the slow operation on
+        # affected X11 setups. Keep the video shell stacked above it until Tk
+        # returns to this timer, which happens after that realization settles.
+        self.root.after(100, self._reveal_dashboard)
+
+    def _reveal_dashboard(self) -> None:
+        if not self.running:
+            return
+        self._dashboard_host.lift()
+        self._startup_frame.destroy()
+        self._ui_ready = True
+        self._trace(
+            f"dashboard visible after {time.perf_counter() - _MODULE_STARTED:.3f}s")
+
+    def _initialize_interfaces(self) -> None:
+        """Run imports/probes only after Tk has had a chance to paint."""
+        if not self.running:
+            return
+        stage_started = time.perf_counter()
+        try:
+            self.pymembus = load_pymembus()
+        except Exception as exc:
+            self._interfaces_initializing = False
+            self.log(f"shared memory unavailable: {exc}")
+            self.update_connection_text()
+            return
+        self._trace(f"pymembus loaded in {time.perf_counter() - stage_started:.3f}s")
+        if not self.args.no_joystick:
+            self.conn_var.set(
+                "window ready; shared memory loaded; probing joystick")
+            self.root.update_idletasks()
+            stage_started = time.perf_counter()
+            self.joy = JoystickManager()
+            self._trace(
+                f"joystick probe finished in "
+                f"{time.perf_counter() - stage_started:.3f}s")
+        self._interfaces_initializing = False
+        if not self.args.no_joystick and getattr(self.joy, "error", ""):
+            message = f"joystick disabled: {self.joy.error}"
+            self.log(message)
+            print(f"dctl: {message}", file=sys.stderr)
+        self.update_connection_text()
 
     # ------------------------------------------------------------------
     # Theme
     # ------------------------------------------------------------------
 
     def _apply_dark_theme(self) -> None:
-        self.root.configure(bg=_BG)
-        s = ttk.Style(self.root)
-        s.theme_use("clam")
-        s.configure(".",
-            background=_BG, foreground=_FG,
-            bordercolor=_BORDER, darkcolor=_BG_PANEL, lightcolor=_BG_PANEL,
-            troughcolor=_BG_PANEL, selectbackground=_ACCENT,
-            selectforeground=_FG, fieldbackground=_BG_ENTRY,
-        )
-        s.configure("TFrame",      background=_BG)
-        s.configure("Header.TFrame", background=_BG_PANEL)
-        s.configure("TLabel",      background=_BG,       foreground=_FG)
-        s.configure("Dim.TLabel",  background=_BG,       foreground=_FG_DIM)
-        s.configure("Brand.TLabel", background=_BG_PANEL, foreground=_FG,
-                    font=("TkDefaultFont", 11, "bold"))
-        s.configure("HeaderDim.TLabel", background=_BG_PANEL, foreground=_FG_DIM)
+        # The shared base, then the widgets only the manual pilot uses: the
+        # video viewport and the joystick legend.
+        s = apply_theme(self.root)
         s.configure("Video.TLabel", background=_VIDEO_BG, foreground=_FG_DIM)
 
         s.configure("TLabelframe",
@@ -267,24 +383,6 @@ class DroneController:
             background=_BG_PANEL, foreground=_FG_DIM,
             font=("TkDefaultFont", 8))
 
-        s.configure("TButton",
-            background=_BTN_BG, foreground=_FG,
-            bordercolor=_BORDER, lightcolor=_BORDER, darkcolor=_BORDER,
-            focuscolor=_ACCENT, padding=(10, 6), relief="flat")
-        s.map("TButton",
-            background=[("pressed", _BG_PANEL), ("active", _BTN_ACT)],
-            bordercolor=[("active", _ACCENT)])
-        s.configure("Accent.TButton", background="#1f6feb", foreground="#ffffff",
-                    bordercolor="#388bfd", lightcolor="#388bfd", darkcolor="#1f6feb",
-                    padding=(10, 6), relief="flat")
-        s.map("Accent.TButton",
-            background=[("pressed", "#1158c7"), ("active", "#388bfd")])
-        s.configure("Danger.TButton", background="#da3633", foreground="#ffffff",
-                    bordercolor="#f85149", lightcolor="#f85149", darkcolor="#da3633",
-                    padding=(10, 6), relief="flat")
-        s.map("Danger.TButton",
-            background=[("pressed", "#b62324"), ("active", "#f85149")])
-
         s.configure("TSpinbox",
             background=_BG_ENTRY, foreground=_FG,
             fieldbackground=_BG_ENTRY, bordercolor=_BORDER,
@@ -298,13 +396,14 @@ class DroneController:
     # UI construction
     # ------------------------------------------------------------------
 
-    def build_ui(self) -> None:
+    def build_ui(self, parent=None) -> None:
         self._apply_dark_theme()
+        parent = self.root if parent is None else parent
 
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
 
-        top = ttk.Frame(self.root, padding=(12, 10), style="Header.TFrame")
+        top = ttk.Frame(parent, padding=(12, 10), style="Header.TFrame")
         top.grid(row=0, column=0, sticky="ew")
         top.columnconfigure(1, weight=1)
         ttk.Label(top, text=f"dctl  {self.args.id}", style="Brand.TLabel").grid(
@@ -312,7 +411,7 @@ class DroneController:
         ttk.Label(top, textvariable=self.conn_var, style="HeaderDim.TLabel").grid(
             row=0, column=1, sticky="w")
 
-        body = ttk.Frame(self.root, padding=(12, 12, 12, 12))
+        body = ttk.Frame(parent, padding=(12, 12, 12, 12))
         body.grid(row=1, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
@@ -352,6 +451,10 @@ class DroneController:
         ttk.Button(controls, text="Stop", style="Danger.TButton",
                    command=lambda: self.send_command("zero")
                    ).grid(row=2, column=1, sticky="ew")
+        ttk.Button(controls, text="Take Control", command=self.take_control
+                   ).grid(row=3, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Button(controls, text="Release Control", command=self.release_control
+                   ).grid(row=3, column=1, sticky="ew", pady=(6, 0))
 
         # ── Movement ──────────────────────────────────────────────────
         move = ttk.LabelFrame(side, text="Movement", padding=8)
@@ -404,7 +507,10 @@ class DroneController:
             ("roll",     "drone.roll_deg"),
             ("pitch",    "drone.pitch_deg"),
             ("battery",  "drone.battery_pct"),
+            ("control",  "control.owner"),
             ("last cmd", "link.last_command_type"),
+            ("accepted", "command.result.accepted"),
+            ("reason",   "command.result.reason"),
             ("status",   "status.message"),
         ]
         half = (len(telem_rows) + 1) // 2
@@ -420,9 +526,13 @@ class DroneController:
                 row=grid_row, column=col_base + 1, sticky="w")
 
         # ── Log ───────────────────────────────────────────────────────
-        _log_lbl = ttk.Label(side, textvariable=self.log_var, style="Dim.TLabel")
+        # A Configure handler used to assign the label's current width back to
+        # wraplength on every geometry event. That changes the requested size,
+        # causes another geometry event, and made Tk spend several seconds in
+        # a first-map feedback loop on some window managers.
+        _log_lbl = ttk.Label(side, textvariable=self.log_var,
+                             style="Dim.TLabel", wraplength=420)
         _log_lbl.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        _log_lbl.bind("<Configure>", lambda e: _log_lbl.configure(wraplength=e.width))
 
         # ── Legends (joystick or keyboard) under the video ────────────
         below_video = ttk.Frame(video_area, padding=(0, 8, 0, 0))
@@ -568,6 +678,12 @@ class DroneController:
 
     def open_missing(self) -> None:
         pm = self.pymembus
+        if pm is None:
+            return
+        now = time.monotonic()
+        if now - self._last_open_attempt < 0.5:
+            return
+        self._last_open_attempt = now
         if self.video is None:
             vid = pm.memvid()
             if vid.open_existing(self.names["video"]):
@@ -594,16 +710,43 @@ class DroneController:
         if not self.running:
             return
         self.open_missing()
+        self._maintain_control()
         self.update_connection_text()
         self.update_video()
         self.update_status()
-        self.joy.poll()
-        self._handle_joy_buttons()
-        self._update_joy_legend()
-        self.send_held_velocity()
-        if self.command is not None and time.monotonic() % 1.0 < 0.08:
-            self.send_command("heartbeat", quiet=True)
+        if self._ui_ready:
+            self.joy.poll()
+            self._handle_joy_buttons()
+            self._update_joy_legend()
+            self.send_held_velocity()
         self.root.after(max(10, int(1000 / max(1, self.args.fps))), self.tick)
+
+    def _maintain_control(self) -> None:
+        if self.command is None or self.status is None:
+            return
+        now = time.monotonic()
+        owner = self.status.getAll().get("control.owner", "")
+        if owner == self.control_source and now - self._last_heartbeat >= 1.0:
+            self.send_command("heartbeat", quiet=True)
+            self._last_heartbeat = now
+
+    def take_control(self) -> None:
+        """Acquire an unowned vehicle without contending with another client."""
+        owner = "" if self.status is None else \
+            self.status.getAll().get("control.owner", "")
+        if owner and owner != self.control_source:
+            self.log(f"control held by {owner}")
+            return
+        self.send_command("acquire_control")
+        self._last_heartbeat = time.monotonic()
+
+    def release_control(self) -> None:
+        owner = "" if self.status is None else \
+            self.status.getAll().get("control.owner", "")
+        if owner != self.control_source:
+            self.log("this dctl does not own control")
+            return
+        self.send_command("release_control")
 
     def _handle_joy_buttons(self) -> None:
         joy = self.joy
@@ -621,6 +764,10 @@ class DroneController:
             self.send_command("arm", armed=False)
 
     def update_connection_text(self) -> None:
+        if self._interfaces_initializing:
+            self.conn_var.set(
+                "window ready; initializing interfaces, waiting for dsim")
+            return
         parts = [
             f"video={'ok' if self.video else 'wait'}",
             f"command={'ok' if self.command else 'wait'}",
@@ -640,13 +787,17 @@ class DroneController:
             return
         self.last_video_seq = seq
         slot  = self.video.getPtr(-1)
-        frame = np.array(self.video[slot], copy=False)
+        frame = _client_rgb_frame(np.array(self.video[slot], copy=False))
         image = Image.fromarray(frame, "RGB")
         max_w = self.args.width or self.video.getWidth()
         max_h = self.args.height or self.video.getHeight()
         image.thumbnail((max_w, max_h))
         self.photo = ImageTk.PhotoImage(image)
         self.video_label.configure(image=self.photo, text="")
+        if not self._ui_ready:
+            # Preserve the first frame long enough to be visibly presented;
+            # only then realize the larger controls/telemetry dashboard.
+            self._schedule_dashboard(500)
 
     def update_status(self) -> None:
         if self.status is None:
@@ -670,10 +821,7 @@ class DroneController:
         self.send_held_velocity(force=True)
 
     def send_held_velocity(self, force: bool = False) -> None:
-        kb_forward = (1.0 if "w" in self.held else 0.0) + (-1.0 if "s" in self.held else 0.0)
-        kb_right   = (1.0 if "d" in self.held else 0.0) + (-1.0 if "a" in self.held else 0.0)
-        kb_up      = (1.0 if "r" in self.held else 0.0) + (-1.0 if "f" in self.held else 0.0)
-        kb_yaw     = (1.0 if "e" in self.held else 0.0) + (-1.0 if "q" in self.held else 0.0)
+        kb_forward, kb_right, kb_up, kb_yaw = _held_axes(self.held)
 
         joy = self.joy
         forward  = _clamp(kb_forward + joy.forward)
@@ -711,7 +859,8 @@ class DroneController:
             if not quiet:
                 self.log("command buffer not connected")
             return
-        payload = encode_command(typ, **fields)
+        payload = controlled_command(
+            typ, self.control_source, self.control_lease, **fields)
         if self.command.write(payload):
             if typ in ("zero", "land", "takeoff"):
                 self._held_velocity_active = False
@@ -725,10 +874,18 @@ class DroneController:
         if self.args.verbose:
             print(message)
 
+    def _trace(self, message: str) -> None:
+        if self.args.verbose:
+            print(f"dctl startup: {message}", file=sys.stderr, flush=True)
+
     def close(self) -> None:
         self.running = False
         try:
-            self.send_command("zero", quiet=True)
+            owner = "" if self.status is None else \
+                self.status.getAll().get("control.owner", "")
+            if owner == self.control_source:
+                self.send_command("zero", quiet=True)
+                self.send_command("release_control", quiet=True)
         finally:
             self.joy.close()
             for handle in (self.status, self.command, self.video):
@@ -785,9 +942,26 @@ def _control_key(keysym: str) -> str:
     return _KEY_ALIASES.get(key, key)
 
 
+def _held_axes(held: set[str]) -> tuple[float, float, float, float]:
+    """Normalized (forward, right, up, yaw-right) from the held control keys.
+
+    Kept out of the widget so the documented key-to-action mapping can be
+    tested without a display server.
+    """
+    def axis(positive: str, negative: str) -> float:
+        return (1.0 if positive in held else 0.0) + (-1.0 if negative in held else 0.0)
+
+    return axis("w", "s"), axis("d", "a"), axis("r", "f"), axis("e", "q")
+
+
+def _client_rgb_frame(frame: np.ndarray) -> np.ndarray:
+    """Normalize a shared RGB frame without changing pixel orientation."""
+    return np.ascontiguousarray(frame)
+
+
 def _manual_yaw_rate(yaw_right_norm: float) -> float:
     """Convert human-facing yaw-right input to the simulator command sign."""
-    return -_clamp(yaw_right_norm) * _MANUAL_YAW_RATE_DPS
+    return _clamp(yaw_right_norm) * _MANUAL_YAW_RATE_DPS
 
 
 def format_status_value(key: str, value: str) -> str:
@@ -812,7 +986,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--height",       type=int,   default=720)
     parser.add_argument("--fps",          type=int,   default=30)
     parser.add_argument("--cmd-size",     type=int,   default=65536)
-    parser.add_argument("--speed",        type=float, default=15.0)
+    parser.add_argument("--speed",        type=float, default=1.5)
     parser.add_argument("--vertical-speed", type=float, default=1.0)
     parser.add_argument("--no-joystick",  action="store_true",
                         help="disable joystick/gamepad support")
@@ -824,6 +998,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.verbose:
+        print(f"dctl startup: imports completed in "
+              f"{time.perf_counter() - _MODULE_STARTED:.3f}s",
+              file=sys.stderr, flush=True)
     controller = DroneController(args)
 
     def stop(_signum, _frame):

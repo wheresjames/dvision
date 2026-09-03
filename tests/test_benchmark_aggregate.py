@@ -1,4 +1,4 @@
-"""Tests for the multi-run benchmark aggregator (Phase 5.8)."""
+"""Tests for the multi-run benchmark aggregator."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _write_run(report_dir: Path, *, landed: bool, final_state: str,
         },
     }
     metadata = {
-        "map": "dsim/assets/maps/maze_001.txt",
+        "map": "assets/maps/maze_001.txt",
         "duration_s": 90,
         "git_commit": git_commit,
     }

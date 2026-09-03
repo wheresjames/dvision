@@ -7,7 +7,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from daic.orb_slam3_detector import ObstacleSectors
+from daic.orb_slam3_detector import (ObstacleSectors, _INNER_DEG,
+                                     _OUTER_DEG)
 
 
 _CELL_M = 0.5
@@ -45,11 +46,38 @@ _DEFAULT_OBSTACLE_DIST_M = 3.0
 _MIN_OBSTACLE_DIST_M = 0.7
 _MAX_OBSTACLE_DIST_M = 8.0
 _OBSTACLE_SPREAD_M = 0.8
+
+# Where each sector's observations are planted, as a bearing relative to the
+# heading. The detectors bin points by azimuth into bands that run out to +/-90
+# deg, but the camera only ever sees +/-_CAMERA_HALF_FOV_DEG and nothing beyond
+# it, so the sector bands are the shared _INNER_DEG/_OUTER_DEG split clipped to
+# the field of view, and each sector is planted at the centre of its own band.
+# Planting the left/right sectors at +/-70 deg - as this table previously did -
+# places every off-axis observation about 40 deg outside the field of view that
+# produced it, which smears a wall into a wide arc of phantom cells instead of
+# a barrier.
+_CAMERA_HALF_FOV_DEG = 35.0   # dsim Panda3DRenderer.CAM_FOV_H = 70.0
+
+
+def _sector_band(lo_deg: float, hi_deg: float) -> tuple[float, float]:
+    """Return (centre, half_width) of a sector band clipped to the camera FOV."""
+    lo = max(lo_deg, -_CAMERA_HALF_FOV_DEG)
+    hi = min(hi_deg, _CAMERA_HALF_FOV_DEG)
+    return ((lo + hi) / 2.0, max((hi - lo) / 2.0, 2.5))
+
+
+_SECTOR_BANDS = {
+    "left":        _sector_band(-90.0, -_OUTER_DEG),
+    "front_left":  _sector_band(-_OUTER_DEG, -_INNER_DEG),
+    "front":       _sector_band(-_INNER_DEG, _INNER_DEG),
+    "front_right": _sector_band(_INNER_DEG, _OUTER_DEG),
+    "right":       _sector_band(_OUTER_DEG, 90.0),
+}
 _WAYPOINT_LOOKAHEAD_M = 2.0
 _MAX_YAW_DPS = 18.0
 _YAW_GAIN = 0.45
-_NAV_SPEED = 4.5
-_NAV_MIN_SPEED = 1.5
+_NAV_SPEED = 0.45
+_NAV_MIN_SPEED = 0.15
 _ALIGN_DEG = 30.0
 _TURN_ONLY_DEG = 60.0
 
@@ -121,11 +149,16 @@ class LocalOccupancyMap:
             return
 
         sector_defs = [
-            ("left", -70.0, sectors.left, sectors.left_range_m),
-            ("front_left", -25.0, sectors.front_left, sectors.front_left_range_m),
-            ("front", 0.0, sectors.front, sectors.front_range_m),
-            ("front_right", 25.0, sectors.front_right, sectors.front_right_range_m),
-            ("right", 70.0, sectors.right, sectors.right_range_m),
+            ("left", _SECTOR_BANDS["left"][0],
+             sectors.left, sectors.left_range_m),
+            ("front_left", _SECTOR_BANDS["front_left"][0],
+             sectors.front_left, sectors.front_left_range_m),
+            ("front", _SECTOR_BANDS["front"][0],
+             sectors.front, sectors.front_range_m),
+            ("front_right", _SECTOR_BANDS["front_right"][0],
+             sectors.front_right, sectors.front_right_range_m),
+            ("right", _SECTOR_BANDS["right"][0],
+             sectors.right, sectors.right_range_m),
         ]
         for sector_name, rel_deg, risk, range_m in sector_defs:
             if risk < 0.12:
@@ -168,9 +201,9 @@ class LocalOccupancyMap:
                                 sectors: ObstacleSectors,
                                 heading_steady: bool) -> None:
         front_defs = (
-            ("front", 0.0, sectors.front),
-            ("front_left", -25.0, sectors.front_left),
-            ("front_right", 25.0, sectors.front_right),
+            ("front", _SECTOR_BANDS["front"][0], sectors.front),
+            ("front_left", _SECTOR_BANDS["front_left"][0], sectors.front_left),
+            ("front_right", _SECTOR_BANDS["front_right"][0], sectors.front_right),
         )
         for sector_name, rel_deg, risk in front_defs:
             if heading_steady and risk >= _SUSTAINED_RISK:
@@ -469,6 +502,7 @@ class LocalOccupancyMap:
             "front_block_occ_m": (
                 round(front_block_occ, 2) if front_block_occ is not None else None
             ),
+            "front_block_occ_age_ticks": self._cell_age_ticks(front_block_cell),
             "default_obstacle_projection_m": _DEFAULT_OBSTACLE_DIST_M,
         }
         nearest_prov = self._diagnostic_provenance(nearest_cell)
@@ -486,6 +520,15 @@ class LocalOccupancyMap:
                 math.hypot(target_xy[0] - pose.x, target_xy[1] - pose.y), 2
             )
         return out
+
+    def _cell_age_ticks(self, cell: tuple[int, int] | None) -> int | None:
+        """Ticks since this cell was last hit, or None if it has no provenance."""
+        if cell is None:
+            return None
+        prov = self._provenance.get(cell)
+        if prov is None:
+            return None
+        return max(0, self._tick - prov.last_hit_tick)
 
     def _diagnostic_provenance(self, cell: tuple[int, int] | None) -> dict | None:
         if cell is None:
@@ -552,10 +595,9 @@ def _command_to_waypoint(pose: Pose2, waypoint: tuple[float, float]) -> dict:
     dist = math.hypot(dx, dy)
     desired_yaw = math.degrees(math.atan2(dy, dx)) % 360.0
     yaw_error = (desired_yaw - pose.yaw_deg + 180.0) % 360.0 - 180.0
-    # dsim applies positive yaw_rate_dps as a *decrease* in map yaw (map_yaw =
-    # 180 - sim yaw_deg), so the route follower must command the opposite sign
-    # of the bearing error to turn toward the waypoint rather than away from it.
-    yaw = _clamp(-yaw_error * _YAW_GAIN, -_MAX_YAW_DPS, _MAX_YAW_DPS)
+    # Public positive yaw is a clockwise/right turn, which is also an increase
+    # in compass heading and the corresponding turn toward positive error.
+    yaw = _clamp(yaw_error * _YAW_GAIN, -_MAX_YAW_DPS, _MAX_YAW_DPS)
     abs_err = abs(yaw_error)
     if abs_err < _ALIGN_DEG:
         t = _clamp(dist / _WAYPOINT_LOOKAHEAD_M, 0.0, 1.0)

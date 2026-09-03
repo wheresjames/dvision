@@ -9,7 +9,7 @@ _AVOID_MIN_CONFIDENCE = 0.35
 _AVOID_START_RISK = 0.25
 _AVOID_FULL_RISK = 0.75
 
-# Phase 6.9 approach-speed envelope. When the local map reports a *mapped* wall
+# Approach-speed envelope. When the local map reports a *mapped* wall
 # close ahead (front_block_occ_m), slow the SEARCH approach to a steady,
 # navigable cap that ramps down with distance instead of letting the reactive
 # brake clamp forward to ~zero. The reactive zero-clamp strands the drone in a
@@ -19,8 +19,17 @@ _AVOID_FULL_RISK = 0.75
 # no lurch.
 _BRAKE_START_M = 4.0
 _BRAKE_FULL_M = 1.5
-_BRAKE_MIN_MPS = 1.2
-_NAV_CRUISE_MPS = 4.5
+_BRAKE_MIN_MPS = 0.12
+_NAV_CRUISE_MPS = 0.45
+
+# A mapped wall is only a measurement while it is being observed. Optical flow
+# needs egomotion to estimate range, so braking to a crawl in front of a wall
+# starves the very sensor that placed it: the cell stops being refreshed, its
+# recorded distance freezes, and the drone keeps creeping forward against a
+# reading that no longer moves. Past this age the distance is a remembered
+# ghost, not a measurement, and the navigable-speed floor must not be applied
+# to it. At ~20 Hz this is roughly 1.5 s.
+_STALE_FRONT_AGE_TICKS = 30
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -42,16 +51,35 @@ def approach_speed_cap(front_block_occ_m: float | None) -> float | None:
     return _BRAKE_MIN_MPS + t * (_NAV_CRUISE_MPS - _BRAKE_MIN_MPS)
 
 
+def is_front_map_stale(front_block_age_ticks: int | None) -> bool:
+    """Whether a mapped front obstacle is too old to be trusted as a range."""
+    if front_block_age_ticks is None:
+        return False
+    return front_block_age_ticks > _STALE_FRONT_AGE_TICKS
+
+
 def apply_search_approach_brake(command_fields: dict,
                                 sectors: Any,
                                 front_block_occ_m: float | None,
+                                front_block_age_ticks: int | None = None,
                                 ) -> tuple[dict, bool]:
-    """Slow the SEARCH approach when a mapped wall is close ahead (Phase 6.9).
+    """Slow the SEARCH approach when a mapped wall is close ahead.
 
-    When the local map reports a close front-blocking wall, cap forward speed to
-    a steady, navigable envelope (never zero) so A* keeps moving toward and
-    around the wall. With no close mapped wall, defer to the reactive brake.
+    When the local map reports a *fresh* close front-blocking wall, cap forward
+    speed to a steady, navigable envelope (never zero) so A* keeps moving toward
+    and around the wall. When that wall is stale, or when there is no close
+    mapped wall at all, defer to the reactive brake, which trims speed from live
+    sector risk rather than from a remembered distance.
     """
+    if front_block_occ_m is not None and is_front_map_stale(front_block_age_ticks):
+        # Stale mapped wall: its recorded distance is a frozen memory, so it
+        # must not be used to grant a speed. Fall through to the reactive brake,
+        # which reads live sector risk. Deliberately *not* a hard stop: holding
+        # forward at zero here removes the egomotion optical flow needs to
+        # re-range the wall, so the cell can never become fresh again and the
+        # drone stalls until the ghost decays out of the map and it lurches.
+        return apply_obstacle_avoidance(command_fields, sectors)
+
     cap = approach_speed_cap(front_block_occ_m)
     if cap is None:
         return apply_obstacle_avoidance(command_fields, sectors)
@@ -62,6 +90,15 @@ def apply_search_approach_brake(command_fields: dict,
         fields["forward_mps"] = cap
         return fields, True
     return fields, False
+
+
+def sectors_confident(sectors: Any) -> bool:
+    """Whether sector risks carry enough confidence to be acted on."""
+    try:
+        confidence = float(getattr(sectors, "confidence", 0.0))
+    except (TypeError, ValueError):
+        return False
+    return confidence >= _AVOID_MIN_CONFIDENCE
 
 
 def _risk(sectors: Any, name: str) -> float:

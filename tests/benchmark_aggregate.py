@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Aggregate N independent benchmark runs into one comparable verdict (Phase 5.8).
+"""Aggregate N independent benchmark runs into one comparable verdict.
 
-Phase 5.7 found that repeated runs of the *same* code against the *same* map
-can land anywhere from a clean COMPLETE in 17s (closest pass 0.61m) to a
-FAILSAFE 5.85m short — so a single run cannot tell "this change helped" apart
-from "this run landed in the lucky tail of the distribution". This script
-takes a set of independent benchmark report directories (each produced by
-tests/flight_test.py — see Phase 9) and reports the median and range across
-the set, so before/after comparisons are made between distributions rather
-than between individual samples.
+Repeated runs of the *same* code against the *same* map can land anywhere from
+a clean COMPLETE in 17s (closest pass 0.61m) to a FAILSAFE 5.85m short — so a
+single run cannot tell "this change helped" apart from "this run landed in the
+lucky tail of the distribution". This script takes a set of independent
+benchmark report directories (each produced by tests/flight_test.py) and
+reports the median and range across the set, so before/after comparisons are
+made between distributions rather than between individual samples.
 
 It deliberately does *not* run the benchmarks itself or merge their per-run
 artifacts (flight.jsonl, occupancy galleries, ...) into one report — each run
@@ -18,10 +17,10 @@ aggregation layer on top.
 Usage
 -----
     # Point at a set of report directories produced with the same config:
-    python3 tests/benchmark_aggregate.py reports/benchmarks/phase5.8-maze001-run*
+    python3 tests/benchmark_aggregate.py reports/benchmarks/maze001-run*
 
     # Write the same summary to a file as well:
-    python3 tests/benchmark_aggregate.py --out summary.txt reports/benchmarks/phase5.8-maze001-run*
+    python3 tests/benchmark_aggregate.py --out summary.txt reports/benchmarks/maze001-run*
 """
 
 from __future__ import annotations
@@ -141,7 +140,7 @@ def print_aggregate(agg: dict[str, Any], file: TextIO | None = None) -> None:
     out = file or sys.stdout
     line = "=" * 54
     print(line, file=out)
-    print("  Multi-Run Benchmark Aggregate (Phase 5.8)", file=out)
+    print("  Multi-Run Benchmark Aggregate", file=out)
     print(line, file=out)
 
     if agg["n"] == 0:

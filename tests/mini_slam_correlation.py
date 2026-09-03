@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline mini-SLAM risk/map correlation analysis for Phase 6.2.
+"""Offline mini-SLAM risk/map correlation analysis.
 
 This script may load simulator maps because it is an offline benchmark/report
 tool. DAIC runtime navigation must still not read maps.
@@ -215,7 +215,7 @@ def analyze(log_path: str | Path, map_path: str | Path) -> dict[str, Any]:
 
 def print_report(result: dict[str, Any], file=None) -> None:
     out = file or sys.stdout
-    print("Mini-SLAM Correlation (Phase 6.2)", file=out)
+    print("Mini-SLAM Correlation", file=out)
     print(f"  Log:              {result['log_path']}", file=out)
     print(f"  Map:              {result['map_path']}", file=out)
     print(f"  Mini-SLAM ticks:  {result['mini_slam_ticks']}", file=out)

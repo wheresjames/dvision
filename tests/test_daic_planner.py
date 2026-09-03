@@ -9,7 +9,7 @@ from daic.planner import (
     SEARCH_ALT_M,
     _APPROACH_LOCK_FRAMES, _LANDING_LOCK_FRAMES,
     _LOST_TARGET_TIMEOUT_S,
-    _LOW_BATTERY_PCT, _ARM_TIMEOUT_S,
+    _LOW_BATTERY_PCT, _ARM_TIMEOUT_S, _ARM_RETRY_S,
     _SEARCH_TURN_DPS, _SEARCH_TURN_DEG,
     _SEARCH_LEG_S_BASE, _SEARCH_LEG_S_INC,
 )
@@ -104,12 +104,83 @@ def test_arming_transitions_to_search_when_armed_without_takeoff():
     assert out.command_type == "zero"
 
 
+def test_arming_arms_even_when_the_first_tick_is_late():
+    """The first tick waits on the first frame, so it can land seconds late.
+
+    Arming used to be a one-shot request valid only for 200 ms after the state
+    was entered. When camera start-up pushed the first tick past that window
+    the request was never sent at all, and the run sat disarmed until the arm
+    timeout fired. Six of ten benchmark runs died this way.
+    """
+    p = _new_planner()
+    p.enable({})
+    p._state_entered -= 1.5          # first frame arrived 1.5 s after enable
+
+    out = p.tick(_no_det(), _status(armed="0", mode="DISARMED", z=0.0))
+
+    assert out.command_type == "arm"
+    assert out.command_fields.get("armed") is True
+    assert p.state == State.ARMING
+
+
+def test_arming_repeats_the_request_until_the_vehicle_agrees():
+    """A dropped arm command must not cost the whole run."""
+    p = _new_planner()
+    p.enable({})
+    disarmed = _status(armed="0", mode="DISARMED", z=0.0)
+
+    sent = 0
+    for _ in range(6):               # ~1.5 s of ticks at the retry period
+        if p.tick(_no_det(), disarmed).command_type == "arm":
+            sent += 1
+        p._last_arm_command -= _ARM_RETRY_S
+
+    assert sent == 6
+    assert p.state == State.ARMING
+
+
+def test_arming_stops_asking_once_armed():
+    p = _new_planner()
+    p.enable({})
+    p.tick(_no_det(), _status(armed="0", mode="DISARMED", z=0.0))
+
+    out = p.tick(_no_det(), _status(armed="1", mode="GUIDED", z=0.0))
+
+    assert p.state == State.SEARCH
+    assert out.command_type != "arm"
+
+
+def test_arming_does_not_flood_the_link_with_arm_commands():
+    """Repeats are rate limited; the link carries heartbeats in between."""
+    p = _new_planner()
+    p.enable({})
+    disarmed = _status(armed="0", mode="DISARMED", z=0.0)
+
+    types = [p.tick(_no_det(), disarmed).command_type for _ in range(5)]
+
+    assert types[0] == "arm"
+    assert all(t == "heartbeat" for t in types[1:])
+
+
 def test_arming_failsafe_on_timeout():
     p = _new_planner()
     p.enable({})
+    p._last_arm_command = p._state_entered
     p._state_entered -= _ARM_TIMEOUT_S + 1.0
     out = p.tick(_no_det(), _status(armed="0", mode="DISARMED", z=0.0))
     assert p.state == State.FAILSAFE
+
+
+def test_slow_gui_startup_cannot_timeout_before_first_arm_request():
+    p = _new_planner()
+    p.enable({})
+    p._state_entered -= _ARM_TIMEOUT_S + 10.0
+
+    out = p.tick(_no_det(), _status(armed="0", mode="DISARMED", z=0.0))
+
+    assert p.state == State.ARMING
+    assert out.command_type == "arm"
+    assert out.command_fields == {"armed": True}
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +346,7 @@ def test_approach_lost_timestamp_resets_on_reacquisition():
     assert p.state == State.APPROACH
 
 
-def test_approach_phase1_descent_does_not_trigger_landing():
+def test_approach_descent_does_not_trigger_landing():
     p = _new_planner()
     p._state = State.APPROACH
     p._state_entered = time.monotonic()
@@ -383,3 +454,99 @@ def test_planner_state_matches_output_state():
     p = _new_planner()
     out = p.tick(_no_det(), {})
     assert out.state == p.state
+
+
+# ---------------------------------------------------------------------------
+# Crash handling and obstacle-gated target lock
+#
+# Run 20260826-105908-5c26161f locked onto a target that sat behind a wall,
+# entered APPROACH with front_risk=0.64, and hit the wall 0.64 s later. It then
+# kept commanding forward velocity for a further 5.6 s because nothing in the
+# state machine looked at drone.crashed.
+# ---------------------------------------------------------------------------
+
+def _searching_planner():
+    p = Planner()
+    p.enable(_status())
+    p.tick(_no_det(), _status())
+    time.sleep(0.25)
+    p.tick(_no_det(), _status())
+    assert p.state is State.SEARCH
+    return p
+
+
+def test_crash_transitions_to_failsafe_and_stops_commanding() -> None:
+    p = _searching_planner()
+    status = _status()
+    status["drone.crashed"] = "1"
+
+    out = p.tick(_det(), status)
+
+    assert p.state is State.FAILSAFE
+    assert out.command_type == "zero"
+    assert "crash" in out.status_text
+
+
+def test_crash_failsafe_sticks_on_later_ticks() -> None:
+    p = _searching_planner()
+    status = _status()
+    status["drone.crashed"] = "1"
+    p.tick(_no_det(), status)
+
+    out = p.tick(_det(), _status())
+
+    assert p.state is State.FAILSAFE
+    assert out.command_type == "zero"
+
+
+def test_uncrashed_status_does_not_failsafe() -> None:
+    p = _searching_planner()
+    status = _status()
+    status["drone.crashed"] = "0"
+
+    p.tick(_no_det(), status)
+
+    assert p.state is State.SEARCH
+
+
+def test_high_front_risk_blocks_the_approach_lock() -> None:
+    p = _searching_planner()
+
+    for _ in range(_APPROACH_LOCK_FRAMES * 3):
+        out = p.tick(_det(), _status(), front_risk=0.64)
+
+    assert p.state is State.SEARCH
+    assert "approach lock held" in out.status_text
+
+
+def test_approach_lock_needs_clear_air_not_a_lucky_gap() -> None:
+    """A momentary dip in risk must not complete a lock built up behind a wall."""
+    p = _searching_planner()
+
+    for _ in range(_APPROACH_LOCK_FRAMES - 1):
+        p.tick(_det(), _status(), front_risk=0.0)
+    p.tick(_det(), _status(), front_risk=0.64)      # obstacle appears
+    out = p.tick(_det(), _status(), front_risk=0.0)  # risk dips again
+
+    assert p.state is State.SEARCH
+    assert out.state is State.SEARCH
+
+
+def test_clear_air_still_locks_on() -> None:
+    p = _searching_planner()
+
+    for _ in range(_APPROACH_LOCK_FRAMES):
+        out = p.tick(_det(), _status(), front_risk=0.0)
+
+    assert p.state is State.APPROACH
+    assert out.state is State.APPROACH
+
+
+def test_front_risk_defaults_to_clear_for_existing_callers() -> None:
+    """tick() without front_risk keeps its old behaviour."""
+    p = _searching_planner()
+
+    for _ in range(_APPROACH_LOCK_FRAMES):
+        p.tick(_det(), _status())
+
+    assert p.state is State.APPROACH

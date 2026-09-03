@@ -87,22 +87,22 @@ def test_approach_speed_cap_ramps_with_distance() -> None:
     near = approach_speed_cap(1.5)
     far = approach_speed_cap(3.5)
     assert near < far
-    assert near >= 1.2
+    assert near >= 0.12
     assert approach_speed_cap(0.5) == approach_speed_cap(1.5)  # floored
 
 
 def test_search_brake_caps_forward_near_mapped_wall_without_stalling() -> None:
     # A close mapped wall ahead (front_block_occ_m=1.5) caps forward to the
-    # navigable floor instead of zeroing it (Phase 6.9): the drone keeps moving
-    # slowly so A* can carry out the detour.
+    # navigable floor instead of zeroing it: the drone keeps moving slowly so
+    # A* can carry out the detour.
     out, active = apply_search_approach_brake(
-        {"forward_mps": 4.5, "right_mps": 0.0, "yaw_rate_dps": 0.0},
+        {"forward_mps": 0.45, "right_mps": 0.0, "yaw_rate_dps": 0.0},
         _sectors(front=1.0),
         front_block_occ_m=1.5,
     )
 
     assert active
-    assert 1.0 < out["forward_mps"] < 4.5  # slowed, but not stalled to zero
+    assert 0.10 < out["forward_mps"] < 0.45  # slowed, but not stalled to zero
 
 
 def test_search_brake_falls_back_to_reactive_when_no_mapped_wall() -> None:

@@ -1,6 +1,9 @@
 """Tests for daic local occupancy mapping and path planning."""
 
+import pytest
+
 from daic.local_map import (
+    _CAMERA_HALF_FOV_DEG, _SECTOR_BANDS,
     LocalOccupancyMap, Pose2, pose_from_status, target_xy_from_status,
 )
 from daic.orb_slam3_detector import ObstacleSectors
@@ -35,6 +38,22 @@ def test_pose_from_status_reads_sim_pose() -> None:
     })
 
     assert pose == Pose2(3.5, 4.5, 180.0)
+
+
+def test_compass_heading_north_routes_forward_to_north_target() -> None:
+    local_map = LocalOccupancyMap(cell_m=0.5, half_width_m=8.0)
+    pose = pose_from_status({
+        "drone.x_m": "17.5",
+        "drone.y_m": "16.5",
+        "drone.heading_deg": "0",
+    })
+
+    assert pose is not None
+    planned = local_map.plan_to_target(pose, (17.5, 7.5))
+
+    assert planned is not None
+    assert planned.fields["forward_mps"] > 0.0
+    assert abs(planned.fields["yaw_rate_dps"]) < 1.0
 
 
 def test_compass_heading_north_routes_forward_to_north_target() -> None:
@@ -473,9 +492,8 @@ def test_route_command_turns_in_place_for_large_yaw_error() -> None:
 
     assert planned is not None
     assert planned.fields["forward_mps"] == 0.0
-    # map_yaw 0 facing a target at bearing 270 is a -90 deg error; reaching it
-    # means decreasing map_yaw, which dsim achieves with a positive yaw_rate.
-    assert planned.fields["yaw_rate_dps"] > 0.0
+    # A negative bearing error is a public left/negative-yaw command.
+    assert planned.fields["yaw_rate_dps"] < 0.0
     assert abs(planned.fields["yaw_rate_dps"]) <= 18.0
 
 
@@ -487,6 +505,45 @@ def test_route_command_moves_forward_when_nearly_aligned() -> None:
 
     assert planned is not None
     assert planned.fields["forward_mps"] > 0.0
-    # map_yaw 250 facing a target at bearing 270 is a +20 deg error; reaching it
-    # means increasing map_yaw, which dsim achieves with a negative yaw_rate.
-    assert planned.fields["yaw_rate_dps"] < 0.0
+    # A positive bearing error is a public right/positive-yaw command.
+    assert planned.fields["yaw_rate_dps"] > 0.0
+
+
+# --- sector bearings match the camera ----------------------------------
+
+# The camera's actual half-angle, as a reviewed literal. Deliberately *not*
+# local_map's own _CAMERA_HALF_FOV_DEG: a test that bounds a constant by itself
+# passes no matter what that constant becomes, which is how the original
+# +/-70 degree bug would slip straight back in.
+_REVIEWED_CAMERA_HALF_FOV_DEG = 35.0
+
+
+def test_local_map_agrees_with_the_simulator_about_the_camera() -> None:
+    """The map's idea of the FOV must track the camera that produces the frames."""
+    from dsim.dsim import Panda3DRenderer
+
+    assert _CAMERA_HALF_FOV_DEG == pytest.approx(_REVIEWED_CAMERA_HALF_FOV_DEG)
+    assert _CAMERA_HALF_FOV_DEG == pytest.approx(Panda3DRenderer.CAM_FOV_H / 2.0), (
+        f"local_map assumes a +/-{_CAMERA_HALF_FOV_DEG:.1f} deg camera but dsim "
+        f"renders {Panda3DRenderer.CAM_FOV_H:.1f} deg horizontally; observations "
+        "would be planted outside the view that produced them")
+
+
+def test_every_sector_is_planted_inside_the_camera_field_of_view() -> None:
+    """The map planted left/right obstacles at +/-70 deg on a +/-35 deg camera.
+
+    An observation can only come from a bearing the camera can actually see, so
+    planting one outside the FOV smears a wall into an arc of phantom cells.
+    """
+    limit = _REVIEWED_CAMERA_HALF_FOV_DEG
+    for name, (bearing, half_width) in _SECTOR_BANDS.items():
+        assert abs(bearing) <= limit, name
+        assert abs(bearing) + half_width <= limit + 1e-6, name
+
+
+def test_sector_bearings_are_ordered_left_to_right() -> None:
+    order = ["left", "front_left", "front", "front_right", "right"]
+    bearings = [_SECTOR_BANDS[n][0] for n in order]
+
+    assert bearings == sorted(bearings)
+    assert _SECTOR_BANDS["front"][0] == 0.0

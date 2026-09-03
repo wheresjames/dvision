@@ -52,6 +52,13 @@ TAKEOFF_ALT_M   = 3.0   # legacy constant; daic no longer commands takeoff by de
 _APPROACH_LOCK_FRAMES  = 5
 _LANDING_LOCK_FRAMES   = 10
 
+# Front obstacle risk above which the SEARCH → APPROACH lock cannot accumulate.
+# The target may be visible straight through or over an obstacle, and APPROACH
+# visual-servos toward it; locking on while a wall is in the way hands control
+# to a servo that has no notion of the obstacle. Hold the lock at zero until the
+# path ahead is clear so APPROACH is only ever entered from clear air.
+_APPROACH_LOCK_MAX_FRONT_RISK = 0.25
+
 # Seconds without a valid detection before giving up and acting on the loss.
 # During this window the drone hovers in place and waits for reacquisition.
 _LOST_TARGET_TIMEOUT_S = 2.5
@@ -72,6 +79,8 @@ _LAND_COMPLETE_ALT_M = 0.25
 
 # Max seconds to wait for arm / takeoff confirmation before FAILSAFE.
 _ARM_TIMEOUT_S    = 5.0
+# How often to repeat the arm request while waiting for the vehicle to agree.
+_ARM_RETRY_S      = 0.25
 _TAKEOFF_TIMEOUT_S = 15.0
 
 # Stale-status timeout.
@@ -114,6 +123,7 @@ class Planner:
         self.img_h = img_h
         self._state = State.IDLE
         self._state_entered: float = time.monotonic()
+        self._last_arm_command: float = float("-inf")
         self._approach_count = 0
         self._landing_count  = 0
         self._target_last_seen: float = 0.0   # monotonic; 0 = not yet seen
@@ -121,6 +131,7 @@ class Planner:
         self._last_d_horiz: float | None = None  # last reliable distance estimate
         self._search = _SearchState()
         self._status_text = "idle"
+        self._front_risk = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -141,13 +152,18 @@ class Planner:
         return PlannerOutput(state=State.IDLE, command_type="zero",
                              command_fields={}, status_text="AI disabled")
 
-    def tick(self, detection: Detection, status: dict) -> PlannerOutput:
+    def tick(self, detection: Detection, status: dict,
+             front_risk: float = 0.0) -> PlannerOutput:
         """Advance the state machine one step.
 
         *status* is the dict returned by memkv.getAll(); missing keys default
         to safe values so the planner can run even before all fields arrive.
+        *front_risk* is the current fused front obstacle risk (0..1); it gates
+        the SEARCH → APPROACH lock so the visual servo is never handed a target
+        that sits behind a wall.
         """
         now = time.monotonic()
+        self._front_risk = _clamp01(front_risk)
 
         # ── Global failsafe checks ────────────────────────────────────
         if self._state not in (State.IDLE, State.COMPLETE, State.FAILSAFE):
@@ -168,23 +184,37 @@ class Planner:
                                  send_command=False)
 
         if s == State.ARMING:
-            elapsed = now - self._state_entered
-            if elapsed < 0.2:
-                return PlannerOutput(state=s, command_type="arm",
-                                     command_fields={"armed": True},
-                                     status_text="arming…")
             if _armed(status):
                 self._transition(State.SEARCH)
                 self._search = _SearchState(heading_target=_heading(status))
                 return PlannerOutput(state=State.SEARCH,
                                      command_type="zero", command_fields={},
                                      status_text="armed, starting search")
+            # GUI startup may spend several seconds compiling shaders and
+            # processing its first frame. The arming budget begins when an arm
+            # request is actually emitted, not when AI was enabled; otherwise
+            # the very first planner tick can time out without ever asking the
+            # vehicle to arm.
+            if self._last_arm_command == float("-inf"):
+                self._state_entered = now
+                self._last_arm_command = now
+                return PlannerOutput(state=s, command_type="arm",
+                                     command_fields={"armed": True},
+                                     status_text="arming…")
+            elapsed = now - self._state_entered
             if elapsed > _ARM_TIMEOUT_S:
                 self._transition(State.FAILSAFE)
                 self._status_text = "failsafe: arm timeout"
                 return PlannerOutput(state=State.FAILSAFE,
                                      command_type="zero", command_fields={},
                                      status_text=self._status_text)
+            # Keep asking. Arming is idempotent, so repeat it until telemetry
+            # agrees or the budget measured from the first request expires.
+            if now - self._last_arm_command >= _ARM_RETRY_S:
+                self._last_arm_command = now
+                return PlannerOutput(state=s, command_type="arm",
+                                     command_fields={"armed": True},
+                                     status_text="arming…")
             return PlannerOutput(state=s, command_type="heartbeat",
                                  command_fields={}, status_text="waiting for arm…",
                                  send_command=False)
@@ -220,7 +250,12 @@ class Planner:
 
     def _search_tick(self, detection: Detection,
                      status: dict, now: float) -> PlannerOutput:
-        if detection.visible and detection.confidence > 0.4:
+        if self._front_risk >= _APPROACH_LOCK_MAX_FRONT_RISK:
+            # Obstacle ahead: the target may well be visible through or over it.
+            # Hold the lock at zero rather than merely pausing it, so APPROACH
+            # requires _APPROACH_LOCK_FRAMES of clear air, not a lucky gap.
+            self._approach_count = 0
+        elif detection.visible and detection.confidence > 0.4:
             self._approach_count += 1
             if self._approach_count >= _APPROACH_LOCK_FRAMES:
                 self._approach_count = 0
@@ -234,10 +269,14 @@ class Planner:
             self._approach_count = 0
 
         ctrl = self._expanding_square(now)
+        status_text = f"searching (leg {self._search.leg_index})"
+        if (self._front_risk >= _APPROACH_LOCK_MAX_FRONT_RISK
+                and detection.visible):
+            status_text += f"; approach lock held (front risk {self._front_risk:.2f})"
         return PlannerOutput(state=State.SEARCH,
                              command_type="velocity",
                              command_fields=ctrl.as_command_fields(),
-                             status_text=f"searching (leg {self._search.leg_index})")
+                             status_text=status_text)
 
     def _approach_tick(self, detection: Detection,
                        status: dict, now: float) -> PlannerOutput:
@@ -428,6 +467,11 @@ class Planner:
     # ------------------------------------------------------------------
 
     def _check_failsafes(self, status: dict, now: float) -> str | None:
+        # A crashed airframe is not flying any more. Without this the state
+        # machine keeps servoing a dead drone and the log fills with forward
+        # commands issued long after impact.
+        if _crashed(status):
+            return "crashed"
         last_s = _last_status_age(status, now)
         if last_s > _STATUS_STALE_S:
             return "status stale"
@@ -444,6 +488,8 @@ class Planner:
         now = time.monotonic()
         self._state = new_state
         self._state_entered = now
+        if new_state == State.ARMING:
+            self._last_arm_command = float("-inf")
         self._approach_count  = 0
         self._landing_count   = 0
         # _last_d_horiz is intentionally NOT reset here so the trajectory
@@ -472,6 +518,15 @@ def _gps_dist_to_target(s: dict) -> float:
 
 def _armed(s: dict) -> bool:
     return s.get("drone.armed", "0") == "1"
+
+def _crashed(s: dict) -> bool:
+    return str(s.get("drone.crashed", "0")).strip() in ("1", "true", "True")
+
+def _clamp01(v: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.0
 
 def _mode(s: dict) -> str:
     return s.get("drone.mode", "DISARMED")

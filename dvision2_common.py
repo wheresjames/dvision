@@ -6,6 +6,7 @@ import json
 import math
 import re
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,49 @@ STATUS_KEYS = [
     "sim.map",
     "sim.time_s",
     "sim.report_dir",
+    "sim.camera_in_geometry",
+    "vehicle.type",
+    "vehicle.frames",
+    "vehicle.accepts_position",
+    "vehicle.accepts_velocity",
+    "vehicle.accepts_attitude",
+    "vehicle.supports_missions",
+    "vehicle.setpoint_timeout_s",
+    "vehicle.max_speed_mps",
+    "vehicle.max_accel_mps2",
+    "gps.fix_type",
+    "gps.satellites",
+    "gps.hdop",
+    "gps.vdop",
+    "est.attitude_valid",
+    "est.local_position_valid",
+    "est.global_position_valid",
+    "est.velocity_valid",
+    "wind.speed_mps",
+    "wind.dir_deg",
+    "wind.gust_mps",
+    "geofence.box",
+    "geofence.action",
+    "realism.telemetry_latency_ms",
+    "realism.telemetry_jitter_ms",
+    "realism.sensor_noise",
+    "realism.battery_failsafe_pct",
+    "realism.battery_drain_pct_s",
+    "realism.seed",
+    "origin.lat_deg",
+    "origin.lon_deg",
+    "origin.alt_m",
+    "home.lat_deg",
+    "home.lon_deg",
+    "home.alt_m",
+    "control.owner",
+    "control.lease_age_s",
+    "control.lease_timeout_s",
+    "setpoint.age_s",
+    "failsafe.reason",
+    "command.result.request_id",
+    "command.result.accepted",
+    "command.result.reason",
     "drone.armed",
     "drone.mode",
     "drone.x_m",
@@ -46,7 +90,12 @@ STATUS_KEYS = [
     "status.message",
     "camera.fov_h_deg",
     "camera.fov_v_deg",
+    "camera.tx_m",
+    "camera.ty_m",
+    "camera.tz_m",
+    "camera.roll_deg",
     "camera.pitch_deg",
+    "camera.yaw_deg",
     "camera.fx_px",
     "camera.fy_px",
     "camera.cx_px",
@@ -106,6 +155,46 @@ def validate_id(instance_id: str) -> str:
     return instance_id
 
 
+#: Where a run's artifacts live when the instance has no id. An id is normally
+#: required, so this is a fallback for programmatic use rather than a mode.
+DEFAULT_REPORT_ID = "default"
+
+
+def new_run_id() -> str:
+    """A sortable, collision-resistant name for one run.
+
+    The timestamp so runs sort and can be found by eye; the random suffix so
+    two instances started in the same second cannot land in the same
+    directory. Defined here rather than in the simulator so every module that
+    ever mints one produces the same shape.
+    """
+    import datetime
+    import uuid
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def report_root(instance_id: str | None, run_id: str, *,
+                root: Path | None = None) -> Path:
+    """``reports/<id>/<run_id>/`` — where one run's artifacts live.
+
+    Grouping by instance id first keeps concurrent instances apart at the top
+    level: ``area1`` and ``area2`` running side by side produce two trees
+    rather than one interleaved list that can only be untangled by opening
+    files. Each component then writes into its own subdirectory of the
+    returned root -- ``dsim/``, ``daic/``, ``dway/`` -- so a run's pieces stay
+    together and no component has to coordinate a name with any other.
+
+    The simulator owns the root and publishes it as the ``sim.report_dir``
+    status key; every other module reads it from there rather than deriving
+    one, which is what keeps them in the same directory.
+    """
+    base = Path(root) if root is not None else Path(__file__).resolve().parent / "reports"
+    group = validate_id(instance_id) if instance_id else DEFAULT_REPORT_ID
+    return base / group / run_id
+
+
 def shared_names(instance_id: str) -> dict[str, str]:
     validate_id(instance_id)
     base = f"/dvision2.{instance_id}"
@@ -120,6 +209,44 @@ def encode_command(command_type: str, **fields: Any) -> str:
     payload = {"magic": COMMAND_MAGIC, "type": command_type}
     payload.update(fields)
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def new_control_identity(client_id: str) -> tuple[str, str]:
+    """Return a validated controller id and an opaque proposed lease id."""
+    return validate_id(client_id), uuid.uuid4().hex
+
+
+def controlled_command_with_id(command_type: str, source_id: str, lease_id: str,
+                               **fields: Any) -> tuple[str, str]:
+    """Encode one correlated command and return its request id alongside it.
+
+    A caller that waits for the acknowledgement needs the id it is waiting for,
+    and minting one here rather than letting each client invent its own keeps
+    every correlated command on the same field.
+    """
+    request_id = uuid.uuid4().hex
+    return request_id, encode_command(
+        command_type, source_id=validate_id(source_id), lease_id=lease_id,
+        request_id=request_id, **fields)
+
+
+def controlled_command(command_type: str, source_id: str, lease_id: str,
+                       **fields: Any) -> str:
+    """Encode one correlated command from a control-lease holder."""
+    return controlled_command_with_id(command_type, source_id, lease_id,
+                                      **fields)[1]
+
+
+def map_to_local_ned(x_m: float, y_m: float, z_m: float,
+                     width_m: float, height_m: float) -> tuple[float, float, float]:
+    """Convert public map coordinates (east/south/up) to local NED."""
+    return height_m / 2.0 - y_m, x_m - width_m / 2.0, -z_m
+
+
+def local_ned_to_map(north_m: float, east_m: float, down_m: float,
+                     width_m: float, height_m: float) -> tuple[float, float, float]:
+    """Convert local NED at map centre back to map coordinates."""
+    return east_m + width_m / 2.0, height_m / 2.0 - north_m, -down_m
 
 
 def decode_command(raw: str | bytes) -> dict[str, Any] | None:

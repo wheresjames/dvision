@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from typing import Any
 
 import numpy as np
@@ -30,8 +31,39 @@ _MIN_RANGE_SPEED_MPS = 0.06
 _MIN_TTC_RATIO = 0.002
 _MIN_RANGE_M = 0.6
 _MAX_RANGE_M = 8.0
-_TTC_RANGE_GAIN = 8.0
-_MIN_PLAUSIBLE_RANGE_M = 1.0
+# Percentile of the per-pixel divergence used as the sector's divergence.
+# The sector images a mix of surfaces; the *nearest* one has the largest
+# divergence, and that is the one obstacle avoidance cares about, so this is a
+# robust max rather than a central tendency. Calibrated against dsim ground
+# truth on a straight-in wall approach at 0.35/0.6/1.0 m/s: the estimate is
+# near-unbiased at contact range (median est/true 1.08 within 1 m) and
+# conservatively short beyond it (0.86 at 1-2 m, 0.75 at 2-3 m). That asymmetry
+# is deliberate - reading a wall as nearer than it is brakes early, reading it
+# as further drives into it. Lower percentiles bias long and dangerous: the
+# original 45th read 1.41x too far inside 1 m.
+_DIVERGENCE_PCT = 98.0
+# Below this the reading is more often the floor parallaxing beneath the
+# pitched-forward camera than a navigable obstacle. Kept well under the
+# calibrated contact-range accuracy so a genuine close wall still maps.
+_MIN_PLAUSIBLE_RANGE_M = 0.6
+
+# Per-sector temporal median over the range estimate. The per-tick estimate is
+# accurate in the mean but scatters by roughly +/-50% frame to frame, which is
+# enough that consecutive marks land in different grid cells and the local map's
+# flow-confirmation window (which needs repeat hits on one cell) never
+# confirms - so an accurate estimator maps *less* of the wall than a broken one
+# that returned a constant. Distance to a wall changes smoothly, so a short
+# median is well justified: at 30 fps this spans 0.23 s, about 0.14 m of travel
+# at cruise, while cutting the cell-to-cell jitter that blocks confirmation.
+_RANGE_MEDIAN_TICKS = 7
+# Drop the history for a sector that has gone this long without a fresh
+# reading, so a stale distance cannot be revived after the drone has moved on.
+_RANGE_HISTORY_GAP_TICKS = 10
+
+_SECTOR_RANGE_ATTRS = (
+    "front_range_m", "front_left_range_m", "front_right_range_m",
+    "left_range_m", "right_range_m",
+)
 
 
 class OpticalFlowAvoidance:
@@ -43,6 +75,11 @@ class OpticalFlowAvoidance:
         self._forward_speed_mps = 0.0
         self._persisted = _NULL_SECTORS
         self._status_text = "initialising"
+        self._range_hist: dict[str, deque] = {
+            attr: deque(maxlen=_RANGE_MEDIAN_TICKS) for attr in _SECTOR_RANGE_ATTRS
+        }
+        self._range_last_tick: dict[str, int] = {}
+        self._tick = 0
 
     @property
     def status_text(self) -> str:
@@ -53,6 +90,9 @@ class OpticalFlowAvoidance:
         self._prev_t = None
         self._persisted = _NULL_SECTORS
         self._status_text = "reset"
+        for hist in self._range_hist.values():
+            hist.clear()
+        self._range_last_tick.clear()
 
     def set_motion_from_status(self, status: dict[str, Any]) -> None:
         """Update body-forward speed used to turn TTC into range."""
@@ -64,6 +104,35 @@ class OpticalFlowAvoidance:
             return
         self._forward_speed_mps = _body_forward_speed(
             float(vx), float(vy), float(yaw),
+        )
+
+    def _smooth_ranges(self, sectors: ObstacleSectors) -> ObstacleSectors:
+        """Replace each sector range with a short running median.
+
+        See _RANGE_MEDIAN_TICKS: the raw per-tick estimate is accurate in the
+        mean but too jittery for the local map to confirm a cell.
+        """
+        self._tick += 1
+        smoothed: dict[str, float | None] = {}
+        for attr in _SECTOR_RANGE_ATTRS:
+            hist = self._range_hist[attr]
+            last = self._range_last_tick.get(attr)
+            if last is not None and self._tick - last > _RANGE_HISTORY_GAP_TICKS:
+                hist.clear()
+            value = getattr(sectors, attr, None)
+            if value is not None and math.isfinite(float(value)):
+                hist.append(float(value))
+                self._range_last_tick[attr] = self._tick
+            smoothed[attr] = _median(list(hist)) if hist else None
+        return ObstacleSectors(
+            front=sectors.front,
+            front_left=sectors.front_left,
+            front_right=sectors.front_right,
+            left=sectors.left,
+            right=sectors.right,
+            confidence=sectors.confidence,
+            method=sectors.method,
+            **smoothed,
         )
 
     def detect_obstacles(self, frame_rgb: np.ndarray) -> ObstacleSectors:
@@ -95,6 +164,7 @@ class OpticalFlowAvoidance:
         )
         dt_s = (now - prev_t) if prev_t is not None else None
         instant = _flow_to_sectors(flow, self._forward_speed_mps, dt_s)
+        instant = self._smooth_ranges(instant)
         sectors = _persist_sectors(self._persisted, instant)
         self._persisted = sectors
         self._status_text = (
@@ -103,6 +173,15 @@ class OpticalFlowAvoidance:
             f"r={max(sectors.front_right, sectors.right):.2f}"
         )
         return sectors
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return 0.5 * (ordered[mid - 1] + ordered[mid])
 
 
 def fuse_obstacle_sectors(*items: ObstacleSectors) -> ObstacleSectors:
@@ -282,23 +361,31 @@ def _sector_metrics(expansion: np.ndarray, ratio: np.ndarray,
     if vals.size < 25:
         return risk, None
 
-    strong_ratio = float(np.percentile(vals, 45))
-    if strong_ratio < _MIN_TTC_RATIO:
+    divergence = float(np.percentile(vals, _DIVERGENCE_PCT))
+    if divergence < _MIN_TTC_RATIO:
         return risk, None
-    range_m = float(np.clip((range_scale_m / strong_ratio) * _TTC_RANGE_GAIN,
-                            _MIN_RANGE_M, _MAX_RANGE_M))
-    if range_m < _MIN_PLAUSIBLE_RANGE_M:
-        # Phase 6.1: a TTC range this short is far more often the floor
-        # parallaxing close beneath the pitched-forward camera during genuine
-        # forward translation (the same near-field surface _flow_to_sectors's
-        # ROI comment names as a "permanently close surface") than a real
+    # Radial flow from pure translation toward a surface at distance Z is
+    # f_r = r * (V/Z) * dt, so ratio = f_r / r = V*dt/Z and Z = V*dt / ratio.
+    # range_scale_m is V*dt, so this is the range directly - it needs no
+    # tuning gain. An earlier 8x multiplier here drove every reading into the
+    # _MAX_RANGE_M clamp, so the map reported a constant 8 m all the way to
+    # impact; see the calibration note on _DIVERGENCE_PCT.
+    raw_range_m = range_scale_m / divergence
+    # Judge plausibility on the raw measurement, before clamping. Clamping
+    # first would lift an implausible reading up to _MIN_RANGE_M and, whenever
+    # that floor is >= _MIN_PLAUSIBLE_RANGE_M, the guard below could never fire.
+    if raw_range_m < _MIN_PLAUSIBLE_RANGE_M:
+        # A TTC range this short is far more often the floor parallaxing
+        # close beneath the pitched-forward camera during genuine forward
+        # translation (the same near-field surface _flow_to_sectors's ROI
+        # comment names as a "permanently close surface") than a real
         # navigable obstacle -- anything that close to a route-relevant wall
         # would already be inside direct collision-braking range. Keep the
         # risk (it still drives avoidance) but drop the implausible distance
         # so the local map falls back to its conservative default instead of
         # planting a phantom wall in the drone's own grid cell.
         return risk, None
-    return risk, range_m
+    return risk, float(np.clip(raw_range_m, _MIN_RANGE_M, _MAX_RANGE_M))
 
 
 def _range_scale_m(forward_speed_mps: float, dt_s: float | None) -> float | None:

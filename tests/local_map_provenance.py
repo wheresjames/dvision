@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Summarize LocalOccupancyMap provenance from benchmark flight logs.
 
-Phase 6.3 tool: explains which source/sector/range class produced close
-`front_occ_m` cells. It reads DAIC logs only; no simulator map is required.
+Explains which source/sector/range class produced close `front_occ_m` cells.
+It reads DAIC logs only; no simulator map is required.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def analyze(log_path: str | Path) -> dict[str, Any]:
 
 def print_report(result: dict[str, Any], file=None) -> None:
     out = file or sys.stdout
-    print("Local-Map Provenance (Phase 6.3)", file=out)
+    print("Local-Map Provenance", file=out)
     print(f"  Log:                  {result['log_path']}", file=out)
     print(f"  Ticks:                {result['tick_count']}", file=out)
     print(f"  front_occ_m <= {result['front_occ_close_threshold_m']} m: "

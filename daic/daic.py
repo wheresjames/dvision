@@ -24,13 +24,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dvision2_common import (
-    STATUS_KEYS, encode_command, load_pymembus,
+    STATUS_KEYS, controlled_command, load_pymembus, new_control_identity,
     restore_window_pos, save_window_pos, shared_names, validate_id,
 )
 from daic.detector import detect, Detection
 from daic.planner import Planner, State
 from daic.flight_log import FlightLogger
-from daic.avoidance import apply_obstacle_avoidance, apply_search_approach_brake
+from daic.avoidance import (apply_obstacle_avoidance, apply_search_approach_brake,
+                            sectors_confident)
 from daic.optical_flow_avoidance import (
     OpticalFlowAvoidance, fuse_obstacle_sectors,
 )
@@ -222,6 +223,8 @@ _BTN_BG    = "#21262d"
 _BTN_ACT   = "#30363d"
 _VIDEO_BG  = "#010409"
 _SEARCH_HOLD_YAW_DPS = 18.0
+# How often the display-only map canvases are redrawn, in seconds.
+_MAP_REDRAW_PERIOD_S = 0.2
 _APPROACH_BLOCK_RISK = 0.25
 _APPROACH_BLOCK_FRONT_OCC_M = 1.5
 
@@ -233,6 +236,17 @@ def _search_hold_scan_fields() -> dict:
         "up_mps": 0.0,
         "yaw_rate_dps": _SEARCH_HOLD_YAW_DPS,
     }
+
+
+def _planner_front_risk(sectors) -> float:
+    """Front obstacle risk handed to the planner's APPROACH lock gate.
+
+    Confidence-gated: a rangeless, low-confidence sector should not be able to
+    hold the target lock off indefinitely.
+    """
+    if not sectors_confident(sectors):
+        return 0.0
+    return _frontish_risk(sectors)
 
 
 def _frontish_risk(sectors) -> float:
@@ -352,6 +366,42 @@ def _display_sectors(sectors: ObstacleSectors) -> ObstacleSectors:
     return sectors
 
 
+def _slam_canvas_point(wx: float, wz: float,
+                       x_min: float, x_max: float,
+                       z_min: float, z_max: float,
+                       margin: int, use: int) -> tuple[int, int]:
+    """Project a camera-frame (X starboard, Z forward) point to top-down canvas pixels.
+
+    Camera X+ is starboard and draws right; camera Z+ is forward and draws up,
+    because canvas Y grows downward. This is the same handedness
+    ``ObstacleSectors`` uses, so a point counted in the ``right`` sector is
+    drawn on the right of the mini-map.
+    """
+    px = margin + int(((wx - x_min) / (x_max - x_min)) * use)
+    py = margin + int((1.0 - (wz - z_min) / (z_max - z_min)) * use)
+    return px, py
+
+
+def _slam_drone_marker(cx: int, cy: int, heading_rad: float,
+                       size: int = 7) -> tuple[tuple[int, int], ...]:
+    """Nose, port and starboard canvas points of the drone marker.
+
+    Canvas X grows right and canvas Y grows down, so at heading 0 the nose
+    points up the canvas and the starboard vertex draws to the right of the
+    port one -- the same handedness ``_slam_canvas_point`` gives the point
+    cloud. Kept out of the draw call so that agreement is testable without a
+    display server.
+    """
+    back = int(size * 0.55)
+
+    def point(angle: float, radius: float) -> tuple[int, int]:
+        return (cx + int(math.sin(angle) * radius),
+                cy - int(math.cos(angle) * radius))
+
+    return point(heading_rad, size), point(heading_rad - 2.5, back), \
+        point(heading_rad + 2.5, back)
+
+
 def _annotate_slam(frame_rgb: np.ndarray,
                    sectors: ObstacleSectors,
                    tracking_state: int,
@@ -467,6 +517,7 @@ class DaicController:
         self.args = args
         self.pymembus = load_pymembus()
         self.names = shared_names(args.id)
+        self.control_source, self.control_lease = new_control_identity(f"daic-{args.id}")
 
         self.video   = None
         self.command = None
@@ -475,6 +526,9 @@ class DaicController:
         self.last_status_time = 0.0
         self.last_video_seq  = -1
         self.running = True
+        self._closed = False
+        self._next_tick = 0.0
+        self._last_map_draw = 0.0
 
         self.health   = Health()
         self.planner  = Planner(img_w=args.video_w, img_h=args.video_h)
@@ -734,6 +788,7 @@ class DaicController:
             cmd = pm.memcmd()
             if cmd.open(self.names["command"], self.args.cmd_size):
                 self.command = cmd
+                self._send("acquire_control", quiet=True)
                 self.health.ok("command", "connected")
             else:
                 self.health.wait("command", "waiting")
@@ -769,6 +824,7 @@ class DaicController:
             self.reporter = RunReporter(Path(report_dir) / "daic")
 
     def run(self) -> None:
+        self._next_tick = time.monotonic() + 0.05
         self.root.after(50, self.tick)
         self.root.mainloop()
 
@@ -778,6 +834,7 @@ class DaicController:
         now = time.monotonic()
 
         self.open_missing()
+        self._maintain_control(now)
         if self._pending_enable_ai and self.command is not None:
             self._pending_enable_ai = False
             self._toggle_ai()
@@ -787,9 +844,34 @@ class DaicController:
         self._update_conn_text(now)
         self._run_ai(now)
         self._update_health_ui()
-        self._draw_slam_map()
-        self._draw_local_map()
-        self.root.after(max(10, int(1000 / max(1, self.args.fps))), self.tick)
+        # Map canvases are display only and cost more than the whole control
+        # path. Redrawing them every tick was the difference between the UI
+        # running the control loop at 18 Hz and at the rate the headless agent
+        # gets; throttling them changes what the operator sees, never what is
+        # sent.
+        if now - self._last_map_draw >= _MAP_REDRAW_PERIOD_S:
+            self._last_map_draw = now
+            self._draw_slam_map()
+            self._draw_local_map()
+        self._schedule_next_tick()
+
+    def _schedule_next_tick(self) -> None:
+        """Schedule the next tick against an absolute deadline.
+
+        ``after(period)`` sleeps a full period *after* the work finishes, so the
+        achieved rate is 1/(period + work) rather than 1/period. At 30 fps with
+        ~21 ms of work that lands at 18 Hz, below the control-rate floor, and
+        the loop silently misses it by exactly the time it spent working.
+        """
+        period = 1.0 / max(1.0, float(self.args.fps))
+        self._next_tick += period
+        delay = self._next_tick - time.monotonic()
+        if delay < -period:
+            # Fell far enough behind that catching up would burn the CPU on a
+            # backlog nobody will see; resynchronise instead.
+            self._next_tick = time.monotonic() + period
+            delay = period
+        self.root.after(max(1, int(delay * 1000.0)), self.tick)
 
     def _update_video(self) -> None:
         if self.video is None:
@@ -904,6 +986,9 @@ class DaicController:
         status_snap: dict = {}
         if self.status is not None:
             status_snap = self.status.getAll()
+        if status_snap.get("control.owner") != self.control_source:
+            self._send("acquire_control", quiet=True)
+            return
 
         # Inject wall-clock staleness info.
         stale = now - self.last_status_time > 2.0
@@ -916,7 +1001,8 @@ class DaicController:
             self.local_map.update(pose, self._last_sectors)
 
         try:
-            out = self.planner.tick(self.last_detection, status_snap)
+            out = self.planner.tick(self.last_detection, status_snap,
+                                    front_risk=_planner_front_risk(self._last_sectors))
             self.health.ok("planner", out.status_text[:40])
         except Exception as exc:
             self.health.err("planner", str(exc)[:40])
@@ -960,11 +1046,13 @@ class DaicController:
                     self.health.warn("planner", "local route unavailable")
             if out.command_type == "velocity" and out.state == State.SEARCH:
                 front_block_m = None
+                front_block_age = None
                 if pose is not None:
-                    front_block_m = self.local_map.diagnostics(
-                        pose, target_xy).get("front_block_occ_m")
+                    diag = self.local_map.diagnostics(pose, target_xy)
+                    front_block_m = diag.get("front_block_occ_m")
+                    front_block_age = diag.get("front_block_occ_age_ticks")
                 fields, avoiding = apply_search_approach_brake(
-                    fields, self._last_sectors, front_block_m)
+                    fields, self._last_sectors, front_block_m, front_block_age)
                 if avoiding:
                     self.health.warn("planner", f"avoid {self._last_sectors.method}")
                     effective_status = f"{effective_status}; avoid {self._last_sectors.method}"
@@ -1016,6 +1104,17 @@ class DaicController:
 
         # Heartbeat roughly every second regardless.
         if now - self._last_heartbeat >= 1.0:
+            self._send("heartbeat", quiet=True)
+            self._last_heartbeat = now
+
+    def _maintain_control(self, now: float) -> None:
+        if self.command is None or self.status is None:
+            return
+        owner = self.status.getAll().get("control.owner", "")
+        if owner != self.control_source:
+            self._send("acquire_control", quiet=True)
+            self._last_heartbeat = now
+        elif now - self._last_heartbeat >= 1.0:
             self._send("heartbeat", quiet=True)
             self._last_heartbeat = now
 
@@ -1084,9 +1183,9 @@ class DaicController:
         fwd = pts_cam[:, 2] > 0.05
         pts_cam = pts_cam[fwd]
 
-        # Canvas: X left = camera X (the frame fed to SLAM is horizontally flipped
-        # by _client_rgb_frame, so camera X+ is the left of the displayed image).
-        # Z forward = camera Z (north = up in canvas).
+        # Canvas: camera X+ is starboard and camera Z+ is forward (the same
+        # convention _project_sectors uses for its left/right risk arcs), so
+        # X+ draws right and Z+ draws up on this top-down view.
         mx, mz = pts_cam[:, 0], pts_cam[:, 2]
         drone_xw, drone_zw = 0.0, 0.0   # drone at origin
         heading = 0.0                     # always faces up (north) in canvas
@@ -1106,9 +1205,7 @@ class DaicController:
         use = sz - 2 * M
 
         def w2c(wx: float, wz: float) -> tuple[int, int]:
-            px = M + int((1.0 - (wx - x_min) / (x_max - x_min)) * use)
-            py = M + int((1.0 - (wz - z_min) / (z_max - z_min)) * use)
-            return px, py
+            return _slam_canvas_point(wx, wz, x_min, x_max, z_min, z_max, M, use)
 
         # Grid lines.
         step = _nice_step((x_max - x_min) / 3.5)
@@ -1172,14 +1269,8 @@ class DaicController:
                                drone_zw + math.cos(a1) * arc_r)
                 canvas.create_line(ax0, ay0, ax1, ay1, fill=col, width=2)
 
-        # Drone triangle.  X offsets are negated to match the flipped X axis in w2c.
-        SZ = 7
-        tip = (dc_x - int(math.sin(heading) * SZ),
-               dc_y - int(math.cos(heading) * SZ))
-        lft = (dc_x - int(math.sin(heading - 2.5) * int(SZ * 0.55)),
-               dc_y - int(math.cos(heading - 2.5) * int(SZ * 0.55)))
-        rgt = (dc_x - int(math.sin(heading + 2.5) * int(SZ * 0.55)),
-               dc_y - int(math.cos(heading + 2.5) * int(SZ * 0.55)))
+        # Drone triangle.  Canvas X grows right and canvas Y grows down.
+        tip, lft, rgt = _slam_drone_marker(dc_x, dc_y, heading)
         canvas.create_polygon(*tip, *lft, *rgt, fill=_ACCENT, outline="#c9d1d9", width=1)
 
         # Labels.
@@ -1291,7 +1382,8 @@ class DaicController:
     def _send(self, typ: str, quiet: bool = False, **fields) -> None:
         if self.command is None:
             return
-        payload = encode_command(typ, **fields)
+        payload = controlled_command(
+            typ, self.control_source, self.control_lease, **fields)
         ok = self.command.write(payload)
         if not ok and not quiet and self.args.verbose:
             print(f"daic: failed to write command {typ}", file=sys.stderr)
@@ -1328,30 +1420,68 @@ class DaicController:
         self._planner_var.set("emergency stop")
         self.health.warn("planner", "emergency stop")
 
-    def close(self) -> None:
+    def request_stop(self) -> None:
+        """Ask for shutdown from a signal handler.
+
+        A signal lands between any two bytecodes, so it can interrupt a tick
+        while a numpy view into the shared video buffer is still alive. Tearing
+        the buffers down right there is what used to raise mid-close. Stop the
+        tick loop and hand the real work to Tk's idle queue so the interrupted
+        tick finishes first.
+        """
         self.running = False
         try:
-            self._send("zero", quiet=True)
-        finally:
+            self.root.after_idle(self.close)
+        except Exception:
+            self.close()
+
+    @staticmethod
+    def _best_effort(what: str, action) -> None:
+        try:
+            action()
+        except Exception as exc:
+            print(f"daic: {what}: {exc}", file=sys.stderr)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.running = False
+        # Every step is guarded separately, and the window is destroyed in a
+        # finally. Shutdown can run from a signal handler while a resource is
+        # mid-use, and one failure used to skip destroy() -- leaving a window
+        # that could never be closed, because _closed was already latched and
+        # every later attempt returned immediately. Nothing here may prevent
+        # the window from actually closing.
+        try:
+            self._best_effort("zero", lambda: self._send("zero", quiet=True))
+            self._best_effort("release control", lambda: self._send(
+                "release_control", quiet=True))
             if self.slam_detector is not None:
-                self.slam_detector.stop()
+                self._best_effort("slam stop", self.slam_detector.stop)
             if self.logger is not None:
-                self.logger.close()  # flush flight.jsonl before reporter reads it
+                # Flush flight.jsonl before the reporter reads it.
+                self._best_effort("logger close", self.logger.close)
             if self.reporter is not None:
-                try:
-                    crashed = (self.status.getAll().get("drone.crashed", "0") == "1"
-                               if self.status else False)
-                    self.reporter.close(self._last_planner_state_name,
-                                        crashed, self._last_target_dist_m)
-                except Exception as exc:
-                    print(f"daic: reporter close: {exc}", file=sys.stderr)
-            for handle in (self.status, self.command, self.video):
+                self._best_effort("reporter close", lambda: self.reporter.close(
+                    self._last_planner_state_name,
+                    (self.status.getAll().get("drone.crashed", "0") == "1"
+                     if self.status else False),
+                    self._last_target_dist_m,
+                ))
+            for name, handle in (("status", self.status),
+                                 ("command", self.command),
+                                 ("video", self.video)):
                 if handle is not None:
-                    handle.close()
-            save_window_pos(self.root, f"daic.{self.args.id}")
+                    self._best_effort(f"{name} close", handle.close)
+        finally:
+            self._best_effort(
+                "save window position",
+                lambda: save_window_pos(self.root, f"daic.{self.args.id}"),
+            )
             try:
                 self.root.destroy()
-            except tk.TclError:
+            except Exception:
                 pass
 
 
@@ -1366,6 +1496,7 @@ class HeadlessAgent:
         self.args = args
         self.pymembus = load_pymembus()
         self.names = shared_names(args.id)
+        self.control_source, self.control_lease = new_control_identity(f"daic-{args.id}")
         self.video   = None
         self.command = None
         self.status  = None
@@ -1373,6 +1504,7 @@ class HeadlessAgent:
         self.last_status_time = 0.0
         self.last_video_seq  = -1
         self.running = True
+        self._closed = False
         self.last_detection  = Detection(False, 0, 0, 0, 0)
         self.planner = Planner(img_w=args.video_w, img_h=args.video_h)
         self._alt_lock = True
@@ -1413,6 +1545,7 @@ class HeadlessAgent:
             cmd = pm.memcmd()
             if cmd.open(self.names["command"], self.args.cmd_size):
                 self.command = cmd
+                self._send("acquire_control", quiet=True)
         if self.status is None:
             kv = pm.memkv()
             if kv.open(self.names["status"]):
@@ -1445,14 +1578,21 @@ class HeadlessAgent:
         frame_period = 1.0 / max(1, self.args.fps)
         if self.args.verbose:
             print(f"daic headless: id={self.args.id}", file=sys.stderr)
-        while self.running:
-            tick_start = time.monotonic()
-            self._tick(tick_start)
-            elapsed = time.monotonic() - tick_start
-            time.sleep(max(0.0, frame_period - elapsed))
+        try:
+            while self.running:
+                tick_start = time.monotonic()
+                self._tick(tick_start)
+                elapsed = time.monotonic() - tick_start
+                time.sleep(max(0.0, frame_period - elapsed))
+        finally:
+            # Cleanup belongs here rather than in the signal handler: the loop
+            # also stops on its own when the video buffer disappears, and the
+            # report must be written in that case too.
+            self.close()
 
     def _tick(self, now: float) -> None:
         self.open_missing()
+        self._maintain_control(now)
 
         if self._pending_enable_ai and self.command is not None:
             self._pending_enable_ai = False
@@ -1509,6 +1649,10 @@ class HeadlessAgent:
             status_snap = self.status.getAll()
             if now - self.last_status_time > 2.0:
                 status_snap["_stale"] = "1"
+        if status_snap.get("control.owner") != self.control_source:
+            # Acquisition is asynchronous. Do not advance the planner on
+            # commands the simulator is guaranteed to reject.
+            return
 
         pose = pose_from_status(status_snap)
         if pose is not None:
@@ -1528,7 +1672,8 @@ class HeadlessAgent:
             return
 
         try:
-            out = self.planner.tick(self.last_detection, status_snap)
+            out = self.planner.tick(self.last_detection, status_snap,
+                                    front_risk=_planner_front_risk(self._last_sectors))
         except Exception as exc:
             print(f"daic: planner error: {exc}", file=sys.stderr)
             self._send("zero")
@@ -1559,11 +1704,13 @@ class HeadlessAgent:
                     effective_status = "local route unavailable, yaw scan"
             if out.command_type == "velocity" and out.state == State.SEARCH:
                 front_block_m = None
+                front_block_age = None
                 if pose is not None:
-                    front_block_m = self.local_map.diagnostics(
-                        pose, target_xy).get("front_block_occ_m")
+                    diag = self.local_map.diagnostics(pose, target_xy)
+                    front_block_m = diag.get("front_block_occ_m")
+                    front_block_age = diag.get("front_block_occ_age_ticks")
                 fields, avoiding = apply_search_approach_brake(
-                    fields, self._last_sectors, front_block_m)
+                    fields, self._last_sectors, front_block_m, front_block_age)
                 if avoiding:
                     effective_status = f"{effective_status}; avoid {self._last_sectors.method}"
             if out.command_type == "velocity" and out.state == State.APPROACH:
@@ -1621,10 +1768,22 @@ class HeadlessAgent:
             time.sleep(1.0)
             self.running = False
 
+    def _maintain_control(self, now: float) -> None:
+        if self.command is None or self.status is None:
+            return
+        owner = self.status.getAll().get("control.owner", "")
+        if owner != self.control_source:
+            self._send("acquire_control", quiet=True)
+            self._last_heartbeat = now
+        elif now - self._last_heartbeat >= 1.0:
+            self._send("heartbeat", quiet=True)
+            self._last_heartbeat = now
+
     def _send(self, typ: str, quiet: bool = False, **fields) -> None:
         if self.command is None:
             return
-        payload = encode_command(typ, **fields)
+        payload = controlled_command(
+            typ, self.control_source, self.control_lease, **fields)
         ok = self.command.write(payload)
         if not ok and not quiet and self.args.verbose:
             print(f"daic: failed to write {typ}", file=sys.stderr)
@@ -1649,15 +1808,28 @@ class HeadlessAgent:
             ),
         }
 
+    def request_stop(self) -> None:
+        """Signal-handler entry point; the run loop exits on the next check."""
+        self.running = False
+
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self.running = False
         try:
             self._send("zero", quiet=True)
+            self._send("release_control", quiet=True)
         finally:
             if self.slam_detector is not None:
                 self.slam_detector.stop()
             if self.logger is not None:
-                self.logger.close()  # flush flight.jsonl before reporter reads it
+                # Flush flight.jsonl before the reporter reads it. Guarded: a
+                # signal can arrive between the flush and a resuming tick.
+                try:
+                    self.logger.close()
+                except Exception as exc:
+                    print(f"daic: logger close: {exc}", file=sys.stderr)
             if self.reporter is not None:
                 try:
                     crashed = (self.status.getAll().get("drone.crashed", "0") == "1"
@@ -1726,7 +1898,7 @@ def main(argv: list[str] | None = None) -> int:
         agent = DaicController(args)
 
     def stop(_sig, _frame):
-        agent.close()
+        agent.request_stop()
 
     signal.signal(signal.SIGINT,  stop)
     signal.signal(signal.SIGTERM, stop)

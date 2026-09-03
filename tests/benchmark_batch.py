@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run N independent benchmark flights in parallel and aggregate them (Phase 5.8).
+"""Run N independent benchmark flights in parallel and aggregate them.
 
-Phase 5.8 found that a single flight (or even N=4) isn't enough to tell "this
-change helped" apart from "this run landed in the lucky tail of the
-distribution" — `maze_001` @ 90 s alone has produced everything from a clean
-17 s landing to FAILSAFEs 6 m short on identical code. Comparing distributions
+A single flight (or even N=4) isn't enough to tell "this change helped" apart
+from "this run landed in the lucky tail of the distribution" — `maze_001` @
+90 s alone has produced everything from a clean 17 s landing to FAILSAFEs 6 m
+short on identical code. Comparing distributions
 means running each configuration N times, which is the slow part: each flight
 burns its own ~90 s of sim time plus startup/shutdown overhead. But each
 dsim+daic pair is CPU-light (one camera-render loop and one perception/control
@@ -24,8 +24,8 @@ or they collide — see `tests/flight_test.py --id`.
 Usage
 -----
     # 5 runs of maze_001 @ 90s, up to 4 flying at once:
-    python3 tests/benchmark_batch.py --name phase5.8-maze001 \\
-        --map dsim/assets/maps/maze_001.txt --duration 90 --runs 5 --parallel 4
+    python3 tests/benchmark_batch.py --name maze001-baseline \\
+        --map assets/maps/maze_001.txt --duration 90 --runs 5 --parallel 4
 
 Output
 ------
@@ -107,7 +107,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--name", required=True,
                         help="benchmark group name; runs are written to "
                              "reports/benchmarks/<name>/run1 .. runN")
-    parser.add_argument("--map", default="dsim/assets/maps/maze_001.txt",
+    parser.add_argument("--map", default="assets/maps/maze_001.txt",
                         help="map file (relative to project root)")
     parser.add_argument("--duration", type=int, default=90,
                         help="maximum flight time in seconds, per run")

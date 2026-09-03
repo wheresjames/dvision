@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose why a DAIC benchmark run stayed in SEARCH or failed (Phase 5.5).
+"""Diagnose why a DAIC benchmark run stayed in SEARCH or failed.
 
 Summarizes route/control causes from a flight log — and, when available, the
 matching route_log.jsonl and DAIC run-reporter summary.json — so a run can be
@@ -9,7 +9,7 @@ or target-reacquisition miss without re-tuning blindly.
 Usage
 -----
     # Point at a benchmark report directory (looks under <dir>/daic/ first):
-    python3 tests/benchmark_diagnosis.py reports/benchmarks/phase5-maze002-approach-gate
+    python3 tests/benchmark_diagnosis.py reports/benchmarks/maze002-approach-gate
 
     # Or point directly at a flight log (route_log.jsonl / summary.json are
     # picked up from the same directory if present):

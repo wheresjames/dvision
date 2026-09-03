@@ -12,7 +12,7 @@ Usage
     python3 tests/flight_test.py
 
     # Custom map and duration:
-    python3 tests/flight_test.py --map dsim/assets/maps/maze_002.txt --duration 120
+    python3 tests/flight_test.py --map assets/maps/maze_002.txt --duration 120
 
     # Keep the log file for later inspection:
     python3 tests/flight_test.py --log /tmp/flight.jsonl
@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from daic.flight_log import analyze_log, diagnose_log, print_diagnosis, print_report
+from daic.run_reporter import _generate_html_report
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +115,7 @@ def run_test(map_file: str, duration_s: int, log_path: Path | None,
         print(f"daic: {' '.join(daic_cmd)}", file=sys.stderr)
 
     # Launch dsim first so shared memory exists before daic connects.
+    dsim_started = time.monotonic()
     dsim_proc = subprocess.Popen(
         dsim_cmd,
         stdout=subprocess.DEVNULL,
@@ -138,8 +140,25 @@ def run_test(map_file: str, duration_s: int, log_path: Path | None,
     if wait_log is not None and not _wait_for_file(wait_log, timeout=15.0):
         print("WARNING: log file did not appear within 15 s", file=sys.stderr)
 
-    # Wait for dsim to finish (it exits after --frames).
-    deadline = duration_s + 30
+    # Stop DAIC early enough for its final zero command to decelerate the
+    # vehicle while dsim is still alive. Previously dsim outlived DAIC logging
+    # by ~3 s with the last non-zero setpoint latched, so the simulator crashed
+    # after DAIC had already written `crashed:false`.
+    shutdown_grace_s = min(3.0, max(1.0, duration_s * 0.1))
+    control_deadline = dsim_started + duration_s - shutdown_grace_s
+    while (time.monotonic() < control_deadline
+           and dsim_proc.poll() is None and daic_proc.poll() is None):
+        time.sleep(0.1)
+    if daic_proc.poll() is None:
+        daic_proc.terminate()  # signal handler sends zero before closing IPC
+        try:
+            daic_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            daic_proc.kill()
+            daic_proc.wait()
+
+    # Let dsim integrate the stop and produce the authoritative final summary.
+    deadline = shutdown_grace_s + 10
     try:
         dsim_proc.wait(timeout=deadline)
     except subprocess.TimeoutExpired:
@@ -147,14 +166,16 @@ def run_test(map_file: str, duration_s: int, log_path: Path | None,
         dsim_proc.kill()
         dsim_proc.wait()
 
-    # Give daic a moment to write the final log record, then stop it.
-    time.sleep(2.0)
-    daic_proc.terminate()
-    try:
+    if daic_proc.poll() is None:
+        daic_proc.terminate()
         daic_proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        daic_proc.kill()
-        daic_proc.wait()
+
+    if report_dir is not None:
+        try:
+            _generate_html_report(report_dir / "daic")
+        except Exception as exc:
+            print(f"WARNING: final report reconciliation failed: {exc}",
+                  file=sys.stderr)
 
     return {
         "dsim_cmd": dsim_cmd,
@@ -664,7 +685,7 @@ def _write_benchmark_outputs(report_dir: Path, log_path: Path, summary: dict,
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="daic automated flight test")
-    parser.add_argument("--map",      default="dsim/assets/maps/maze_001.txt",
+    parser.add_argument("--map",      default="assets/maps/maze_001.txt",
                         help="map file (relative to project root)")
     parser.add_argument("--duration", type=int, default=90,
                         help="maximum flight time in seconds")

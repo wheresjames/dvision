@@ -171,11 +171,74 @@ def test_orange_red_not_detected():
     assert not det.visible, "orange-red must not be detected as landing target"
 
 
-def test_dark_red_not_detected():
-    """Dark/shadowed red (low value) should not trigger the detector."""
+def test_dark_saturated_red_is_still_the_target():
+    """A pad in shade is still a pad.
+
+    RGB (90, 15, 15) is the same hue and saturation as the marker, at a third
+    the brightness — the pad under a tree, under cloud, or seen by a camera
+    that has stopped down. This assertion used to run the other way, and that
+    is precisely how the detector came to report nothing at all when the
+    simulator started shading the scene physically: the pad rendered at V=90
+    and every frame of every approach came back empty.
+    """
     import cv2
     frame = _make_frame(480, 640)
-    # Dark red: RGB (90, 15, 15) — same hue, low value
     cv2.circle(frame, (320, 240), 80, (90, 15, 15), -1)
     det = detect(frame)
-    assert not det.visible, "dark red must not be detected as landing target"
+    assert det.visible, "a shadowed but saturated red pad must still be found"
+
+
+def test_dark_desaturated_red_not_detected():
+    """Shadowed brickwork, which is what the old brightness floor was for."""
+    import cv2
+    frame = _make_frame(480, 640)
+    # Same low brightness as above, but washed out: S ≈ 100, not ≈ 230.
+    cv2.circle(frame, (320, 240), 80, (90, 55, 50), -1)
+    det = detect(frame)
+    assert not det.visible, "dark desaturated red must not be detected"
+
+
+def test_oblique_pad_is_detected_as_an_ellipse():
+    """A circular pad seen from a shallow angle projects to a long ellipse.
+
+    Aspect is roughly 1/sin(elevation), so requiring a near-circle would mean
+    the pad can only be found from nearly overhead — which is the one phase of
+    flight that does not need help finding it.
+    """
+    import cv2
+    for aspect in (2, 4, 8):
+        frame = _make_frame(480, 640)
+        cv2.ellipse(frame, (320, 240), (160, max(160 // aspect, 4)), 0, 0, 360,
+                    (220, 20, 20), -1)
+        det = detect(frame)
+        assert det.visible, f"pad at {aspect}:1 obliquity must be detected"
+        assert abs(det.cx - 320) < 6 and abs(det.cy - 240) < 6
+
+
+def test_detection_survives_a_wide_exposure_range():
+    """The same pad under six stops of illumination is the same pad."""
+    import cv2
+    for scale in (0.25, 0.4, 0.6, 1.0, 1.4):
+        frame = _make_frame(480, 640)
+        colour = tuple(int(min(255, c * scale)) for c in (230, 25, 20))
+        cv2.circle(frame, (320, 240), 70, colour, -1)
+        det = detect(frame)
+        assert det.visible, f"pad must be found at exposure scale {scale}"
+
+
+def test_a_ragged_red_blob_is_not_a_pad():
+    """Foliage fringing into the red band is ragged, and a pad is not.
+
+    Same colour, same bounding box, same rough area as a pad — only the outline
+    differs. Solidity is what separates them.
+    """
+    import cv2
+    import math
+    frame = _make_frame(480, 640)
+    points = []
+    for i in range(40):
+        angle = math.tau * i / 40
+        r = 110 if i % 2 == 0 else 26          # deep spikes: a star, not a disc
+        points.append([int(320 + r * math.cos(angle)), int(240 + r * math.sin(angle))])
+    cv2.fillPoly(frame, [np.array(points, dtype=np.int32)], (220, 20, 20))
+    assert not detect(frame).visible, "a ragged star is not a landing pad"

@@ -70,14 +70,38 @@ The magic string `dvision2.command.v1` acts as a version gate. Commands with the
 
 | Type | Key Fields | Effect |
 |---|---|---|
-| `heartbeat` | — | keeps link alive; no state change |
-| `arm` | `armed: bool` | arms or disarms the drone; disarm zeroes all motion |
+| `acquire_control` | — | claims the control lease; refused while another client holds it |
+| `release_control` | — | hands the lease back |
+| `heartbeat` | — | renews the lease; does **not** refresh the setpoint failsafe timer |
+| `arm` | `armed: bool` | arms or disarms the drone; arming captures home, disarm zeroes all motion |
 | `takeoff` | `alt_m: float` | sets a target altitude and transitions to TAKEOFF mode |
-| `land` | — | targets altitude 0, clears horizontal setpoints, transitions to LAND |
-| `zero` | — | clears all velocity setpoints; enters HOLD if armed |
-| `velocity` | `forward_mps`, `right_mps`, `up_mps`, `yaw_rate_dps` | sets body-frame velocity setpoints; ignored while disarmed |
+| `land` | — | targets altitude 0, clears setpoints, transitions to LAND |
+| `rtl` | — | climbs to a safe height, returns to home, then lands |
+| `zero`, `hold` | — | clears every setpoint; enters HOLD if armed |
+| `velocity` | `forward_mps`, `right_mps`, `up_mps`, `yaw_rate_dps` | body-frame velocity setpoint |
+| `position_target` | `frame` plus `x,y,z` (map) or `north_m,east_m,down_m` (local NED), `heading_deg`, `max_speed_mps` | position setpoint the vehicle flies to |
+| `set_origin` | `lat_deg`, `lon_deg`, `alt_m` | moves the geographic origin; disarmed only |
+| `set_gps` | `mode`, `noise_m` | denies or restores GPS; simulation only |
+| `set_estimator` | `attitude`, `local`, `global`, `velocity` | faults or restores an estimator; simulation only |
+| `reset` | — | returns the vehicle to its start pose |
 
-dctl sends a `heartbeat` roughly once per second. It sends `velocity` commands on every tick while any movement key or joystick axis is active, and sends a final `zero` when all inputs return to neutral.
+A position and a velocity target replace one another, and either is accepted
+only while armed and in `GUIDED` or `HOLD`; accepting one moves `HOLD` back to
+`GUIDED`. `LAND`, `RTL` and `HOLD` clear whichever is current.
+
+**Control ownership.** There is one active controller. Every motion, mode and
+arming command carries `source_id`, `lease_id` and a unique `request_id`, and
+is refused without the current lease; an emergency `land` is the exception.
+The lease expires after `--control-lease-timeout` seconds without a heartbeat
+from its owner, which puts an armed vehicle into `HOLD`. Each command's outcome
+is published in `command.result.request_id` / `.accepted` / `.reason`, so queue
+admission is never mistaken for acceptance.
+
+**Setpoint failsafe.** An armed vehicle in `GUIDED` that stops receiving
+targets for `--setpoint-timeout` seconds (default 2) clears them, enters
+`HOLD` and publishes `failsafe.reason=setpoint_timeout`.
+
+dctl acquires the lease on connect and sends a `heartbeat` roughly once per second. It sends `velocity` commands on every tick while any movement key or joystick axis is active, and sends a final `zero` when all inputs return to neutral. `dway` streams position or velocity targets at 10 Hz and heartbeats separately at 1 Hz.
 
 ### Encoding
 
@@ -99,7 +123,7 @@ dsim publishes the following keys to the status buffer after every tick:
 | `sim.map` | Loaded map file path |
 | `sim.time_s` | Elapsed simulation time |
 | `drone.armed` | `"1"` / `"0"` |
-| `drone.mode` | `DISARMED`, `GUIDED`, `TAKEOFF`, `LAND`, `HOLD` |
+| `drone.mode` | `DISARMED`, `GUIDED`, `TAKEOFF`, `LAND`, `RTL`, `HOLD`, `CRASHED` |
 | `drone.x_m`, `drone.y_m`, `drone.z_m` | Local position in meters |
 | `drone.lat_deg`, `drone.lon_deg`, `drone.alt_m` | Live GPS-equivalent position |
 | `target.lat_deg`, `target.lon_deg`, `target.alt_m` | GPS-equivalent target position |
@@ -110,6 +134,16 @@ dsim publishes the following keys to the status buffer after every tick:
 | `link.command_count` | Total commands received |
 | `link.last_command_type` | Most recently processed command type |
 | `status.message` | Human-readable status (`"ok"`, `"command overrun"`, etc.) |
+| `vehicle.*` | Negotiated capability profile: type, frames, accepted setpoint types, mission support, setpoint timeout, speed and acceleration limits |
+| `origin.*`, `home.*` | Geographic origin at the map centre, and the pose captured at arming |
+| `control.owner`, `control.lease_age_s`, `control.lease_timeout_s` | Who holds control and how fresh the lease is |
+| `setpoint.age_s` | Seconds since the last position or velocity target |
+| `failsafe.reason` | `setpoint_timeout`, `control_lease_expired`, `geofence`, `battery_low`, or empty |
+| `command.result.*` | Request id, acceptance and reason for the most recent command |
+| `gps.*`, `est.*` | Fix quality and estimator validity |
+| `wind.*`, `geofence.*`, `realism.*` | The simulated conditions a run was flown in |
+
+`dvision2_common.STATUS_KEYS` is the fixed schema; the README's Telemetry section describes each key.
 
 GPS coordinates are derived from local XY position using a simple flat-earth projection. For `dsim`, the configured `--origin-lat/lon/alt` is the map center and defaults to Berlin, Germany.
 
@@ -122,6 +156,8 @@ dsim runs a first-order lag model at the configured fps:
 - Yaw rate tracks `cmd_yaw_rate` with `τ = 0.10 s`.
 - Visual roll/pitch are derived from body-frame velocity and lag with `τ = 0.14 s`.
 - Takeoff and land use a proportional altitude controller that drives `cmd_up`.
+- A position target is flown with a proportional approach clamped by `max_speed_mps`, plus a trim term that cancels a steady disturbance such as wind once the vehicle is near the target and at hover speed.
+- Wind is added at position integration, so the vehicle's own velocity is through the air and the sum is over the ground.
 - Collision with `wall` and `tree` cells absorbs the velocity component perpendicular to the wall.
 
 ## Drone Modes
@@ -132,7 +168,9 @@ dsim runs a first-order lag model at the configured fps:
 | `GUIDED` | Armed and flying; accepts velocity commands |
 | `TAKEOFF` | Climbing to target altitude; transitions to GUIDED on arrival |
 | `LAND` | Descending to zero; transitions to DISARMED on touchdown |
-| `HOLD` | Armed, hovering; set by `zero` command |
+| `RTL` | Climbing to a safe height, returning to home, then landing |
+| `HOLD` | Armed, hovering at the current pose; set by `zero`/`hold` or by a failsafe |
+| `CRASHED` | Collided; ignores commands until `reset` |
 
 ## Running Both Processes
 

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dsim.dsim import DroneSimulator, DroneState
+from dsim.dsim import DroneSimulator, DroneState, parse_args
 from dvision2_common import (
     BERLIN_CENTER_ALT_M,
     BERLIN_CENTER_LAT_DEG,
@@ -40,6 +40,38 @@ def _sim() -> DroneSimulator:
     sim.status = None
     sim.state = DroneState(sim.start_x, sim.start_y, sim.start_alt)
     return sim
+
+
+def test_scene_preset_cli_defaults_to_representative_and_accepts_legacy():
+    assert parse_args(["--id", "test"]).scene_preset == "representative"
+    assert parse_args([
+        "--id", "test", "--scene-preset", "legacy",
+    ]).scene_preset == "legacy"
+
+
+def test_live_renderer_receives_the_selected_scene_preset(monkeypatch):
+    import dsim.dsim as module
+
+    received = {}
+
+    def renderer(sim_map, width, height, *, scene_preset):
+        received.update(map=sim_map, width=width, height=height,
+                        scene_preset=scene_preset)
+        return object()
+
+    sim = _sim()
+    sim.args.scene_preset = "representative"
+    sim.args.verbose = False
+    monkeypatch.setattr(module, "Panda3DRenderer", renderer)
+
+    sim._init_renderer()
+
+    assert received == {
+        "map": sim.map,
+        "width": 640,
+        "height": 480,
+        "scene_preset": "representative",
+    }
 
 
 def test_wall_collision_latches_crashed_state():

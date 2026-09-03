@@ -1,0 +1,293 @@
+{
+ "note": "Measured geometry for each committed archetype fixture, recorded so a tour that drifts is caught before it changes a result. translation_rotation_ratio is null when the tour does not rotate. curated_via records the instrument the fixture came from; curated says whether a human has since judged it in the editor. A generated fixture is geometrically valid and flyable, but an uncurated tour has not been reviewed by a human and any result over it should say so. A not_applicable entry records the geometry that ruled the archetype out on that map.",
+ "schema_version": 1,
+ "tours": {
+  "maze_012.boustrophedon.v1": {
+   "archetype": "boustrophedon",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "dff63787eb053959b19c8bee9f5e6fd4c8ca85cbdb04924a342e0d7f1da78c6e",
+   "measured": {
+    "distinct_viewpoints": 83.0,
+    "frame_count": 83.0,
+    "max_baseline_m": 3.3333333333333344,
+    "path_length_m": 10.000000000000004,
+    "rotation_deg": 360.0,
+    "translation_rotation_ratio": 0.027777777777777787
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_012.forward.v1": {
+   "archetype": "forward",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "dff63787eb053959b19c8bee9f5e6fd4c8ca85cbdb04924a342e0d7f1da78c6e",
+   "measured": {
+    "distinct_viewpoints": 41.0,
+    "frame_count": 43.0,
+    "max_baseline_m": 8.0,
+    "path_length_m": 8.0,
+    "rotation_deg": 0.0,
+    "translation_rotation_ratio": null
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_012.orbit.v1": {
+   "archetype": "orbit",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "dff63787eb053959b19c8bee9f5e6fd4c8ca85cbdb04924a342e0d7f1da78c6e",
+   "measured": {
+    "largest_clear_orbit_radius_m": 1.0999999999999983,
+    "required_radius_m": 1.2
+   },
+   "reason": "no obstacle on this map has a clear ring around it at the 1.20 m radius this archetype needs",
+   "status": "not_applicable"
+  },
+  "maze_012.stop_and_stare.v1": {
+   "archetype": "stop_and_stare",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "dff63787eb053959b19c8bee9f5e6fd4c8ca85cbdb04924a342e0d7f1da78c6e",
+   "measured": {
+    "distinct_viewpoints": 31.0,
+    "frame_count": 97.0,
+    "max_baseline_m": 6.0,
+    "path_length_m": 6.0,
+    "rotation_deg": 540.0,
+    "translation_rotation_ratio": 0.011111111111111112
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_012.strafe.v1": {
+   "archetype": "strafe",
+   "curated": true,
+   "curated_via": "tour_editor",
+   "map_sha": "dff63787eb053959b19c8bee9f5e6fd4c8ca85cbdb04924a342e0d7f1da78c6e",
+   "measured": {
+    "distinct_viewpoints": 11.0,
+    "frame_count": 13.0,
+    "max_baseline_m": 2.0,
+    "path_length_m": 2.0,
+    "rotation_deg": 0.0,
+    "translation_rotation_ratio": null
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_012.yaw_only.v1": {
+   "archetype": "yaw_only",
+   "curated": true,
+   "curated_via": "tour_editor",
+   "map_sha": "dff63787eb053959b19c8bee9f5e6fd4c8ca85cbdb04924a342e0d7f1da78c6e",
+   "measured": {
+    "distinct_viewpoints": 1.0,
+    "frame_count": 23.0,
+    "max_baseline_m": 0.0,
+    "path_length_m": 0.0,
+    "rotation_deg": 180.0,
+    "translation_rotation_ratio": 0.0
+   },
+   "parallax_available": false,
+   "status": "applicable"
+  },
+  "maze_013.boustrophedon.v1": {
+   "archetype": "boustrophedon",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "df2e2b775db2c2110ef57e0d73c90837f95c082b01203f03a7a40269ed414dbf",
+   "measured": {
+    "largest_free_rectangle": {
+     "area_m2": 11.0625,
+     "height_m": 14.75,
+     "width_m": 0.75,
+     "x0": 1.625,
+     "x1": 2.375,
+     "y0": 1.625,
+     "y1": 16.375
+    },
+    "required_row_m": 3.0,
+    "required_rows": 3,
+    "row_spacing_m": 1.0,
+    "rows": 15
+   },
+   "reason": "no open rectangle on this map holds 3 rows of 3.00 m at 1.00 m spacing; the largest is 0.75 m by 14.75 m",
+   "status": "not_applicable"
+  },
+  "maze_013.forward.v1": {
+   "archetype": "forward",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "df2e2b775db2c2110ef57e0d73c90837f95c082b01203f03a7a40269ed414dbf",
+   "measured": {
+    "distinct_viewpoints": 41.0,
+    "frame_count": 43.0,
+    "max_baseline_m": 8.0,
+    "path_length_m": 8.0,
+    "rotation_deg": 0.0,
+    "translation_rotation_ratio": null
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_013.orbit.v1": {
+   "archetype": "orbit",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "df2e2b775db2c2110ef57e0d73c90837f95c082b01203f03a7a40269ed414dbf",
+   "measured": {
+    "distinct_viewpoints": 48.0,
+    "frame_count": 49.0,
+    "max_baseline_m": 2.599999999999996,
+    "path_length_m": 8.115757395870926,
+    "rotation_deg": 360.0,
+    "translation_rotation_ratio": 0.022543770544085906
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_013.stop_and_stare.v1": {
+   "archetype": "stop_and_stare",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "df2e2b775db2c2110ef57e0d73c90837f95c082b01203f03a7a40269ed414dbf",
+   "measured": {
+    "distinct_viewpoints": 31.0,
+    "frame_count": 97.0,
+    "max_baseline_m": 6.0,
+    "path_length_m": 6.0,
+    "rotation_deg": 540.0,
+    "translation_rotation_ratio": 0.011111111111111112
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_013.strafe.v1": {
+   "archetype": "strafe",
+   "curated": true,
+   "curated_via": "tour_editor",
+   "map_sha": "df2e2b775db2c2110ef57e0d73c90837f95c082b01203f03a7a40269ed414dbf",
+   "measured": {
+    "distinct_viewpoints": 9.0,
+    "frame_count": 11.0,
+    "max_baseline_m": 1.5,
+    "path_length_m": 1.5,
+    "rotation_deg": 0.0,
+    "translation_rotation_ratio": null
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_013.yaw_only.v1": {
+   "archetype": "yaw_only",
+   "curated": true,
+   "curated_via": "tour_editor",
+   "map_sha": "df2e2b775db2c2110ef57e0d73c90837f95c082b01203f03a7a40269ed414dbf",
+   "measured": {
+    "distinct_viewpoints": 1.0,
+    "frame_count": 23.0,
+    "max_baseline_m": 0.0,
+    "path_length_m": 0.0,
+    "rotation_deg": 180.0,
+    "translation_rotation_ratio": 0.0
+   },
+   "parallax_available": false,
+   "status": "applicable"
+  },
+  "maze_014.boustrophedon.v1": {
+   "archetype": "boustrophedon",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "18e9898978b962f357da5b0deb57ae07016ebbfeec3599c217e5fb2d543e4547",
+   "measured": {
+    "distinct_viewpoints": 83.0,
+    "frame_count": 83.0,
+    "max_baseline_m": 3.3333333333333344,
+    "path_length_m": 10.000000000000004,
+    "rotation_deg": 360.0,
+    "translation_rotation_ratio": 0.027777777777777787
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_014.forward.v1": {
+   "archetype": "forward",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "18e9898978b962f357da5b0deb57ae07016ebbfeec3599c217e5fb2d543e4547",
+   "measured": {
+    "distinct_viewpoints": 41.0,
+    "frame_count": 43.0,
+    "max_baseline_m": 8.0,
+    "path_length_m": 8.0,
+    "rotation_deg": 0.0,
+    "translation_rotation_ratio": null
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_014.orbit.v1": {
+   "archetype": "orbit",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "18e9898978b962f357da5b0deb57ae07016ebbfeec3599c217e5fb2d543e4547",
+   "measured": {
+    "largest_clear_orbit_radius_m": 1.0999999999999983,
+    "required_radius_m": 1.2
+   },
+   "reason": "no obstacle on this map has a clear ring around it at the 1.20 m radius this archetype needs",
+   "status": "not_applicable"
+  },
+  "maze_014.stop_and_stare.v1": {
+   "archetype": "stop_and_stare",
+   "curated": false,
+   "curated_via": "tourgen.archetype_fixture",
+   "map_sha": "18e9898978b962f357da5b0deb57ae07016ebbfeec3599c217e5fb2d543e4547",
+   "measured": {
+    "distinct_viewpoints": 31.0,
+    "frame_count": 97.0,
+    "max_baseline_m": 6.0,
+    "path_length_m": 6.0,
+    "rotation_deg": 540.0,
+    "translation_rotation_ratio": 0.011111111111111112
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_014.strafe.v1": {
+   "archetype": "strafe",
+   "curated": true,
+   "curated_via": "tour_editor",
+   "map_sha": "18e9898978b962f357da5b0deb57ae07016ebbfeec3599c217e5fb2d543e4547",
+   "measured": {
+    "distinct_viewpoints": 16.0,
+    "frame_count": 18.0,
+    "max_baseline_m": 3.0,
+    "path_length_m": 3.0,
+    "rotation_deg": 0.0,
+    "translation_rotation_ratio": null
+   },
+   "parallax_available": true,
+   "status": "applicable"
+  },
+  "maze_014.yaw_only.v1": {
+   "archetype": "yaw_only",
+   "curated": true,
+   "curated_via": "tour_editor",
+   "map_sha": "18e9898978b962f357da5b0deb57ae07016ebbfeec3599c217e5fb2d543e4547",
+   "measured": {
+    "distinct_viewpoints": 1.0,
+    "frame_count": 23.0,
+    "max_baseline_m": 0.0,
+    "path_length_m": 0.0,
+    "rotation_deg": 180.0,
+    "translation_rotation_ratio": 0.0
+   },
+   "parallax_available": false,
+   "status": "applicable"
+  }
+ }
+}

@@ -1,5 +1,6 @@
 """Tests for optical-flow obstacle risk extraction."""
 
+import pytest
 import numpy as np
 
 from daic.optical_flow_avoidance import (
@@ -22,7 +23,7 @@ def _radial_flow(scale: float, w: int = 160, h: int = 120) -> np.ndarray:
 def test_radial_expansion_without_translation_is_suppressed() -> None:
     """Radial-looking flow must not register as obstacle risk while stationary.
 
-    Phase 7 root cause: yaw-scanning (the drone's dominant SEARCH-state motion,
+    Root cause: yaw-scanning (the drone's dominant SEARCH-state motion,
     forward_speed_mps ~= 0) sweeps the off-axis-mounted camera through a small
     arc, and the nearby, steeply-foreshortened floor parallaxes hard against
     the distant scene -- producing flow with the *same* radially-symmetric,
@@ -52,6 +53,22 @@ def test_radial_expansion_produces_front_risk_when_translating() -> None:
 
 
 def test_radial_expansion_estimates_range_from_forward_motion() -> None:
+    """Range comes straight from the time-to-contact geometry, with no gain.
+
+    For pure translation toward a surface at distance Z, radial flow is
+    f_r = r * (V/Z) * dt, so ratio = f_r / r = V*dt/Z and Z = V*dt / ratio.
+    `_radial_flow(scale)` synthesises a uniform field with ratio == scale, so
+    here Z = 0.5 * 0.05 / 0.04 = 0.625 m, give or take a few percent: the
+    implementation's `radius = hypot(dx, dy) + 1.0` offset makes the measured
+    ratio slightly under `scale`, which reads slightly long.
+
+    This previously asserted ~5 m, which was 8x the geometric answer because
+    the implementation carried a `_TTC_RANGE_GAIN = 8.0` multiplier. That gain
+    drove real readings into the `_MAX_RANGE_M` clamp, so the local map
+    reported a constant 8 m all the way to impact. Calibration against dsim
+    ground truth (straight-in wall approach at 0.35/0.6/1.0 m/s) confirms the
+    un-gained form.
+    """
     sectors = _flow_to_sectors(
         _radial_flow(0.04),
         forward_speed_mps=0.5,
@@ -60,14 +77,34 @@ def test_radial_expansion_estimates_range_from_forward_motion() -> None:
 
     assert sectors.front > 0.0
     assert sectors.front_range_m is not None
-    assert 4.5 <= sectors.front_range_m <= 5.5
+    assert 0.60 <= sectors.front_range_m <= 0.70
+
+
+def test_range_scales_inversely_with_expansion_rate() -> None:
+    """Twice the divergence must read half the distance."""
+    near = _flow_to_sectors(_radial_flow(0.04), forward_speed_mps=0.5, dt_s=0.05)
+    far = _flow_to_sectors(_radial_flow(0.02), forward_speed_mps=0.5, dt_s=0.05)
+
+    assert far.front_range_m == pytest.approx(2 * near.front_range_m, rel=0.05)
+
+
+def test_range_is_independent_of_speed_for_the_same_geometry() -> None:
+    """Z = V*dt/ratio: doubling V doubles the measured ratio, so Z is unchanged.
+
+    A range estimator whose answer moves with airspeed is measuring the drone,
+    not the wall.
+    """
+    slow = _flow_to_sectors(_radial_flow(0.04), forward_speed_mps=0.5, dt_s=0.05)
+    fast = _flow_to_sectors(_radial_flow(0.08), forward_speed_mps=1.0, dt_s=0.05)
+
+    assert fast.front_range_m == pytest.approx(slow.front_range_m, rel=0.05)
 
 
 def test_implausibly_close_ttc_range_is_rejected_not_clamped() -> None:
-    """Phase 6.1 root cause: a TTC range this short during genuine forward
-    translation is far more often the floor parallaxing close beneath the
-    pitched-forward camera (the same near-field surface the ROI comment in
-    `_flow_to_sectors` calls a "permanently close surface") than a real
+    """Root cause: a TTC range this short during genuine forward translation
+    is far more often the floor parallaxing close beneath the pitched-forward
+    camera (the same near-field surface the ROI comment in `_flow_to_sectors`
+    calls a "permanently close surface") than a real
     navigable wall. Clamping it up to `_MIN_RANGE_M` and trusting it let
     `local_map` quantize a phantom obstacle into the drone's own grid cell,
     so `front_occ_m` fired on ~90-98% of SEARCH/APPROACH ticks regardless of

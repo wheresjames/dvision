@@ -94,9 +94,9 @@ def _f(d: dict, key: str, default: float = 0.0) -> float:
 
 #: Below this fraction of the configured tick rate, a run is flagged as
 #: having likely dropped frames (e.g. CPU oversubscription from running too
-#: many benchmarks in parallel) -- see Phase 7's "note on benchmark
-#: methodology": a corrupted batch measured ~50-57% of its target fps, while
-#: clean runs measured ~98-99%, so 90% comfortably separates the two.
+#: many benchmarks in parallel). A corrupted batch measured ~50-57% of its
+#: target fps, while clean runs measured ~98-99%, so 90% comfortably separates
+#: the two.
 FRAME_DROP_WARN_RATIO = 0.9
 
 
@@ -111,7 +111,7 @@ def analyze_log(log_path: str | Path,
     If *target_fps* is provided (the configured tick rate), the summary also
     reports whether the run's effective fps fell suspiciously short of it --
     a sign that the test host was overloaded and dropped frames, which can
-    silently corrupt timing-sensitive results (see Phase 7).
+    silently corrupt timing-sensitive results.
     """
     records: list[dict] = []
     with open(log_path, encoding="utf-8") as fh:
@@ -213,7 +213,7 @@ def analyze_log(log_path: str | Path,
     # ── Effective frame rate / dropped-frame detection ────────────────
     # tick_count / wall-clock duration -- a host that's maxed out on CPU
     # (e.g. too many parallel benchmark runs) ticks slower than configured,
-    # silently corrupting timing-sensitive comparisons (Phase 7).
+    # silently corrupting timing-sensitive comparisons.
     effective_fps: float | None = None
     if duration_s > 0:
         effective_fps = round(len(ticks) / duration_s, 2)
@@ -292,7 +292,7 @@ def print_report(summary: dict, file=None) -> None:
         print(f"  Closest pass:  {summary['min_dist_to_target_m']:.3f} m", file=out)
 
     print(file=out)
-    print(f"  Peak approach fwd: {summary['peak_approach_fwd_mps']:.2f} m/s (pre-scaled)", file=out)
+    print(f"  Peak approach fwd: {summary['peak_approach_fwd_mps']:.2f} m/s", file=out)
     print(file=out)
     print("  State dwell times:", file=out)
     for state, t in sorted(summary["state_times_s"].items()):
@@ -301,7 +301,7 @@ def print_report(summary: dict, file=None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Benchmark diagnosis (Phase 5.5 — why does the drone stay in SEARCH?)
+# Benchmark diagnosis — why does the drone stay in SEARCH?
 # ---------------------------------------------------------------------------
 
 # Matches the live status text emitted for an active local-route command, e.g.
@@ -359,10 +359,10 @@ def _bearing_deviation(rec: dict) -> dict:
 
 
 def _classify_hints(stats: dict) -> list[dict]:
-    """Heuristic pointers toward the Phase 5.5 failure categories.
+    """Heuristic pointers toward the likely failure category.
 
-    These are evidence-based suggestions, not a verdict — the plan calls for
-    confirming the call against the occ_*.png occupancy snapshot gallery.
+    These are evidence-based suggestions, not a verdict — confirm the call
+    against the occ_*.png occupancy snapshot gallery.
     """
     total       = max(1, stats["tick_count"])
     wall_detect = stats["wall_detect_ticks"] or 0

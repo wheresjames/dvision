@@ -42,7 +42,7 @@ def _det_at_dist(d_horiz: float, alt: float, cx=320.0, cy=300.0, conf=0.85):
 
 
 def _det(visible=True, cx=320.0, cy=300.0, radius=40.0, confidence=0.8):
-    """Quick detection helper; cy=300 (below centre) so phase 2 can fire."""
+    """Quick detection helper; cy=300 (below centre) so the descent can fire."""
     return Detection(visible=visible, cx=cx, cy=cy,
                      radius=radius, confidence=confidence)
 
@@ -84,10 +84,10 @@ def test_hover_is_zero():
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — approach
+# Approach
 # ---------------------------------------------------------------------------
 
-def test_phase1_far_target_full_speed():
+def test_approach_far_target_full_speed():
     """Far target → full approach speed, no descent."""
     det = _det_at_dist(d_horiz=8.0, alt=3.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
@@ -96,7 +96,7 @@ def test_phase1_far_target_full_speed():
     assert not out.descending
 
 
-def test_phase1_decelerates_as_target_approaches():
+def test_approach_decelerates_as_target_approaches():
     """Speed should drop as horizontal distance shrinks toward gate."""
     det_far  = _det_at_dist(d_horiz=_DECEL_START_M + 1.0, alt=3.0)
     det_near = _det_at_dist(d_horiz=_APPROACH_GATE_M + 0.2, alt=3.0)
@@ -105,7 +105,7 @@ def test_phase1_decelerates_as_target_approaches():
     assert out_far.forward_mps > out_near.forward_mps
 
 
-def test_phase1_minimum_speed_at_gate():
+def test_approach_minimum_speed_at_gate():
     """Just outside the gate the speed is clamped to the minimum."""
     det = _det_at_dist(d_horiz=_APPROACH_GATE_M + 0.05, alt=3.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
@@ -113,28 +113,31 @@ def test_phase1_minimum_speed_at_gate():
     assert out.up_mps == 0.0
 
 
-def test_phase1_lateral_correction_right():
-    """Target right of centre → move right in phase 1."""
+def test_approach_lateral_correction_right():
+    """Target right of centre → move right during the approach."""
     det = _det_at_dist(d_horiz=5.0, alt=3.0, cx=420.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
     assert out.right_mps > 0.0
+    assert out.yaw_rate_dps > 0.0
 
 
-def test_phase1_lateral_correction_left():
+def test_approach_lateral_correction_left():
     det = _det_at_dist(d_horiz=5.0, alt=3.0, cx=200.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
     assert out.right_mps < 0.0
+    assert out.yaw_rate_dps < 0.0
 
 
-def test_phase1_target_above_centre_keeps_flying():
-    """Phase 1 stays active when target is above camera centre (cy_err < 0)."""
+def test_approach_target_above_centre_keeps_flying():
+    """The approach stays active when the target is above camera centre
+    (cy_err < 0)."""
     det = _det_at_dist(d_horiz=_APPROACH_GATE_M - 0.1, alt=3.0, cy=100.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
     assert out.forward_mps >= _APPROACH_MIN_SPEED
     assert out.up_mps == 0.0
 
 
-def test_phase1_target_near_bottom_slows_and_descends():
+def test_approach_target_near_bottom_slows_and_descends():
     """A low-in-frame target should not be overflown out of view."""
     det = _det_at_dist(d_horiz=5.0, alt=3.0, cy=465.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
@@ -144,48 +147,48 @@ def test_phase1_target_near_bottom_slows_and_descends():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — overhead descent
+# Overhead descent
 # ---------------------------------------------------------------------------
 
-def _phase2_det(alt=2.0, cx=320.0, cy=300.0):
-    """Detection that puts the drone inside the phase 2 gate."""
+def _descent_det(alt=2.0, cx=320.0, cy=300.0):
+    """Detection that puts the drone inside the descent gate."""
     return _det_at_dist(d_horiz=_APPROACH_GATE_M - 0.5, alt=alt, cx=cx, cy=cy)
 
 
-def test_phase2_centred_target_descends():
-    out = servo(_phase2_det(), IMG_W, IMG_H, altitude_m=2.0)
+def test_descent_centred_target_descends():
+    out = servo(_descent_det(), IMG_W, IMG_H, altitude_m=2.0)
     assert out.up_mps < 0.0
     assert out.descending
 
 
-def test_phase2_above_centre_stays_phase1():
-    """Large close target but above camera centre → stay in phase 1."""
+def test_descent_above_centre_keeps_approaching():
+    """Large close target but above camera centre → keep approaching."""
     det = _det_at_dist(d_horiz=_APPROACH_GATE_M - 0.5, alt=2.0, cy=100.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=2.0)
     assert out.forward_mps >= _APPROACH_MIN_SPEED
     assert out.up_mps == 0.0
 
 
-def test_phase2_at_ground_no_descent():
+def test_descent_at_ground_no_descent():
     """Below altitude gate (alt ≤ 0.3 m) descent is suppressed."""
-    out = servo(_phase2_det(alt=0.2), IMG_W, IMG_H, altitude_m=0.2)
+    out = servo(_descent_det(alt=0.2), IMG_W, IMG_H, altitude_m=0.2)
     assert out.up_mps == 0.0
 
 
-def test_phase2_trajectory_correction_forward():
-    """Phase 2 adds forward to intercept target; should be > 0 with d_horiz > 0."""
-    out = servo(_phase2_det(alt=2.0), IMG_W, IMG_H, altitude_m=2.0)
+def test_descent_trajectory_correction_forward():
+    """The descent adds forward to intercept the target; > 0 with d_horiz > 0."""
+    out = servo(_descent_det(alt=2.0), IMG_W, IMG_H, altitude_m=2.0)
     assert out.forward_mps > 0.0
 
 
-def test_phase2_descent_respects_available_forward_speed():
+def test_descent_respects_available_forward_speed():
     det = _det_at_dist(d_horiz=_APPROACH_GATE_M - 0.1, alt=1.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=1.0)
-    forward_actual = out.forward_mps * 0.1
+    forward_actual = out.forward_mps
     assert abs(out.up_mps) <= forward_actual * 1.0 / out.horiz_dist_m + 1e-6
 
 
-def test_phase2_trajectory_closer_means_less_forward():
+def test_descent_trajectory_closer_means_less_forward():
     """Closer target (smaller d_horiz) → less forward correction needed."""
     det_far   = _det_at_dist(d_horiz=1.5, alt=2.0)
     det_close = _det_at_dist(d_horiz=0.2, alt=2.0)
@@ -194,35 +197,35 @@ def test_phase2_trajectory_closer_means_less_forward():
     assert out_far.forward_mps > out_close.forward_mps
 
 
-def test_phase2_off_centre_partial_descent():
+def test_descent_off_centre_partial_descent():
     """Off-centre but within fade radius: partial descent."""
-    out_centre = servo(_phase2_det(cx=320), IMG_W, IMG_H, altitude_m=2.0)
-    out_offset = servo(_phase2_det(cx=390), IMG_W, IMG_H, altitude_m=2.0)
+    out_centre = servo(_descent_det(cx=320), IMG_W, IMG_H, altitude_m=2.0)
+    out_offset = servo(_descent_det(cx=390), IMG_W, IMG_H, altitude_m=2.0)
     assert out_offset.up_mps > out_centre.up_mps
 
 
-def test_phase2_low_in_frame_still_descends_when_laterally_centred():
+def test_descent_low_in_frame_still_descends_when_laterally_centred():
     det = _det_at_dist(d_horiz=_APPROACH_GATE_M - 0.2, alt=2.0, cx=320.0, cy=460.0)
     out = servo(det, IMG_W, IMG_H, altitude_m=2.0)
     assert out.up_mps < 0.0
     assert out.descending
 
 
-def test_phase2_lateral_right():
-    out = servo(_phase2_det(cx=420), IMG_W, IMG_H, altitude_m=2.0)
+def test_descent_lateral_right():
+    out = servo(_descent_det(cx=420), IMG_W, IMG_H, altitude_m=2.0)
     assert out.right_mps > 0.0
 
 
-def test_phase2_lateral_left():
-    out = servo(_phase2_det(cx=200), IMG_W, IMG_H, altitude_m=2.0)
+def test_descent_lateral_left():
+    out = servo(_descent_det(cx=200), IMG_W, IMG_H, altitude_m=2.0)
     assert out.right_mps < 0.0
 
 
-def test_phase2_lateral_gain_reduced_at_low_altitude():
+def test_descent_lateral_gain_reduced_at_low_altitude():
     """Lateral corrections gentler near the ground."""
     err_px = 80
-    out_high = servo(_phase2_det(alt=3.0, cx=320+err_px), IMG_W, IMG_H, altitude_m=3.0)
-    out_low  = servo(_phase2_det(alt=0.5, cx=320+err_px), IMG_W, IMG_H, altitude_m=0.5)
+    out_high = servo(_descent_det(alt=3.0, cx=320+err_px), IMG_W, IMG_H, altitude_m=3.0)
+    out_low  = servo(_descent_det(alt=0.5, cx=320+err_px), IMG_W, IMG_H, altitude_m=0.5)
     assert abs(out_low.right_mps) < abs(out_high.right_mps)
 
 
@@ -248,7 +251,7 @@ def test_servo_not_visible_returns_hover():
 # ---------------------------------------------------------------------------
 
 def test_servo_outputs_within_limits():
-    for det in [_det(cx=0, cy=0), _phase2_det(cx=0, cy=10)]:
+    for det in [_det(cx=0, cy=0), _descent_det(cx=0, cy=10)]:
         out = servo(det, IMG_W, IMG_H, altitude_m=3.0)
         assert _MAX_BACK  <= out.forward_mps <= _MAX_FORWARD
         assert _MAX_LEFT  <= out.right_mps   <= _MAX_RIGHT

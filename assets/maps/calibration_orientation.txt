@@ -1,0 +1,27 @@
+--- DATA
+drone-height=1.5
+
+--- VARS
++=drone
+r=marker_red
+b=marker_blue
+y=marker_yellow
+g=marker_green
+w=marker_white
+
+--- MAP
+                    
+                    
+                    
+                    
+                    
+       r ygw b      
+                    
+                    
+                    
+                    
+                    
+                    
+          +         
+                    
+                    
