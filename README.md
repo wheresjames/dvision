@@ -135,6 +135,8 @@ tests/
   test_dsim_realism_controls.py  Changing the environment while the sim runs
   test_dcmn_mapview.py      Shared map geometry, both drawing backends
   test_dcmn_theme.py        One palette, and no module keeping its own copy
+  test_dvision_wall_clock_independence.py  Nothing depends on how busy the machine is
+  test_dtest_harness.py     The suite's own invariants, including staying off screen
   test_dway_*.py            Vehicle contract, tours, flights, realism, editor, transports
   dway_repeatability.py     Repeated baseline flights, aggregated into variance
   benchmark_batch.py        N parallel flights of one configuration, aggregated
@@ -1362,7 +1364,7 @@ Common status keys:
 |---|---|
 | `sim.id` | Instance id |
 | `sim.map` | Loaded map path |
-| `sim.time_s` | Elapsed simulation time |
+| `sim.time_s` | Simulated seconds since the run began -- time the vehicle experienced, not time that passed in the room |
 | `sim.report_dir` | This run's report root; every module writes into its own subdirectory of it |
 | `sim.camera_in_geometry` | `"1"` when the camera is inside a wall or tree, so a vision test can discard the frame |
 | `camera.width_px`, `camera.height_px` | Video dimensions |
@@ -1472,6 +1474,22 @@ a gust.
 
 Velocity command values in logs are SI setpoints. Status velocity keys show the
 actual simulated world-frame response after lag and collision handling.
+
+**Simulated time is the vehicle's clock.** `sim.time_s` counts the seconds the
+physics advanced, and every timer that gates flight -- the guided setpoint
+failsafe, the control lease, telemetry latency -- reads it rather than the wall
+clock. In the live loop `dt` comes from the wall clock, so the two track each
+other and nothing changes; under a fixed-timestep harness they do not, and a
+failsafe that fires because the machine was busy rather than because the
+vehicle flew for two seconds is measuring the wrong thing. The live loop clamps
+`dt` to 100 ms, so a process stalled longer than that advances simulated time
+by less than the wall clock -- which is the honest answer, because the physics
+did not run.
+
+A client that infers a distance from motion needs the same clock. `daic`'s
+optical-flow detector turns expansion into a range using `speed x elapsed`, and
+it takes both halves from the vehicle: taking the elapsed half from the wall
+clock made every range estimate a function of how busy the machine was.
 
 GPS values are derived from local XY using a flat-earth projection around the
 configured map origin. This is good enough for short local maps and gives DAIC

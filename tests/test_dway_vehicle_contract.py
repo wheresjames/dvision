@@ -128,12 +128,17 @@ def test_unarmed_target_is_rejected(monkeypatch) -> None:
 
 
 def test_heartbeat_does_not_preserve_stale_setpoint(monkeypatch) -> None:
+    """Two seconds of *flight* without a setpoint, not two seconds in the room.
+
+    ``advance`` moves the simulated clock, which is the one the failsafe reads.
+    The wall clock stays frozen by ``make_sim``, so a timer that crept back
+    onto it would never fire and this would fail.
+    """
     sim, clock = make_sim(monkeypatch, armed=True, setpoint_timeout=2.0)
     command(sim, "velocity", forward_mps=1.0)
-    clock.advance(1.5)
+    advance(sim, clock, 1.5)
     command(sim, "heartbeat")
-    clock.advance(0.6)
-    sim.integrate(0.05)
+    advance(sim, clock, 0.6)
     assert sim.state.mode == "HOLD"
     assert sim.state.failsafe_reason == "setpoint_timeout"
     assert sim.state.control_owner == "test"
@@ -142,8 +147,7 @@ def test_heartbeat_does_not_preserve_stale_setpoint(monkeypatch) -> None:
 def test_lease_expiry_holds_and_clears_owner(monkeypatch) -> None:
     sim, clock = make_sim(monkeypatch, armed=True, lease_timeout=1.0)
     command(sim, "velocity", forward_mps=1.0)
-    clock.advance(1.1)
-    sim.integrate(0.05)
+    advance(sim, clock, 1.1)
     assert sim.state.mode == "HOLD"
     assert sim.state.failsafe_reason == "control_lease_expired"
     assert sim.state.control_owner == ""

@@ -629,6 +629,10 @@ class DroneState:
 # ---------------------------------------------------------------------------
 
 class DroneSimulator:
+    #: Simulated time, in seconds since the run began. A class default so a
+    #: simulator built with ``__new__`` by a test rig still has a clock.
+    sim_time_s = 0.0
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.pymembus = load_pymembus()
@@ -650,6 +654,7 @@ class DroneSimulator:
         self.realism = Realism.from_settings(vars(args))
         self.running = True
         self.started = time.monotonic()
+        self.sim_time_s = 0.0
         self.video = None
         self.command = None
         self.status = None
@@ -869,7 +874,7 @@ class DroneSimulator:
 
     def apply_command(self, payload: dict) -> None:
         typ = payload["type"]
-        self.state.last_command_monotonic = time.monotonic()
+        self.state.last_command_monotonic = self.clock()
         self.state.last_command_type = typ
         self.state.command_count += 1
 
@@ -883,7 +888,7 @@ class DroneSimulator:
                 self._command_result(request_id, False,
                                      f"controlled by {self.state.control_owner}")
             else:
-                now = time.monotonic()
+                now = self.clock()
                 self.state.control_owner = source
                 self.state.control_lease_id = lease
                 self.state.lease_acquired_monotonic = now
@@ -911,7 +916,7 @@ class DroneSimulator:
 
         if typ == "heartbeat":
             if self._owns_control(payload):
-                self.state.lease_heartbeat_monotonic = time.monotonic()
+                self.state.lease_heartbeat_monotonic = self.clock()
             self._command_result(request_id, True)
             return
         if typ != "land" and not self._owns_control(payload):
@@ -927,7 +932,7 @@ class DroneSimulator:
                 self.state.home_z = self.state.z
                 self.state.failsafe_reason = ""
                 self.state.last_setpoint_monotonic = None
-                self.state.guided_entered_monotonic = time.monotonic()
+                self.state.guided_entered_monotonic = self.clock()
             if not self.state.armed:
                 self._clear_targets()
             self._command_result(request_id, True)
@@ -1035,9 +1040,9 @@ class DroneSimulator:
             self.state.cmd_up = up
             self.state.cmd_yaw_rate = yaw_rate
             self.state.mode         = "GUIDED"
-            self.state.guided_entered_monotonic = time.monotonic()
+            self.state.guided_entered_monotonic = self.clock()
             self.state.target_alt   = None
-            self.state.last_setpoint_monotonic = time.monotonic()
+            self.state.last_setpoint_monotonic = self.clock()
             self.state.failsafe_reason = ""
             self._command_result(request_id, True)
             return
@@ -1083,8 +1088,8 @@ class DroneSimulator:
             self.state.target_heading_deg = heading
             self.state.target_max_speed_mps = max_speed
             self.state.mode = "GUIDED"
-            self.state.guided_entered_monotonic = time.monotonic()
-            self.state.last_setpoint_monotonic = time.monotonic()
+            self.state.guided_entered_monotonic = self.clock()
+            self.state.last_setpoint_monotonic = self.clock()
             self.state.failsafe_reason = ""
             self._command_result(request_id, True)
             return
@@ -1099,12 +1104,25 @@ class DroneSimulator:
     def _lease_active(self) -> bool:
         stamp = self.state.lease_heartbeat_monotonic
         return bool(self.state.control_lease_id and stamp is not None
-                    and time.monotonic() - stamp <= self._lease_timeout_s())
+                    and self.clock() - stamp <= self._lease_timeout_s())
 
     def _owns_control(self, payload: dict) -> bool:
         return (self._lease_active()
                 and payload.get("source_id") == self.state.control_owner
                 and payload.get("lease_id") == self.state.control_lease_id)
+
+    def clock(self) -> float:
+        """The vehicle's clock: simulated seconds since the run began.
+
+        Every timer that gates flight -- the guided setpoint failsafe, the
+        control lease, how long the vehicle has been in GUIDED -- reads this
+        rather than the wall clock. In the live loop ``dt`` comes from the wall
+        clock so the two track each other; under a fixed-timestep harness they
+        do not, and a failsafe that fires because the machine was busy rather
+        than because the vehicle flew for two seconds is measuring the wrong
+        thing.
+        """
+        return self.sim_time_s
 
     def _lease_timeout_s(self) -> float:
         return float(getattr(self.args, "control_lease_timeout", 3.0))
@@ -1158,13 +1176,19 @@ class DroneSimulator:
 
     def integrate(self, dt: float) -> None:
         st = self.state
+        # Time the vehicle experienced, not time that passed in the room. In
+        # the live loop dt comes from the wall clock so the two track each
+        # other; under a fixed-timestep harness they do not, and a client that
+        # infers a distance from "how long since the last frame" needs the one
+        # the physics actually advanced by.
+        self.sim_time_s += dt
         if st.crashed:
             self.zero_motion()
             st.mode = "CRASHED"
             st.status_message = "crashed"
             return
 
-        now = time.monotonic()
+        now = self.clock()
         self.realism.update(dt)
         if st.control_lease_id and not self._lease_active():
             if st.armed:
@@ -1199,7 +1223,7 @@ class DroneSimulator:
                 if st.mode == "TAKEOFF":
                     st.mode = "GUIDED"
                     st.last_setpoint_monotonic = None
-                    st.guided_entered_monotonic = time.monotonic()
+                    st.guided_entered_monotonic = self.clock()
                 elif st.mode == "LAND":
                     st.armed = False
                     st.mode  = "DISARMED"
@@ -1430,7 +1454,10 @@ class DroneSimulator:
         delay = self.realism.telemetry
         if force or delay is None or not delay.enabled:
             return values
-        now = time.monotonic()
+        # The vehicle's clock here too: a delay measured in wall time is not
+        # reproducible under a fixed-timestep harness, and in the live loop the
+        # two are the same thing.
+        now = self.clock()
         delay.push(now, values)
         return delay.release(now)
 
@@ -1471,7 +1498,7 @@ class DroneSimulator:
             target_lat_s = target_lon_s = target_alt_s = ""
         speed    = math.sqrt(vx ** 2 + vy ** 2 + vz ** 2)
         last_cmd = (-1.0 if st.last_command_monotonic is None
-                    else time.monotonic() - st.last_command_monotonic)
+                    else self.clock() - st.last_command_monotonic)
         cam_fov_h = Panda3DRenderer.CAM_FOV_H
         cam_w     = self.args.width
         cam_h     = self.args.height
@@ -1481,7 +1508,7 @@ class DroneSimulator:
         values = {
             "sim.id":                self.args.id,
             "sim.map":               str(self.map.path),
-            "sim.time_s":            f"{time.monotonic() - self.started:.3f}",
+            "sim.time_s":            f"{self.sim_time_s:.3f}",
             "sim.report_dir":        str(self.report_root),
             "sim.camera_in_geometry": "1" if self.is_blocked(st.x, st.y) else "0",
             "vehicle.type":          "dsim",
@@ -1500,9 +1527,9 @@ class DroneSimulator:
             "home.lon_deg":          "",
             "home.alt_m":            "",
             "control.owner":         st.control_owner,
-            "control.lease_age_s":   ("" if st.lease_heartbeat_monotonic is None else f"{time.monotonic() - st.lease_heartbeat_monotonic:.3f}"),
+            "control.lease_age_s":   ("" if st.lease_heartbeat_monotonic is None else f"{self.clock() - st.lease_heartbeat_monotonic:.3f}"),
             "control.lease_timeout_s": f"{self._lease_timeout_s():.3f}",
-            "setpoint.age_s":        ("" if st.last_setpoint_monotonic is None else f"{time.monotonic() - st.last_setpoint_monotonic:.3f}"),
+            "setpoint.age_s":        ("" if st.last_setpoint_monotonic is None else f"{self.clock() - st.last_setpoint_monotonic:.3f}"),
             "failsafe.reason":       st.failsafe_reason,
             "command.result.request_id": st.result_request_id,
             "command.result.accepted": "1" if st.result_accepted else "0",

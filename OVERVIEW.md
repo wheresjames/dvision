@@ -121,7 +121,7 @@ dsim publishes the following keys to the status buffer after every tick:
 |---|---|
 | `sim.id` | Instance id |
 | `sim.map` | Loaded map file path |
-| `sim.time_s` | Elapsed simulation time |
+| `sim.time_s` | Simulated seconds since the run began; the clock every flight timer reads |
 | `drone.armed` | `"1"` / `"0"` |
 | `drone.mode` | `DISARMED`, `GUIDED`, `TAKEOFF`, `LAND`, `RTL`, `HOLD`, `CRASHED` |
 | `drone.x_m`, `drone.y_m`, `drone.z_m` | Local position in meters |

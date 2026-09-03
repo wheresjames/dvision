@@ -72,6 +72,8 @@ class OpticalFlowAvoidance:
     def __init__(self) -> None:
         self._prev_gray: np.ndarray | None = None
         self._prev_t: float | None = None
+        self._vehicle_time_s: float | None = None
+        self._prev_vehicle_t: float | None = None
         self._forward_speed_mps = 0.0
         self._persisted = _NULL_SECTORS
         self._status_text = "initialising"
@@ -88,6 +90,7 @@ class OpticalFlowAvoidance:
     def reset(self) -> None:
         self._prev_gray = None
         self._prev_t = None
+        self._prev_vehicle_t = None
         self._persisted = _NULL_SECTORS
         self._status_text = "reset"
         for hist in self._range_hist.values():
@@ -95,7 +98,15 @@ class OpticalFlowAvoidance:
         self._range_last_tick.clear()
 
     def set_motion_from_status(self, status: dict[str, Any]) -> None:
-        """Update body-forward speed used to turn TTC into range."""
+        """Update body-forward speed and vehicle clock used to turn TTC into range.
+
+        Both halves of ``speed x elapsed`` come from the vehicle. Taking the
+        elapsed half from the wall clock instead makes every range estimate a
+        function of how busy the machine is, because the distance the camera
+        travelled between two frames is a fact about the vehicle, not about the
+        loop that read them.
+        """
+        self._vehicle_time_s = _try_float(status.get("sim.time_s"))
         vx = _try_float(status.get("drone.vx_mps"))
         vy = _try_float(status.get("drone.vy_mps"))
         yaw = _try_float(status.get("drone.heading_deg"))
@@ -105,6 +116,21 @@ class OpticalFlowAvoidance:
         self._forward_speed_mps = _body_forward_speed(
             float(vx), float(vy), float(yaw),
         )
+
+    def _frame_interval(self, now: float) -> float | None:
+        """How much time the vehicle experienced between the last two frames.
+
+        The vehicle's own clock when it publishes one, the wall clock when it
+        does not -- a link that reports no time at all leaves the wall clock as
+        the only estimate there is. A clock that has gone backwards, which is
+        what a simulator reset looks like, is not an interval.
+        """
+        previous, current = self._prev_vehicle_t, self._vehicle_time_s
+        if previous is not None and current is not None and current > previous:
+            return current - previous
+        if self._prev_t is None:
+            return None
+        return now - self._prev_t
 
     def _smooth_ranges(self, sectors: ObstacleSectors) -> ObstacleSectors:
         """Replace each sector range with a short running median.
@@ -135,19 +161,29 @@ class OpticalFlowAvoidance:
             **smoothed,
         )
 
-    def detect_obstacles(self, frame_rgb: np.ndarray) -> ObstacleSectors:
+    def detect_obstacles(self, frame_rgb: np.ndarray, *,
+                         dt_s: float | None = None) -> ObstacleSectors:
+        """One frame in, obstacle sectors out.
+
+        ``dt_s`` is the time between this frame and the last, for a caller that
+        knows it exactly. Left out, it comes from the vehicle clock reported to
+        :meth:`set_motion_from_status`, and from the wall clock only when there
+        is no vehicle clock to use.
+        """
         now = time.monotonic()
         gray = _to_gray_small(frame_rgb)
         if self._prev_gray is None:
             self._prev_gray = gray
             self._prev_t = now
+            self._prev_vehicle_t = self._vehicle_time_s
             self._status_text = "priming"
             return self._persisted
 
         prev = self._prev_gray
-        prev_t = self._prev_t
+        measured = dt_s if dt_s is not None else self._frame_interval(now)
         self._prev_gray = gray
         self._prev_t = now
+        self._prev_vehicle_t = self._vehicle_time_s
 
         cv2 = _cv2()
         flow = cv2.calcOpticalFlowFarneback(
@@ -162,8 +198,7 @@ class OpticalFlowAvoidance:
             poly_sigma=1.2,
             flags=0,
         )
-        dt_s = (now - prev_t) if prev_t is not None else None
-        instant = _flow_to_sectors(flow, self._forward_speed_mps, dt_s)
+        instant = _flow_to_sectors(flow, self._forward_speed_mps, measured)
         instant = self._smooth_ranges(instant)
         sectors = _persist_sectors(self._persisted, instant)
         self._persisted = sectors

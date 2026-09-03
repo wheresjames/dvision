@@ -19,6 +19,9 @@ DEFAULT_WIDTH = 640
 DEFAULT_HEIGHT = 480
 _RENDERER: tuple[tuple[str, int, int, str], Panda3DRenderer] | None = None
 
+#: Longer than any harness run, so the single acquire at construction holds.
+_NO_LEASE_TIMEOUT_S = 1e9
+
 
 def map_content_sha(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -60,9 +63,17 @@ class HeadlessSimulator:
         sim.crash_pos = None
         sim.started = 0.0
         sim.command = None
+        # No streaming client and no lease heartbeat: this driver sends a
+        # setpoint and steps physics. The guided failsafe and the control lease
+        # exist to notice a client that has stopped talking, which is a
+        # protocol behaviour covered by the vehicle-contract and process tests;
+        # leaving them armed here would stop the vehicle mid-measurement and
+        # report it as a physics or perception result.
         sim.args = parse_args([
             "--id", instance_id, "--width", str(self.width),
             "--height", str(self.height),
+            "--setpoint-timeout", "0",
+            "--control-lease-timeout", str(_NO_LEASE_TIMEOUT_S),
         ])
         sim.status = None
         sim.report_root = Path("/nonexistent/dsim-headless")
