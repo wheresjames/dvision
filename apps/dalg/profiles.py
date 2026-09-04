@@ -18,10 +18,24 @@ class Profile:
     digest: str
 
 
+#: Where the committed profiles live, relative to the repository root. They sit
+#: in ``assets/`` beside the maps and tours because that is what they are:
+#: fixture data a run is configured with, owned by no single consumer, and
+#: edited far more often than the code that reads them. Resolving them from
+#: ``root`` also means the paths *inside* a profile -- its tour, a model file --
+#: are relative to the same place the profile itself was found.
+PROFILES_SUBDIR = Path("assets") / "profiles"
+
+
+def profile_dir(root: Path) -> Path:
+    """The committed profile directory beneath ``root``."""
+    return Path(root) / PROFILES_SUBDIR
+
+
 def load_profile(name_or_path: str, root: Path) -> Profile:
     path = Path(name_or_path)
     if not path.suffix:
-        path = root / "dalg" / "profiles" / f"{name_or_path}.json"
+        path = profile_dir(root) / f"{name_or_path}.json"
     elif not path.is_absolute():
         path = root / path
     raw = path.read_bytes()

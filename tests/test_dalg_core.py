@@ -4,13 +4,14 @@ import math
 import time
 import numpy as np
 import pytest
+from PIL import Image
 from pathlib import Path
 
 import dalg.run as run_module
 from dalg.algo.controls import ExactRangeAlgorithm
 from dalg.grid import LogOddsGrid, OccupancyGrid
 from dalg.overlay import FALSE_NEGATIVE, FALSE_POSITIVE, TRUE_POSITIVE, verdict_raster
-from dalg.profiles import load_profile
+from dalg.profiles import load_profile, profile_dir
 from dvision2_common import load_map, shared_names
 from dalg.algo import ALGORITHMS
 from dalg.algo.plane_sweep import PlaneSweepAlgorithm
@@ -21,7 +22,6 @@ from dalg.algo.optical_flow import OpticalFlowTriangulationAlgorithm
 from dalg.algo.spatial import triangulate_xy
 from dalg.model import Frame, Intrinsics, Pose
 from dcmn.module_bus import ModuleEvent, PipelineView
-from dalg.report import run_directory
 from dalg.run import (DalgRun, algorithm_settings, copy_video_frame,
                       matches_prepare)
 from dalg.visibility import observable_mask
@@ -163,7 +163,7 @@ def test_every_profile_constructs_through_the_run_call_path():
     root = Path(__file__).resolve().parents[1]
     intrinsics = Intrinsics(640, 480, 554.3, 554.3, 320.0, 240.0)
     truth = OccupancyGrid(np.full((8, 8), .05, np.float32), np.ones((8, 8), bool))
-    for path in sorted((root / "dalg/profiles").glob("*.json")):
+    for path in sorted(profile_dir(root).glob("*.json")):
         profile = load_profile(path.stem, root)
         settings = algorithm_settings(profile.algorithm, profile.settings)
         if profile.algorithm == "exact_range":
@@ -243,10 +243,38 @@ def test_visibility_mask_stops_at_the_first_wall():
     assert not mask[1, 2] and not mask[0, 2]             # nothing behind it
 
 
-def test_reports_do_not_overwrite_each_other():
-    assert run_directory("a", "p") != run_directory("b", "p")
-    assert "/" not in run_directory("../../etc/passwd", "p")
-    assert run_directory("", "p")
+def test_report_lands_in_the_module_directory_like_every_other_module(tmp_path):
+    """``<report_root>/dalg/``, with no run directory nested inside it.
+
+    dalg used to add a ``<run_id>-<profile>`` level so a second run in one
+    simulator session could not overwrite the first. Every other module
+    overwrites in that case, so the extra level only made the path opaque.
+    """
+    out = _report_fixture(tmp_path)
+
+    assert out == tmp_path / "dalg"
+    assert (out / "summary.json").is_file()
+    assert not [child for child in out.iterdir() if child.is_dir()]
+
+
+def test_report_html_still_finds_the_sibling_module_reports(tmp_path):
+    """The flight images live one level up, and flattening moved that level.
+
+    report.html embeds dsim's flight path and dway's track from the run root
+    the modules share. That root was ``out.parent.parent`` while dalg nested a
+    run directory; it is ``out.parent`` now, and getting it wrong loses the
+    images silently rather than raising.
+    """
+    for relative in ("dsim/flight_path.png", "dway/track.png"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (4, 4), (7, 8, 9)).save(target)
+
+    html = (_report_fixture(tmp_path) / "report.html").read_text(encoding="utf-8")
+
+    assert "Flight Path (dsim)" in html
+    assert "Navigator Track (dway)" in html
+    assert html.count("data:image/png;base64,") >= 2
 
 
 def test_coordinator_watchdog_follows_the_clock_the_coordinator_paces_on():

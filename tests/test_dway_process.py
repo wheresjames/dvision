@@ -23,7 +23,7 @@ def start_dway(harness: DsimProcessHarness, tour: Path, stderr_path: Path,
                *extra: str) -> tuple[subprocess.Popen, object]:
     handle = stderr_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
-        [sys.executable, str(ROOT / "dway/dway.py"), "--id", harness.id,
+        [sys.executable, str(ROOT / "apps/dway/dway.py"), "--id", harness.id,
          "--tour", str(tour), "--no-ui", "--finish-action", "hold", *extra],
         cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=handle,
         start_new_session=True)

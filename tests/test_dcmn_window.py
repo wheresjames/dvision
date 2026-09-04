@@ -89,8 +89,8 @@ def test_every_tk_front_end_declines_before_it_reaches_tk(monkeypatch):
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    for module in ("dsim/dsim.py", "dctl/dctl.py", "dway/dway.py",
-                   "dalg/dalg.py", "daic/daic.py", "dfgb/dfgb.py"):
+    for module in ("apps/dsim/dsim.py", "apps/dctl/dctl.py", "apps/dway/dway.py",
+                   "apps/dalg/dalg.py", "apps/daic/daic.py", "apps/dfgb/dfgb.py"):
         tree = ast.parse((root / module).read_text(encoding="utf-8"))
         main = next(node for node in tree.body
                     if isinstance(node, ast.FunctionDef) and node.name == "main")

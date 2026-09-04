@@ -109,7 +109,7 @@ def test_running_daic_connects_and_drives_real_dsim_transport(tmp_path) -> None:
         stderr_fh = stderr_path.open("w", encoding="utf-8")
         daic = subprocess.Popen(
             [
-                sys.executable, str(ROOT / "daic/daic.py"),
+                sys.executable, str(ROOT / "apps/daic/daic.py"),
                 "--id", harness.id,
                 "--no-ui",
                 "--enable-ai",
@@ -168,7 +168,7 @@ def test_dctl_gui_starts_against_live_backend_under_virtual_display(tmp_path) ->
         stderr_fh = stderr_path.open("w", encoding="utf-8")
         dctl = subprocess.Popen(
             [
-                xvfb_run, "-a", sys.executable, str(ROOT / "dctl/dctl.py"),
+                xvfb_run, "-a", sys.executable, str(ROOT / "apps/dctl/dctl.py"),
                 "--id", harness.id,
                 "--no-joystick",
                 "--fps", "20",

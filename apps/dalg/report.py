@@ -10,23 +10,18 @@ from dalg.report_html import write_html_report
 from dalg.score import score_occupancy
 
 
-def run_directory(run_id: str, profile_name: str) -> str:
-    """A filesystem-safe directory name for one run.
-
-    Reports used to land on a single fixed path, so a second run -- or a second
-    profile -- in the same simulator session silently overwrote the first. The
-    run id comes off the bus, so it is sanitised rather than trusted.
-    """
-    raw = f"{run_id or 'unidentified'}-{profile_name}"
-    cleaned = "".join(c if c.isalnum() or c in "-_" else "-" for c in raw)
-    return cleaned.strip("-")[:96] or "unidentified"
-
-
 def write_report(report_root: Path, *, run_id: str, profile, truth,
                  results: dict, provenance: dict, partial: bool,
                  reason: str = "", events: list[dict] | None = None,
                  observable=None) -> Path:
-    out = Path(report_root) / "dalg" / run_directory(run_id, profile.name)
+    # One directory per module, named after the module, exactly like dsim,
+    # daic and dway. This used to nest a <run_id>-<profile> directory inside
+    # it so a second run in one simulator session could not overwrite the
+    # first -- but every other module overwrites in that case too, so the
+    # uniqueness bought nothing that the report as a whole provides, at the
+    # cost of an opaque path. If runs ever need to be kept apart, that belongs
+    # in the run root every module shares, not in one module's subdirectory.
+    out = Path(report_root) / "dalg"
     out.mkdir(parents=True, exist_ok=True)
     scores = {}
     diagnostics = {}
@@ -65,7 +60,7 @@ def write_report(report_root: Path, *, run_id: str, profile, truth,
     try:
         write_html_report(out, summary, overlays=overlays,
                           predictions=predictions, region=region,
-                          events=events, report_root=out.parent.parent)
+                          events=events, report_root=out.parent)
     except Exception as exc:  # pragma: no cover - reporting is best effort
         print(f"dalg: html report failed: {exc}", file=sys.stderr)
     return out

@@ -16,8 +16,8 @@ import pytest
 from dcmn import theme
 
 ROOT = Path(__file__).resolve().parents[1]
-WINDOW_MODULES = ("dsim/dsim.py", "dctl/dctl.py", "dway/dway.py",
-                  "dway/editor.py", "dway/report.py")
+WINDOW_MODULES = ("apps/dsim/dsim.py", "apps/dctl/dctl.py", "apps/dway/dway.py",
+                  "apps/dway/editor.py", "apps/dway/report.py")
 HEX_COLOUR = re.compile(r'"#[0-9a-fA-F]{3,8}"')
 
 

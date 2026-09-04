@@ -9,13 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 RUNTIME_MODULES = [
-    "daic/daic.py",
-    "daic/planner.py",
-    "daic/local_map.py",
-    "daic/avoidance.py",
-    "daic/optical_flow_avoidance.py",
-    "daic/mini_slam_detector.py",
-    "daic/orb_slam3_detector.py",
+    "apps/daic/daic.py",
+    "apps/daic/planner.py",
+    "apps/daic/local_map.py",
+    "apps/daic/avoidance.py",
+    "apps/daic/optical_flow_avoidance.py",
+    "apps/daic/mini_slam_detector.py",
+    "apps/daic/orb_slam3_detector.py",
 ]
 
 

@@ -138,7 +138,7 @@ def analyze_log(log_path: str | Path,
     target_error: str | None = None
     if map_path is not None:
         try:
-            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
             from dvision2_common import load_map
             sim_map = load_map(Path(map_path))
             targets = [o for o in sim_map.objects if o.kind == "target"]

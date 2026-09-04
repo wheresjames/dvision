@@ -35,7 +35,8 @@ from dway.tour import (
     FrameContext, Tour, TourError, leg_clearances, load_tour_map, resolve_map,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+#: The repository root: assets and reports live beside ``apps/``, not in it.
+ROOT = Path(__file__).resolve().parents[2]
 
 #: Bounded waits for transitions the vehicle acknowledges with motion rather
 #: than with a command result.

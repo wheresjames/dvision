@@ -1,4 +1,4 @@
-"""Unit tests for daic/orb_slam3_detector.py.
+"""Unit tests for apps/daic/orb_slam3_detector.py.
 
 All tests are pure-Python; no ORB_SLAM3 bindings or dsim are required.
 The SLAM API is exercised through a lightweight stub injected via monkey-patching.

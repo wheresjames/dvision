@@ -67,28 +67,28 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- dsim physics and rendering -----------------------------------
     Mutation(
         "dsim/yaw-integration",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "st.yaw_deg  = (st.yaw_deg - st.yaw_rate * dt) % 360.0",
         "st.yaw_deg  = (st.yaw_deg + st.yaw_rate * dt) % 360.0",
         "positive yaw would lower the compass heading",
     ),
     Mutation(
         "dsim/commanded-strafe",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         'self.state.cmd_right    = float(payload.get("right_mps",   0.0))',
         'self.state.cmd_right    = -float(payload.get("right_mps",   0.0))',
         "a right strafe command would fly left",
     ),
     Mutation(
         "dsim/camera-roll",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, -state.roll_deg)",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, state.roll_deg)",
         "a right bank would tilt the rendered horizon the wrong way",
     ),
     Mutation(
         "dsim/roll-leaks-into-pitch",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, -state.roll_deg)",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg "
         "+ 0.3 * state.roll_deg, -state.roll_deg)",
@@ -96,7 +96,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "dsim/pitch-leaks-into-roll",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, -state.roll_deg)",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, "
         "-state.roll_deg + 0.3 * state.pitch_deg)",
@@ -104,21 +104,21 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "dsim/attitude-axes-exchanged",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, -state.roll_deg)",
         "cam.setHpr(panda_h, self.CAM_PITCH - state.roll_deg, state.pitch_deg)",
         "roll and pitch driving each other's channel",
     ),
     Mutation(
         "dsim/publish-attitude-axes-exchanged",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         '"drone.roll_deg":        f"{st.roll_deg:.2f}"',
         '"drone.roll_deg":        f"{st.pitch_deg:.2f}"',
         "published roll would report the pitch",
     ),
     Mutation(
         "dsim/framebuffer-column-reversal",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "[::-1, ::-1]",
         "[::-1, :]",
         "every delivered frame would be mirrored left-for-right",
@@ -126,35 +126,35 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- dsim published telemetry -------------------------------------
     Mutation(
         "dsim/publish-roll",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         '"drone.roll_deg":        f"{st.roll_deg:.2f}"',
         '"drone.roll_deg":        f"{-st.roll_deg:.2f}"',
         "DAIC would read a right bank as a left one",
     ),
     Mutation(
         "dsim/publish-pitch",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         '"drone.pitch_deg":       f"{st.pitch_deg:.2f}"',
         '"drone.pitch_deg":       f"{-st.pitch_deg:.2f}"',
         "nose-up and nose-down would be exchanged",
     ),
     Mutation(
         "dsim/publish-vx",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         '"drone.vx_mps":          f"{st.vx:.3f}"',
         '"drone.vx_mps":          f"{-st.vx:.3f}"',
         "flow ranging and SLAM scale anchoring read this",
     ),
     Mutation(
         "dsim/publish-vy",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         '"drone.vy_mps":          f"{st.vy:.3f}"',
         '"drone.vy_mps":          f"{-st.vy:.3f}"',
         "as above, on the north/south axis",
     ),
     Mutation(
         "dsim/publish-position-transpose",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         '"drone.x_m":             f"{st.x:.3f}"',
         '"drone.x_m":             f"{st.y:.3f}"',
         "pose_from_status navigates on these two keys",
@@ -162,7 +162,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- dctl client ---------------------------------------------------
     Mutation(
         "dctl/display-frame-flip",
-        "dctl/dctl.py",
+        "apps/dctl/dctl.py",
         '''def _client_rgb_frame(frame: np.ndarray) -> np.ndarray:
     """Normalize a shared RGB frame without changing pixel orientation."""
     return np.ascontiguousarray(frame)''',
@@ -173,14 +173,14 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "dctl/manual-yaw-sign",
-        "dctl/dctl.py",
+        "apps/dctl/dctl.py",
         "return _clamp(yaw_right_norm) * _MANUAL_YAW_RATE_DPS",
         "return -_clamp(yaw_right_norm) * _MANUAL_YAW_RATE_DPS",
         "pressing yaw-right would turn the drone left",
     ),
     Mutation(
         "dctl/joystick-strafe-axis",
-        "dctl/dctl.py",
+        "apps/dctl/dctl.py",
         """    @property
     def right(self) -> float:
         return self._axis(0)""",
@@ -191,7 +191,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "dctl/joystick-forward-axis",
-        "dctl/dctl.py",
+        "apps/dctl/dctl.py",
         """    @property
     def forward(self) -> float:
         return -self._axis(1)""",
@@ -202,7 +202,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "dctl/joystick-axis-exchange",
-        "dctl/dctl.py",
+        "apps/dctl/dctl.py",
         """    @property
     def up(self) -> float:
         return -self._axis(4)""",
@@ -214,7 +214,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- daic frame adapters and display -------------------------------
     Mutation(
         "daic/interpreted-frame-flip",
-        "daic/daic.py",
+        "apps/daic/daic.py",
         '''def _client_rgb_frame(frame: np.ndarray) -> np.ndarray:
     """Convert shared-memory renderer output to daic's interpreted RGB frame."""
     return np.ascontiguousarray(frame)''',
@@ -225,7 +225,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "daic/display-sector-swap",
-        "daic/daic.py",
+        "apps/daic/daic.py",
         '''def _display_sectors(sectors: ObstacleSectors) -> ObstacleSectors:
     """Convert interpreted-frame sector risks into display HUD coordinates."""
     return sectors''',
@@ -237,14 +237,14 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "daic/minimap-x-mirror",
-        "daic/daic.py",
+        "apps/daic/daic.py",
         "px = margin + int(((wx - x_min) / (x_max - x_min)) * use)",
         "px = margin + int((1.0 - (wx - x_min) / (x_max - x_min)) * use)",
         "the point cloud would draw starboard points to port",
     ),
     Mutation(
         "daic/minimap-marker-mirror",
-        "daic/daic.py",
+        "apps/daic/daic.py",
         "        return (cx + int(math.sin(angle) * radius),",
         "        return (cx - int(math.sin(angle) * radius),",
         "the drone marker would disagree with its own point cloud",
@@ -252,7 +252,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- daic perception sectors ---------------------------------------
     Mutation(
         "flow/side-sector-swap",
-        "daic/optical_flow_avoidance.py",
+        "apps/daic/optical_flow_avoidance.py",
         "    left_mask = roi & (x_norm < 0.28)\n"
         "    right_mask = roi & (x_norm > 0.72)",
         "    left_mask = roi & (x_norm > 0.72)\n"
@@ -261,7 +261,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "flow/forward-sector-swap",
-        "daic/optical_flow_avoidance.py",
+        "apps/daic/optical_flow_avoidance.py",
         "    front_left_mask = roi & (x_norm >= 0.18) & (x_norm < 0.45)\n"
         "    front_right_mask = roi & (x_norm > 0.55) & (x_norm <= 0.82)",
         "    front_left_mask = roi & (x_norm > 0.55) & (x_norm <= 0.82)\n"
@@ -270,14 +270,14 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "mini_slam/azimuth-mirror",
-        "daic/mini_slam_detector.py",
+        "apps/daic/mini_slam_detector.py",
         "az_deg = np.degrees(np.arctan2(x_c, z_c))",
         "az_deg = np.degrees(np.arctan2(-x_c, z_c))",
         "every triangulated point would land on the wrong side",
     ),
     Mutation(
         "mini_slam/side-sector-swap",
-        "daic/mini_slam_detector.py",
+        "apps/daic/mini_slam_detector.py",
         "            left        = _sector(-90.0,        -_OUTER_DEG),\n"
         "            right       = _sector( _OUTER_DEG,   90.0),",
         "            left        = _sector( _OUTER_DEG,   90.0),\n"
@@ -286,7 +286,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "orb_slam3/azimuth-mirror",
-        "daic/orb_slam3_detector.py",
+        "apps/daic/orb_slam3_detector.py",
         "az_deg = np.degrees(np.arctan2(x_c, z_c))",
         "az_deg = np.degrees(np.arctan2(-x_c, z_c))",
         "the third detector's copy of the same reduction",
@@ -294,7 +294,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- daic camera intrinsics ----------------------------------------
     Mutation(
         "mini_slam/K-principal-point-transpose",
-        "daic/mini_slam_detector.py",
+        "apps/daic/mini_slam_detector.py",
         '        cx = _f(status, "camera.cx_px",  320.0)\n'
         '        cy = _f(status, "camera.cy_px",  240.0)',
         '        cx = _f(status, "camera.cy_px",  240.0)\n'
@@ -303,7 +303,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "mini_slam/K-focal-transpose",
-        "daic/mini_slam_detector.py",
+        "apps/daic/mini_slam_detector.py",
         "        return np.array([[fx, 0,  cx],\n"
         "                         [0,  fy, cy],",
         "        return np.array([[fy, 0,  cy],\n"
@@ -312,7 +312,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         "mini_slam/K-default-transpose",
-        "daic/mini_slam_detector.py",
+        "apps/daic/mini_slam_detector.py",
         '        cx = _f(status, "camera.cx_px",  320.0)',
         '        cx = _f(status, "camera.cx_px",  240.0)',
         "a wrong default would hide a transpose whenever telemetry is absent",
@@ -321,28 +321,28 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- daic mapping and control --------------------------------------
     Mutation(
         "local_map/heading-to-map-yaw",
-        "daic/local_map.py",
+        "apps/daic/local_map.py",
         "return (heading_deg + 270.0) % 360.0",
         "return (heading_deg + 90.0) % 360.0",
         "the whole map would be rotated 180 degrees",
     ),
     Mutation(
         "local_map/sector-bearing-mirror",
-        "daic/local_map.py",
+        "apps/daic/local_map.py",
         '"left":        _sector_band(-90.0, -_OUTER_DEG),',
         '"left":        _sector_band(_OUTER_DEG, 90.0),',
         "left observations would be planted to starboard",
     ),
     Mutation(
         "local_map/relative-bearing-sign",
-        "daic/local_map.py",
+        "apps/daic/local_map.py",
         "yaw = math.radians(pose.yaw_deg + rel_deg)",
         "yaw = math.radians(pose.yaw_deg - rel_deg)",
         "every off-axis observation would mirror about the nose",
     ),
     Mutation(
         "local_map/route-yaw-sign",
-        "daic/local_map.py",
+        "apps/daic/local_map.py",
         "yaw = _clamp(yaw_error * _YAW_GAIN, -_MAX_YAW_DPS, _MAX_YAW_DPS)",
         "yaw = _clamp(-yaw_error * _YAW_GAIN, -_MAX_YAW_DPS, _MAX_YAW_DPS)",
         "the route follower would turn away from each waypoint",
@@ -350,28 +350,28 @@ MUTATIONS: tuple[Mutation, ...] = (
     # -- yaw-dependent and chain-level ---------------------------------
     Mutation(
         "dsim/camera-yaw-frozen",
-        "dsim/dsim.py",
+        "apps/dsim/dsim.py",
         "panda_h = (90.0 - state.yaw_deg) % 360.0",
         "panda_h = (90.0 - 270.0) % 360.0",
         "camera ignores yaw -- correct at heading 0, wrong everywhere else",
     ),
     Mutation(
         "local_map/camera-fov-drift",
-        "daic/local_map.py",
+        "apps/daic/local_map.py",
         "_CAMERA_HALF_FOV_DEG = 35.0   # dsim Panda3DRenderer.CAM_FOV_H = 70.0",
         "_CAMERA_HALF_FOV_DEG = 70.0   # dsim Panda3DRenderer.CAM_FOV_H = 70.0",
         "observations planted outside the view that produced them",
     ),
     Mutation(
         "local_map/asymmetric-obstacle-smear",
-        "daic/local_map.py",
+        "apps/daic/local_map.py",
         "for off_deg in (-10.0, 0.0, 10.0):",
         "for off_deg in (0.0, 10.0, 20.0):",
         "every obstacle smeared to starboard",
     ),
     Mutation(
         "controller/lateral-servo-gain",
-        "daic/controller.py",
+        "apps/daic/controller.py",
         "_K_LATERAL = 0.0047",
         "_K_LATERAL = -0.0047",
         "the visual servo would steer away from the target",

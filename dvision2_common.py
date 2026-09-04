@@ -438,6 +438,16 @@ def clamp(value: float, low: float, high: float) -> float:
 
 # Backward-compatible imports for out-of-tree users. UI code should import
 # these from dcmn.window; the protocol module no longer owns window behavior.
+# ``dcmn`` lives under the ``apps/`` source root while this module sits beside
+# it, so importing this file with only the repository root on the path -- which
+# is how dtest, compare.py and out-of-tree callers do it -- would otherwise
+# fail here. The applications bootstrap the same directory for themselves; this
+# is the one place the shared protocol module has to do it, and only because of
+# the backward-compatible re-export below.
+_APPS = Path(__file__).resolve().parent / "apps"
+if _APPS.is_dir() and str(_APPS) not in sys.path:
+    sys.path.append(str(_APPS))
+
 from dcmn.window import (restore_window_geometry, restore_window_pos,
                          save_window_geometry, save_window_pos)
 

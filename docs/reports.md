@@ -14,6 +14,7 @@ reports/<id>/<run>/
   dsim/        the simulator's own artifacts
   daic/        the AI controller's artifacts
   dway/        the tour follower's artifacts
+  dalg/        the algorithm demonstrator's artifacts
   <module>/    any other attached client, named after itself
 ```
 
@@ -34,8 +35,8 @@ programmatic construction, not a mode of operation.
 ### Example
 
 ```bash
-./dsim/dsim.py --id area1 --map ./assets/maps/maze_001.txt &
-./daic/daic.py --id area1 --enable-ai &
+./apps/dsim/dsim.py --id area1 --map ./assets/maps/maze_001.txt &
+./apps/daic/daic.py --id area1 --enable-ai &
 ```
 
 ```text
@@ -93,7 +94,7 @@ until the status buffer opens, then picks up the root.
 1. **The pickup latches.** A client reads `sim.report_dir` once, when it first
    opens the status buffer. If `dsim` is restarted while the client keeps
    running, the simulator mints a *new* run directory but the client goes on
-   writing into the old one. A `dsim/` directory with no sibling is the symptom.
+   writing into the old one. A `apps/dsim/` directory with no sibling is the symptom.
 2. **An absent key is not an error.** A client that connects before the
    simulator has published sees an empty string; it must wait rather than
    inventing a path.
@@ -255,8 +256,8 @@ publishes the result the same way, so its clients need no special case.
 | Thing | Where |
 |---|---|
 | `new_run_id`, `report_root`, `DEFAULT_REPORT_ID` | `dvision2_common.py` |
-| Root creation and `sim.report_dir` publication | `dsim/dsim.py` |
-| A worked reporter (images, logs, summary, HTML) | `daic/run_reporter.py` |
-| A worked JSONL logger | `daic/flight_log.py` |
-| A versioned summary and event log | `dway/report.py` |
+| Root creation and `sim.report_dir` publication | `apps/dsim/dsim.py` |
+| A worked reporter (images, logs, summary, HTML) | `apps/daic/run_reporter.py` |
+| A worked JSONL logger | `apps/daic/flight_log.py` |
+| A versioned summary and event log | `apps/dway/report.py` |
 | Pinning a run to a fixed directory | `dtest/process_harness.py` |

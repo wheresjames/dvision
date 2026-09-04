@@ -39,9 +39,15 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# The repository root, two levels up now that the applications live under
+# ``apps/``. ``apps`` itself is a source root rather than a package -- like a
+# ``src/`` directory -- so sibling applications keep importing each other as
+# ``dsim.dsim`` and ``dcmn.window`` with no ``apps.`` prefix anywhere.
+ROOT = Path(__file__).resolve().parents[2]
+APPS = ROOT / "apps"
+for _path in (str(ROOT), str(APPS)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from dvision2_common import (
     STATUS_KEYS,

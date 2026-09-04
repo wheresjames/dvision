@@ -8,9 +8,15 @@ import time
 from pathlib import Path
 from dataclasses import fields
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# The repository root, two levels up now that the applications live under
+# ``apps/``. ``apps`` itself is a source root rather than a package -- like a
+# ``src/`` directory -- so sibling applications keep importing each other as
+# ``dsim.dsim`` and ``dcmn.window`` with no ``apps.`` prefix anywhere.
+ROOT = Path(__file__).resolve().parents[2]
+APPS = ROOT / "apps"
+for _path in (str(ROOT), str(APPS)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from dvision2_common import validate_id
 from dcmn import theme
@@ -19,7 +25,7 @@ from dcmn.window import (disable_input_method, restore_window_geometry,
                           save_window_geometry)
 from dcmn.mapview import contained_size
 from dalg.overlay import overlay_image, prediction_image
-from dalg.profiles import load_profile, save_profile
+from dalg.profiles import load_profile, profile_dir, save_profile
 from dalg.algo import ALGORITHMS, CONFIGS
 from dalg.run import DalgRun
 
@@ -141,7 +147,7 @@ class ProfileEditor:
             tour = self.tour.get().strip() or None
             if tour is not None and not (ROOT / tour).is_file():
                 raise ValueError(f"tour does not exist: {tour}")
-            save_profile(ROOT / "dalg/profiles" / f"{name}.json", name=name,
+            save_profile(profile_dir(ROOT) / f"{name}.json", name=name,
                          algorithm=self.algorithm_name.get(), tour=tour,
                          sensors=sensors, settings=settings)
             self.notice.set(f"saved {name}")

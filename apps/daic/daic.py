@@ -19,9 +19,15 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# The repository root, two levels up now that the applications live under
+# ``apps/``. ``apps`` itself is a source root rather than a package -- like a
+# ``src/`` directory -- so sibling applications keep importing each other as
+# ``dsim.dsim`` and ``dcmn.window`` with no ``apps.`` prefix anywhere.
+ROOT = Path(__file__).resolve().parents[2]
+APPS = ROOT / "apps"
+for _path in (str(ROOT), str(APPS)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from dvision2_common import (
     controlled_command, load_pymembus, new_control_identity,
@@ -201,7 +207,7 @@ def _cmd_install(verbose: bool = False) -> int:
     print("  cd ORB-SLAM3-python && pip install .")
     print()
     print("  # 4. Run daic with full ORB_SLAM3")
-    print("  ./daic/daic.py --id area1 --enable-ai \\")
+    print("  ./apps/daic/daic.py --id area1 --enable-ai \\")
     print(f"    --slam-vocab {vocab}")
     print()
     print("=" * 56)
@@ -544,7 +550,7 @@ class DaicController:
             )
         else:
             if MiniSLAMDetector is None:
-                raise RuntimeError("opencv-python is required; run ./daic/daic.py --install")
+                raise RuntimeError("opencv-python is required; run ./apps/daic/daic.py --install")
             self.slam_detector = MiniSLAMDetector()
         self.flow_detector = OpticalFlowAvoidance()
         self.local_map = LocalOccupancyMap()
@@ -1536,7 +1542,7 @@ class HeadlessAgent:
             )
         else:
             if MiniSLAMDetector is None:
-                raise RuntimeError("opencv-python is required; run ./daic/daic.py --install")
+                raise RuntimeError("opencv-python is required; run ./apps/daic/daic.py --install")
             self.slam_detector = MiniSLAMDetector()
         self.flow_detector = OpticalFlowAvoidance()
         self.local_map = LocalOccupancyMap()

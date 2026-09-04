@@ -59,52 +59,71 @@ docs/
   reports.md                Report layout: who owns what, and the rules
   mavlink-slam-nav.md       The reference architecture the vehicle seam borrows from
 
-dcmn/
-  theme.py                  The one dvision2 colour palette
-  tktheme.py                That palette applied to ttk, shared by every window
-  mapview.py                Top-down map and vehicle drawing, shared by every view
+apps/                       The seven applications. A source root rather than
+                            a package, like src/: they import each other as
+                            `dsim.dsim` and `dcmn.window`, never `apps.dsim`
+  dcmn/
+    theme.py                  The one dvision2 colour palette
+    tktheme.py                That palette applied to ttk, shared by every window
+    mapview.py                Top-down map and vehicle drawing, shared by every view
 
-assets/                     Shared fixture data (not owned by one consumer)
-  maps/                     Text map files
-  textures/                 CC0 ground/wall textures
-  models/trees/             CC0 tree GLB models
-  tours/                    Committed benchmark tours and their diagnostics
-  planner_queries/          Committed planner start/goal sidecars
+  dsim/
+    dsim.py                   Simulator: physics, rendering, IPC server, UI
+    headless.py               Fixed-timestep in-process driver with set_pose()
+    range.py                  Exact renderer-aligned range core
+    depth_probe.py            Measured selection of the exact-range backend
+    realism.py                GPS, estimators, wind, latency, noise, battery, geofence
+    realism_panel.py          The Realism tab: those settings, changeable in flight
+    scene.py                  Renderer appearance presets
 
-dsim/
-  dsim.py                   Simulator: physics, rendering, IPC server, UI
-  headless.py               Fixed-timestep in-process driver with set_pose()
-  range.py                  Exact renderer-aligned range core
-  depth_probe.py            Measured selection of the exact-range backend
-  realism.py                GPS, estimators, wind, latency, noise, battery, geofence
-  realism_panel.py          The Realism tab: those settings, changeable in flight
-  scene.py                  Renderer appearance presets
+  dctl/
+    dctl.py                   Manual controller UI
 
-dctl/
-  dctl.py                   Manual controller UI
+  daic/
+    daic.py                   AI controller, UI and headless modes
+    detector.py               OpenCV red target detector
+    planner.py                Mission state machine
+    controller.py             Target visual-servo controller
+    avoidance.py              Forward-speed obstacle brake
+    optical_flow_avoidance.py Dense optical-flow risk and range estimation
+    local_map.py              Vision-built local occupancy map and A* route plan
+    mini_slam_detector.py     Lightweight visual-motion obstacle detector
+    orb_slam3_detector.py     Optional ORB_SLAM3 integration wrapper
+    flight_log.py             JSONL flight logger and report analyzer
+    run_reporter.py           Run summary, images and HTML for a flight
 
-daic/
-  daic.py                   AI controller, UI and headless modes
-  detector.py               OpenCV red target detector
-  planner.py                Mission state machine
-  controller.py             Target visual-servo controller
-  avoidance.py              Forward-speed obstacle brake
-  optical_flow_avoidance.py Dense optical-flow risk and range estimation
-  local_map.py              Vision-built local occupancy map and A* route plan
-  mini_slam_detector.py     Lightweight visual-motion obstacle detector
-  orb_slam3_detector.py     Optional ORB_SLAM3 integration wrapper
-  flight_log.py             JSONL flight logger and report analyzer
-  run_reporter.py           Run summary, images and HTML for a flight
+  dway/
+    dway.py                   Tour follower client, window and headless modes
+    link.py                   VehicleLink contract and the dsim implementation
+    tour.py                   Tour load/save/validate, frames, clearance
+    follower.py               Arrival rules, sequencing, control strategies
+    mission.py                Flight lifecycle state machine
+    frames.py                 map / local NED / global transforms
+    editor.py                 Map and waypoint editor, with live geometry checks
+    report.py                 Flight summary, event log, track plot, repeatability
 
-dway/
-  dway.py                   Tour follower client, window and headless modes
-  link.py                   VehicleLink contract and the dsim implementation
-  tour.py                   Tour load/save/validate, frames, clearance
-  follower.py               Arrival rules, sequencing, control strategies
-  mission.py                Flight lifecycle state machine
-  frames.py                 map / local NED / global transforms
-  editor.py                 Map and waypoint editor, with live geometry checks
-  report.py                 Flight summary, event log, track plot, repeatability
+  dalg/
+    dalg.py                   Algorithm demonstrator: window, profiles, headless
+    run.py                    Observer lifecycle and the run-coordination barrier
+    profiles.py               Profile load/save; the set lives in assets/profiles/
+    algo/                     One module per algorithm, plus the two controls
+    grid.py                   Occupancy and log-odds grids
+    truth.py                  Ground truth rasterised from the map
+    visibility.py             Which cells the flight could actually have seen
+    score.py                  IoU, coverage, Brier and hallucination scoring
+    overlay.py                Prediction and verdict rasters
+    report.py, report_html.py  Report directory, summaries, overlays, HTML
+
+  dfgb/
+    dfgb.py                   FlightGear bridge, a work in progress
+
+assets/                       Shared fixture data (not owned by one consumer)
+  maps/                       Text map files
+  textures/                   CC0 ground/wall textures
+  models/trees/               CC0 tree GLB models
+  tours/                      Committed benchmark tours and their diagnostics
+  profiles/                   Committed dalg algorithm profiles
+  planner_queries/            Committed planner start/goal sidecars
 
 dtest/
   contract.py               Literal coordinate/sign expectations (the oracle)
@@ -119,9 +138,6 @@ dtest/
   artifacts.py              Failure bundles (frames, timeline, path plot)
   backend.py                Normalized vehicle-backend protocol
   preflight.py              Dependency preflight for the test groups
-
-dfgb/
-  dfgb.py                   FlightGear bridge, a work in progress
 
 tests/
   flight_test.py            End-to-end headless flight runner
@@ -171,7 +187,7 @@ simulator -- it asks what the vehicle's published capabilities allow.
 Two modules are shared rather than owned by any process. `dvision2_common.py`
 is the protocol -- status keys, command encoding, map loading, report paths --
 and stays free of any display dependency so headless code can import it.
-`dcmn/` is the layer above it, for what a *view* shares.
+`apps/dcmn/` is the layer above it, for what a *view* shares.
 
 `dcmn.theme` is the palette. No window module spells a colour out by hand, and
 a test enforces that. `dcmn.tktheme.apply_theme` is that palette applied to
@@ -254,7 +270,7 @@ python3 -c 'import sys, pygame; print(sys.executable, pygame.version.ver)'
 `daic` also has an installer/check mode:
 
 ```sh
-python3 daic/daic.py --install
+python3 apps/daic/daic.py --install
 ```
 
 That mode checks the OpenCV features needed by the optical-flow and mini-SLAM
@@ -277,30 +293,30 @@ Manual control:
 
 ```sh
 # Terminal 1
-python3 dsim/dsim.py --id area1
+python3 apps/dsim/dsim.py --id area1
 
 # Terminal 2
-python3 dctl/dctl.py --id area1
+python3 apps/dctl/dctl.py --id area1
 ```
 
 Autonomous flight with DAIC:
 
 ```sh
 # Terminal 1
-python3 dsim/dsim.py --id area1 --map assets/maps/maze_002.txt
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_002.txt
 
 # Terminal 2
-python3 daic/daic.py --id area1 --enable-ai
+python3 apps/daic/daic.py --id area1 --enable-ai
 ```
 
 Fly a tour:
 
 ```sh
 # Terminal 1
-python3 dsim/dsim.py --id area1 --map assets/maps/maze_012.txt
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_012.txt
 
 # Terminal 2
-python3 dway/dway.py --id area1 --tour assets/tours/maze_012.forward.v1.json
+python3 apps/dway/dway.py --id area1 --tour assets/tours/maze_012.forward.v1.json
 ```
 
 The committed `maze_012` tours start on the far side of a wall from that map's
@@ -311,14 +327,14 @@ fly a tour authored from where the drone actually is.
 Fly a tour headless, with a wind that the vehicle has to trim out:
 
 ```sh
-python3 dsim/dsim.py --id area1 --map assets/maps/maze_012.txt --no-ui --wind-mps 0.4 &
-python3 dway/dway.py --id area1 --tour assets/tours/maze_012.forward.v1.json --no-ui
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_012.txt --no-ui --wind-mps 0.4 &
+python3 apps/dway/dway.py --id area1 --tour assets/tours/maze_012.forward.v1.json --no-ui
 ```
 
 Author a tour with no simulator running at all:
 
 ```sh
-python3 dway/dway.py --edit --map assets/maps/maze_012.txt
+python3 apps/dway/dway.py --edit --map assets/maps/maze_012.txt
 ```
 
 Headless automated run:
@@ -358,7 +374,7 @@ heuristic pointers, not a verdict.
 and publishes telemetry after every tick.
 
 ```sh
-python3 dsim/dsim.py --id area1 \
+python3 apps/dsim/dsim.py --id area1 \
   --map assets/maps/maze_001.txt \
   --width 640 \
   --height 480 \
@@ -397,7 +413,7 @@ are a clean baseline -- a good 3-D fix, a valid local estimator, still air, no
 delay, no sensor noise, no failsafe and no fence -- so a plain `dsim` is what
 other runs are compared against. Every value is published in the status keys,
 so a report can name the conditions it was flown in rather than trusting the
-command line to have been remembered. `dsim/realism.py` owns the model.
+command line to have been remembered. `apps/dsim/realism.py` owns the model.
 
 | Option | Description |
 |---|---|
@@ -529,6 +545,7 @@ reports/<id>/<timestamp>-<random>/
   dsim/     simulator flight path, snapshots, summary.json
   daic/     controller occupancy snapshots, route log, frames, summary.json
   dway/     flight summary.json, flight.jsonl, track.png
+  dalg/     occupancy overlays, prediction grids, scores, summary.json, report.html
   <module>/ any other client, named after itself
 ```
 
@@ -554,7 +571,7 @@ module writes, and the rules a new module follows.
 arm, takeoff, land and zero commands.
 
 ```sh
-python3 dctl/dctl.py --id area1 \
+python3 apps/dctl/dctl.py --id area1 \
   --width 960 \
   --height 720 \
   --fps 30
@@ -633,16 +650,16 @@ commands without holding it.
 
 ```sh
 # UI, manual AI toggle
-python3 daic/daic.py --id area1
+python3 apps/daic/daic.py --id area1
 
 # UI, autonomy enabled immediately
-python3 daic/daic.py --id area1 --enable-ai
+python3 apps/daic/daic.py --id area1 --enable-ai
 
 # Headless
-python3 daic/daic.py --id area1 --enable-ai --no-ui
+python3 apps/daic/daic.py --id area1 --enable-ai --no-ui
 
 # Log every control tick
-python3 daic/daic.py --id area1 --enable-ai --log-file /tmp/flight.jsonl
+python3 apps/daic/daic.py --id area1 --enable-ai --log-file /tmp/flight.jsonl
 ```
 
 Options:
@@ -715,10 +732,10 @@ flight report. `dctl` is the manual pilot and `daic` is the vision experiment;
 
 ```sh
 # Terminal 1
-python3 dsim/dsim.py --id area1 --map assets/maps/maze_012.txt
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_012.txt
 
 # Terminal 2
-python3 dway/dway.py --id area1 --tour assets/tours/maze_012.forward.v1.json
+python3 apps/dway/dway.py --id area1 --tour assets/tours/maze_012.forward.v1.json
 ```
 
 Options:
@@ -745,7 +762,7 @@ Options:
 
 ```sh
 # Author a tour without a simulator running at all
-python3 dway/dway.py --edit --map assets/maps/maze_012.txt
+python3 apps/dway/dway.py --edit --map assets/maps/maze_012.txt
 ```
 
 ### Waiting for other modules
@@ -758,12 +775,12 @@ the instance's event bus, holds in `READY` until every named role has answered
 simulated time so every participant begins together.
 
 ```sh
-python3 dsim/dsim.py --id area1 --map assets/maps/maze_020.txt &
-python3 dway/dway.py --id area1 \
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_020.txt &
+python3 apps/dway/dway.py --id area1 \
         --tour assets/tours/maze_020.default.v1.json \
         --wait-for algorithm:optical-flow-maze020 &
-python3 dalg/dalg.py --id area1 \
-        --profile dalg/profiles/optical-flow-maze020.json &
+python3 apps/dalg/dalg.py --id area1 \
+        --profile assets/profiles/optical-flow-maze020.json &
 ```
 
 The argument is `role[:selector]`, and both halves catch people out:
@@ -814,7 +831,7 @@ capability profile, fix type and satellites, estimator validity, setpoint age,
 control ownership, battery, wind and geofence. It answers "why not" without
 reading a log.
 
-**Tour editor** (`dway/editor.py`) opens a map, places and drags waypoints,
+**Tour editor** (`apps/dway/editor.py`) opens a map, places and drags waypoints,
 rotates each one's heading by dragging its arrow, and edits the tour's speed,
 tolerance and clearance. It shows live geometry -- path length, longest
 straight run, per-leg clearance -- and measures **leg zero from the map's own
@@ -879,7 +896,7 @@ down_m  = -z
 Compass heading is unchanged between those two frames. `geo_anchor.rotation_deg`
 is the clockwise angle from map north to true north, applied to the
 `(east, north)` vector and to headings before projecting to WGS84.
-`dway/frames.py` owns both directions of every conversion.
+`apps/dway/frames.py` owns both directions of every conversion.
 
 Preflight measures the clearance of every leg **including leg zero**, the
 movement from wherever the vehicle currently is to the first waypoint. A leg
@@ -1017,7 +1034,7 @@ for each sector.
 
 ### Optical Flow and Range
 
-`daic/optical_flow_avoidance.py` computes dense Farneback optical flow between
+`apps/daic/optical_flow_avoidance.py` computes dense Farneback optical flow between
 successive video frames. Radial expansion from the image center indicates that
 the drone is moving toward visible structure.
 
@@ -1039,7 +1056,7 @@ default projection distance.
 
 ### Local Occupancy Map
 
-`daic/local_map.py` maintains a rolling occupancy grid around the drone. It:
+`apps/daic/local_map.py` maintains a rolling occupancy grid around the drone. It:
 
 - decays stale cells over time
 - marks a short free-space fan in front of the drone
@@ -1054,7 +1071,7 @@ turning moderately instead of spinning in place at every waypoint.
 
 ### Avoidance Brake
 
-`daic/avoidance.py` is the last safety layer before sending velocity commands.
+`apps/daic/avoidance.py` is the last safety layer before sending velocity commands.
 It does not inject lateral movement or yaw. It only trims forward speed when
 front-sector risk is high. That keeps steering under the route planner while
 still reducing forward motion into detected obstacles.
@@ -1522,7 +1539,7 @@ The renderer builds a simple 3D scene:
 
 A preset changes appearance only. The geometry is identical across presets,
 which is what makes a lighting change safe to measure against unchanged truth:
-the exact-range oracle casts through the same world either way. `dsim/scene.py`
+the exact-range oracle casts through the same world either way. `apps/dsim/scene.py`
 carries a version string per preset, and anything recording which scene a
 result came from should record the *version* rather than the preset name, so a
 renderer change shows up in the record instead of hiding behind a stable label.

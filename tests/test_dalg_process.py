@@ -16,11 +16,10 @@ TOUR = ROOT / "assets/tours/maze_012.forward.v1.json"
 
 
 def _only_summary(report_dir: Path) -> Path:
-    """The one report DALG wrote. Runs get a directory each, so this asserts
-    the session produced exactly one rather than assuming a fixed path."""
-    found = sorted((report_dir / "dalg").glob("*/summary.json"))
-    assert len(found) == 1, f"expected one dalg report, found {found}"
-    return found[0]
+    """The report DALG wrote, in the module directory it shares its name with."""
+    summary = report_dir / "dalg" / "summary.json"
+    assert summary.is_file(), f"no dalg summary under {report_dir / 'dalg'}"
+    return summary
 
 
 def _wait(predicate, timeout=15.0):
@@ -39,7 +38,7 @@ def test_dalg_observes_protocol_role_without_taking_control(tmp_path):
             sim_time=lambda: float(harness.read_status().get("sim.time_s", 0)))
         assert bus.connect()
         process = subprocess.Popen(
-            [sys.executable, str(ROOT / "dalg/dalg.py"), "--id", harness.id,
+            [sys.executable, str(ROOT / "apps/dalg/dalg.py"), "--id", harness.id,
              "--profile", "sgbm-default", "--no-ui", "--timeout", "30"],
             cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         run_id = "mock-navigator-run"
@@ -90,7 +89,7 @@ def test_dalg_records_a_controller_coordinated_manual_flight(tmp_path):
             sim_time=lambda: float(harness.read_status().get("sim.time_s", 0)))
         assert bus.connect()
         process = subprocess.Popen(
-            [sys.executable, str(ROOT / "dalg/dalg.py"), "--id", harness.id,
+            [sys.executable, str(ROOT / "apps/dalg/dalg.py"), "--id", harness.id,
              "--profile", "sgbm-manual", "--no-ui", "--timeout", "30"],
             cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         run_id = "manual-controller-run"

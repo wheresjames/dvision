@@ -98,7 +98,7 @@ class DsimProcessHarness:
     def start(self) -> None:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         cmd = [
-            sys.executable, str(ROOT / "dsim/dsim.py"),
+            sys.executable, str(ROOT / "apps/dsim/dsim.py"),
             "--id", self.id,
             "--map", str(self.map_path),
             "--start-heading", str(self.start_heading),

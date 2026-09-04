@@ -88,7 +88,7 @@ def run_test(map_file: str, duration_s: int, log_path: Path | None,
              instance_id: str = "flighttest") -> dict:
     frames = duration_s * fps
     dsim_cmd = [
-        sys.executable, str(ROOT / "dsim" / "dsim.py"),
+        sys.executable, str(ROOT / "apps/dsim" / "dsim.py"),
         "--id",    instance_id,
         "--map",   map_file,
         "--no-ui",
@@ -99,7 +99,7 @@ def run_test(map_file: str, duration_s: int, log_path: Path | None,
         report_dir.mkdir(parents=True, exist_ok=True)
         dsim_cmd.extend(["--report-dir", str(report_dir)])
     daic_cmd = [
-        sys.executable, str(ROOT / "daic" / "daic.py"),
+        sys.executable, str(ROOT / "apps/daic" / "daic.py"),
         "--id",        instance_id,
         "--no-ui",
         "--enable-ai",

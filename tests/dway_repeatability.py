@@ -53,7 +53,7 @@ def fly_once(instance_id: str, tour: Path, map_path: Path, run_dir: Path,
     sim = dway = None
     try:
         sim = subprocess.Popen(
-            [sys.executable, str(ROOT / "dsim/dsim.py"), "--id", instance_id,
+            [sys.executable, str(ROOT / "apps/dsim/dsim.py"), "--id", instance_id,
              "--map", str(map_path), "--no-ui",
              "--report-dir", str(run_dir),
              "--setpoint-timeout", str(SETPOINT_TIMEOUT_S)],
@@ -67,7 +67,7 @@ def fly_once(instance_id: str, tour: Path, map_path: Path, run_dir: Path,
             time.sleep(0.2)
 
         dway = subprocess.Popen(
-            [sys.executable, str(ROOT / "dway/dway.py"), "--id", instance_id,
+            [sys.executable, str(ROOT / "apps/dway/dway.py"), "--id", instance_id,
              "--tour", str(tour), "--no-ui", "--finish-action", "land",
              "--timeout", str(flight_timeout_s)],
             cwd=str(ROOT), stdout=dway_logs, stderr=subprocess.STDOUT,
