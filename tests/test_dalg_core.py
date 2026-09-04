@@ -12,7 +12,7 @@ from dalg.algo.controls import ExactRangeAlgorithm
 from dalg.grid import LogOddsGrid, OccupancyGrid
 from dalg.overlay import FALSE_NEGATIVE, FALSE_POSITIVE, TRUE_POSITIVE, verdict_raster
 from dalg.profiles import load_profile, profile_dir
-from dvision2_common import load_map, shared_names
+from dvision2_common import load_map
 from dalg.algo import ALGORITHMS
 from dalg.algo.plane_sweep import PlaneSweepAlgorithm
 from dalg.algo.features import FeatureTriangulationAlgorithm
@@ -499,6 +499,8 @@ class _FakeBus:
 
     def __init__(self) -> None:
         self.process_id = "dalg-test"
+        #: Part of the bus contract: modules report it as a keeping-up signal.
+        self.overruns = 0
         self.published: list[tuple[str, str, dict]] = []
         self.inbox: list = []
         self.closed = False
@@ -531,7 +533,14 @@ def _shutdown_event(run_id: str = ""):
 
 
 def _finished_run():
-    """A DalgRun that has completed and written its report."""
+    """A DalgRun that has completed and written its report.
+
+    Built through the real constructor rather than field by field: every time
+    presence gained a dependency, a hand-assembled object grew another
+    attribute the production path already had. The constructor opens no shared
+    memory -- attaching is lazy -- so only the transports and the bus need
+    standing in for.
+    """
     from types import SimpleNamespace
 
     class _Unavailable:
@@ -539,28 +548,22 @@ def _finished_run():
         def open_existing(self, name): return False
         def open(self, name): return False
 
-    run = object.__new__(DalgRun)
+    root = Path(__file__).resolve().parents[1]
+    run = DalgRun("area1", load_profile("optical-flow-maze020", root), root)
     run.bus = _FakeBus()
     run.pm = SimpleNamespace(memvid=_Unavailable, memkv=_Unavailable)
-    run.names = shared_names("area1")
-    run.video = run.status = None
+
+    # Wind it forward to a run that has finished and been reported.
     run.state = "COMPLETE"
     run.reason = "landed"
     run.run_id = "r1"
     run.done = True
     run.active = False
-    run.shutdown_requested = False
     run.provenance = {"coordinator_outcome": "complete"}
     run.start_sim_time = 3.0
     run._coordinator_process_id = "dway-1"
-    run._coordinator_seen = time.monotonic()
     run._coordinator_seen_sim = 100.0
-    run._event_log = []
     run._hello_sent = True
-    run._last_heartbeat = -1e9
-    run._last_display_seq = -1
-    run.profile = load_profile("optical-flow-maze020",
-                               Path(__file__).resolve().parents[1])
     return run
 
 

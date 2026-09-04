@@ -106,6 +106,34 @@ def apply_theme(root) -> ttk.Style:
     root.option_add("*TCombobox*Listbox.selectBackground", theme.ACCENT)
     root.option_add("*TCombobox*Listbox.selectForeground", theme.TEXT)
 
+    # A Treeview keeps its own body colours: clam draws the rows and the empty
+    # area below them from its own near-white defaults rather than from the "."
+    # style above, so an unstyled tree is dark text on white inside an
+    # otherwise dark window. `background` paints the rows and `fieldbackground`
+    # the space under them -- both are needed, and which one applies varies
+    # between Tk builds.
+    style.configure("Treeview", background=theme.CANVAS,
+                    fieldbackground=theme.CANVAS, foreground=theme.TEXT,
+                    bordercolor=theme.GRID, lightcolor=theme.GRID,
+                    darkcolor=theme.GRID, borderwidth=1, relief="flat",
+                    rowheight=22)
+    # Dark text on the selected row: ACCENT is a light blue, so the window's
+    # near-white foreground over it lands around 2:1 -- worse than the light
+    # grey on white this replaced. Reversing it gives 8:1 and keeps ACCENT as
+    # the one selection colour the whole application uses.
+    style.map("Treeview",
+              background=[("selected", theme.ACCENT)],
+              foreground=[("selected", theme.CANVAS)])
+    # Column headings are a panel surface, like the window's own header, and
+    # clam gives them a raised bevel that reads as a button under this palette.
+    style.configure("Treeview.Heading", background=theme.PANEL,
+                    foreground=theme.DIM, bordercolor=theme.GRID,
+                    lightcolor=theme.PANEL, darkcolor=theme.PANEL,
+                    relief="flat", padding=(6, 4))
+    style.map("Treeview.Heading",
+              background=[("active", theme.BUTTON_ACTIVE)],
+              foreground=[("active", theme.TEXT)])
+
     for name, fill, edge, pressed in (
             ("Accent.TButton", theme.ACCENT_BUTTON, theme.ACCENT_BUTTON_EDGE,
              theme.ACCENT_BUTTON_PRESSED),

@@ -8,7 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
+from dcmn.health import IntakeMeter
 from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.pacing import PeriodicDeadline, simulated_poll_delay
 from dvision2_common import load_map, load_pymembus, shared_names
 from dalg.algo import ALGORITHMS, CONFIGS
 from dalg.algo.controls import ConstantAlgorithm, ExactRangeAlgorithm
@@ -88,7 +90,6 @@ class DalgRun:
         self.provenance = {}
         self._last_heartbeat = -1e9
         self._last_preview = -1e9
-        self._last_observe = -1e9
         self.preview_result = None
         self.report_dir = None
         self._event_log = []
@@ -98,8 +99,11 @@ class DalgRun:
         self._coordinator_process_id = ""
         self._camera_poses = []
         self._fov_h_deg = 70.0
+        self.intake = IntakeMeter()
         self._tour_value = ({} if profile.tour is None else
                             json.loads(profile.tour.read_text(encoding="utf-8")))
+        self._capture_cadence = PeriodicDeadline(float(
+            self._tour_value.get("capture_fps", 5.0)))
         self._tour_digest = ("" if profile.tour is None else
                              hashlib.sha256(profile.tour.read_bytes()).hexdigest())
 
@@ -110,6 +114,12 @@ class DalgRun:
             return float(self.status.getAll().get("sim.time_s", 0.0))
         except (TypeError, ValueError):
             return 0.0
+
+    def poll_delay(self) -> float:
+        """Wall delay for checking whether simulated-time work is due."""
+        values = {} if self.status is None else self.status.getAll()
+        rate = float(self._tour_value.get("capture_fps", 5.0))
+        return simulated_poll_delay(max(rate, 0.1), values)
 
     def connect(self) -> bool:
         if self.video is None:
@@ -139,7 +149,13 @@ class DalgRun:
                                  "sensors": list(self.profile.sensors)}})
             self._hello_sent = True
         if now - self._last_heartbeat < 1.0: return
+        # An idle demonstrator owes no samples. Treating its deliberate zero
+        # as a shortfall would make every pipeline red before a run starts.
+        self.intake.set_wanted(float(self._tour_value.get("capture_fps", 5.0))
+                               if self.active else 0.0)
         self.bus.publish("module.heartbeat", run_id=self.run_id, payload={
+            "intake": self.intake.report(self.sim_time_s(),
+                                         overruns=self.bus.overruns),
             "state": self.state, "ready": self.state in ("READY", "SCHEDULED"),
             "profile": self.profile.name, "profile_digest": self.profile.digest,
             "capabilities": {"algorithms": list(ALGORITHMS),
@@ -262,8 +278,10 @@ class DalgRun:
 
     def _observe_frame(self, now: float) -> None:
         capture_fps = float(self._tour_value.get("capture_fps", 5.0))
-        if now - self._last_observe < 1.0 / max(capture_fps, 0.1): return
+        self._capture_cadence.set_rate(max(capture_fps, 0.1))
+        if not self._capture_cadence.due(now): return
         seq = self.video.getSeq()
+        self.intake.note_sequence(seq)
         if seq == self.last_seq: return
         self.last_seq = seq
         slot = self.video.getPtr(-1)
@@ -285,7 +303,8 @@ class DalgRun:
                 config=range_config(range_name), stride=stride)
         frame = Frame(seq, now, rgb, pose, ranges, confidence, camera)
         self.algorithms[self.profile.algorithm].observe(frame)
-        self._last_observe = now
+        self._capture_cadence.advance(now)
+        self.intake.record()
         self.frames += 1
         self._camera_poses.append(camera)
         self.last_frame = rgb

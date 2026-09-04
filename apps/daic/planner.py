@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Callable
 
 from dvision2_common import gps_bearing, gps_distance_m
 from .controller import (ControlOutput, navigate_to_bearing,
@@ -117,11 +117,22 @@ class _SearchState:
 
 
 class Planner:
-    def __init__(self, img_w: int = 640, img_h: int = 480) -> None:
+    def __init__(self, img_w: int = 640, img_h: int = 480,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        """``clock`` is the vehicle's clock, not the room's.
+
+        Every timer here gates flight -- how long to wait for arming, how long
+        to keep flying toward a target that has gone out of view, how long a
+        search leg lasts -- so measuring them against the wall clock makes the
+        mission a function of how busy the machine is. The default keeps a
+        planner constructed without a vehicle working; the controllers feed it
+        ``sim.time_s``.
+        """
         self.img_w = img_w
         self.img_h = img_h
+        self._clock = clock
         self._state = State.IDLE
-        self._state_entered: float = time.monotonic()
+        self._state_entered: float = clock()
         self._last_arm_command: float = float("-inf")
         self._approach_count = 0
         self._landing_count  = 0
@@ -161,7 +172,8 @@ class Planner:
         the SEARCH → APPROACH lock so the visual servo is never handed a target
         that sits behind a wall.
         """
-        now = time.monotonic()
+        now = self._clock()
+        self._reanchor_if_clock_restarted(now)
         self._front_risk = _clamp01(front_risk)
 
         # ── Global failsafe checks ────────────────────────────────────
@@ -486,8 +498,23 @@ class Planner:
     # Internal
     # ------------------------------------------------------------------
 
+    def _reanchor_if_clock_restarted(self, now: float) -> None:
+        """A vehicle clock that has gone backwards is a restarted simulator.
+
+        Measuring against an instant that no longer exists either fires every
+        timeout at once or none of them ever again, so the anchors move to the
+        new clock instead.
+        """
+        if now >= self._state_entered:
+            return
+        self._state_entered = now
+        self._target_last_seen = now
+        if self._last_arm_command != float("-inf"):
+            self._last_arm_command = now
+        self._search.leg_start = min(self._search.leg_start, now)
+
     def _transition(self, new_state: State) -> None:
-        now = time.monotonic()
+        now = self._clock()
         self._state = new_state
         self._state_entered = now
         if new_state == State.ARMING:

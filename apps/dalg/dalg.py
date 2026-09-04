@@ -24,6 +24,7 @@ from dcmn.tktheme import apply_theme
 from dcmn.window import (disable_input_method, restore_window_geometry,
                           save_window_geometry)
 from dcmn.mapview import contained_size
+from dcmn.pacing import Paced, TEXT_HZ, VIDEO_HZ
 from dalg.overlay import overlay_image, prediction_image
 from dalg.profiles import load_profile, profile_dir, save_profile
 from dalg.algo import ALGORITHMS, CONFIGS
@@ -194,6 +195,8 @@ class Window:
             live.columnconfigure(col, weight=1)
         live.rowconfigure(1, weight=1)
         self.root.columnconfigure(0, weight=1); self.root.rowconfigure(0, weight=1)
+        self._paint_video = Paced(VIDEO_HZ)
+        self._paint_text = Paced(TEXT_HZ)
         self.profile_editor = ProfileEditor(profiles, run.profile, tk, ttk)
         restore_window_geometry(self.root, f"dalg.{run.id}")
 
@@ -206,7 +209,13 @@ class Window:
 
     def update(self):
         self.root.update_idletasks(); self.root.update()
-        self.status.set(f"{self.run.state}  run={self.run.run_id[:10]}  frames={self.run.frames}")
+        # The loop spins at 50 Hz so the bus stays drained and shutdown stays
+        # heard; the panes below do not need to be repainted that often.
+        if self._paint_text.due():
+            self.status.set(f"{self.run.state}  run={self.run.run_id[:10]}  "
+                            f"frames={self.run.frames}")
+        if not self._paint_video.due():
+            return
         images = []
         if self.run.last_frame is not None:
             from PIL import Image
@@ -299,7 +308,10 @@ def main(argv=None):
                 run.reason = "dalg timeout"
                 if run.active: run.finish(partial=True)
                 else: break
-            time.sleep(.02)
+            # Minimal test/embedding rigs predating speed-aware pacing may not
+            # expose the hint; their historical 20 ms cadence remains safe.
+            delay = run.poll_delay() if hasattr(run, "poll_delay") else .02
+            time.sleep(delay)
     finally:
         run.close()
         if window is not None:

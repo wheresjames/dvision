@@ -33,7 +33,10 @@ from dvision2_common import (
     controlled_command, load_pymembus, new_control_identity,
     shared_names, validate_id,
 )
+from dcmn.health import IntakeMeter
 from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.pacing import (MAP_HZ, Paced, TEXT_HZ, VIDEO_HZ,
+                         PeriodicDeadline, simulated_poll_delay)
 from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
 from daic.detector import detect, Detection
@@ -231,8 +234,6 @@ _BTN_BG    = "#21262d"
 _BTN_ACT   = "#30363d"
 _VIDEO_BG  = "#010409"
 _SEARCH_HOLD_YAW_DPS = 18.0
-# How often the display-only map canvases are redrawn, in seconds.
-_MAP_REDRAW_PERIOD_S = 0.2
 _APPROACH_BLOCK_RISK = 0.25
 _APPROACH_BLOCK_FRONT_OCC_M = 1.5
 
@@ -536,11 +537,20 @@ class DaicController:
         self.running = True
         self._closed = False
         self.module_bus = PymembusModuleBus(args.id, "controller", "daic")
-        self._next_tick = 0.0
-        self._last_map_draw = 0.0
+        self._tick_cadence = PeriodicDeadline(float(args.fps))
 
         self.health   = Health()
-        self.planner  = Planner(img_w=args.video_w, img_h=args.video_h)
+        self._vehicle_time_s: float | None = None
+        self.intake = IntakeMeter(float(args.fps))
+        self._ticks_since_heartbeat = 0
+        self._last_module_heartbeat = -1e9
+        self._hello_sent = False
+        # Painting is capped on the wall clock; the control path is not.
+        self._paint_video = Paced(VIDEO_HZ)
+        self._paint_map = Paced(MAP_HZ)
+        self._paint_text = Paced(TEXT_HZ)
+        self.planner  = Planner(img_w=args.video_w, img_h=args.video_h,
+                               clock=self._vehicle_clock)
 
         vocab = getattr(args, "slam_vocab", None)
         if vocab:
@@ -833,7 +843,7 @@ class DaicController:
             self.reporter = RunReporter(Path(report_dir) / "daic")
 
     def run(self) -> None:
-        self._next_tick = time.monotonic() + 0.05
+        self._tick_cadence.reset(time.monotonic(), immediate=False)
         self.root.after(50, self.tick)
         self.root.mainloop()
 
@@ -847,22 +857,26 @@ class DaicController:
             self.request_stop()
             return
         self._maintain_control(now)
+        self._ticks_since_heartbeat += 1
+        self._announce(now)
         if self._pending_enable_ai and self.command is not None:
             self._pending_enable_ai = False
             self._toggle_ai()
         self._try_start_slam()
         self._update_video()
-        self._update_status(now)
-        self._update_conn_text(now)
+        # Control first, painting after: _run_ai is the control step and must
+        # not wait on a repaint budget.
         self._run_ai(now)
-        self._update_health_ui()
+        if self._paint_text.due():
+            self._update_status(now)
+            self._update_conn_text(now)
+            self._update_health_ui()
         # Map canvases are display only and cost more than the whole control
         # path. Redrawing them every tick was the difference between the UI
         # running the control loop at 18 Hz and at the rate the headless agent
         # gets; throttling them changes what the operator sees, never what is
         # sent.
-        if now - self._last_map_draw >= _MAP_REDRAW_PERIOD_S:
-            self._last_map_draw = now
+        if self._paint_map.due():
             self._draw_slam_map()
             self._draw_local_map()
         self._schedule_next_tick()
@@ -875,20 +889,20 @@ class DaicController:
         ~21 ms of work that lands at 18 Hz, below the control-rate floor, and
         the loop silently misses it by exactly the time it spent working.
         """
-        period = 1.0 / max(1.0, float(self.args.fps))
-        self._next_tick += period
-        delay = self._next_tick - time.monotonic()
-        if delay < -period:
-            # Fell far enough behind that catching up would burn the CPU on a
-            # backlog nobody will see; resynchronise instead.
-            self._next_tick = time.monotonic() + period
-            delay = period
-        self.root.after(max(1, int(delay * 1000.0)), self.tick)
+        values = {} if self.status is None else self.status.getAll()
+        period = simulated_poll_delay(
+            max(1.0, float(self.args.fps)), values,
+            checks_per_period=1.0, maximum_s=1.0)
+        self._tick_cadence.set_rate(1.0 / period)
+        current = time.monotonic()
+        self._tick_cadence.advance(current)
+        self.root.after(self._tick_cadence.delay_ms(current), self.tick)
 
     def _update_video(self) -> None:
         if self.video is None:
             return
         seq = self.video.getSeq()
+        self.intake.note_sequence(seq)
         if seq == self.last_video_seq or seq <= 0:
             return
         self.last_video_seq = seq
@@ -941,7 +955,9 @@ class DaicController:
             self.health.warn("slam", f"flow error: {str(exc)[:16]}")
             self._last_sectors = slam_sectors
 
-        # Annotate and display.
+        # Annotate and display. Perception above ran on this frame whatever
+        # the clock says; only the painting below is capped, because the
+        # annotated image is for the operator and the sectors are not.
         display_detection = _display_detection(
             self.last_detection, display_rgb.shape[1],
         )
@@ -951,6 +967,8 @@ class DaicController:
             sd.tracking_state, sd.n_map_points, sd.scale,
         )
         self._last_annotated_frame = annotated
+        if not self._paint_video.due():
+            return
         image = Image.fromarray(annotated, "RGB")
         max_w = self.args.display_w or self.video.getWidth()
         max_h = self.args.display_h or self.video.getHeight()
@@ -988,6 +1006,56 @@ class DaicController:
         elif self.status is not None:
             self.health.ok("status", "live")
 
+    def _announce(self, now: float) -> None:
+        """Say we are here, once a second, and how well we are keeping up.
+
+        daic previously only listened on the bus, so it never appeared in the
+        pipeline view at all -- a module nobody could see was also a module
+        nobody could see struggling.
+        """
+        if now - self._last_module_heartbeat < 1.0:
+            return
+        self._last_module_heartbeat = now
+        self.intake.record(self._ticks_since_heartbeat)
+        self._ticks_since_heartbeat = 0
+        payload = {
+            "intake": self.intake.report(self._vehicle_clock(),
+                                         overruns=self.module_bus.overruns),
+            "state": self._last_planner_state_name or "IDLE",
+            # Readiness is the planner actually running, which both front ends
+            # can answer; only the windowed one has an AI toggle.
+            "ready": (self._last_planner_state_name or "IDLE") != "IDLE",
+            "capabilities": ["vision", "obstacle_avoidance"],
+        }
+        if not self._hello_sent:
+            self._hello_sent = True
+            self.module_bus.publish("module.hello", payload=payload)
+        self.module_bus.publish("module.heartbeat", payload=payload)
+
+    def _note_vehicle_clock(self, status: dict) -> None:
+        """Take the vehicle's clock from the snapshot the planner will see.
+
+        Read here rather than inside the planner so the planner stays pure
+        logic with no idea where time comes from, and so both front ends feed
+        it the same way.
+        """
+        try:
+            value = float(status.get("sim.time_s"))
+        except (TypeError, ValueError):
+            return
+        self._vehicle_time_s = value
+
+    def _vehicle_clock(self) -> float:
+        """The vehicle's clock, or the wall clock when no vehicle publishes one.
+
+        The planner's timers all gate flight, so they read this. A link that
+        reports no time at all leaves the wall clock as the only estimate
+        there is -- the same fallback the flow detector makes.
+        """
+        if self._vehicle_time_s is not None:
+            return self._vehicle_time_s
+        return time.monotonic()
+
     def _run_ai(self, now: float) -> None:
         if not self.ai_enabled:
             return
@@ -998,6 +1066,7 @@ class DaicController:
         status_snap: dict = {}
         if self.status is not None:
             status_snap = self.status.getAll()
+        self._note_vehicle_clock(status_snap)
         if status_snap.get("control.owner") != self.control_source:
             self._send("acquire_control", quiet=True)
             return
@@ -1522,7 +1591,14 @@ class HeadlessAgent:
         self._closed = False
         self.module_bus = PymembusModuleBus(args.id, "controller", "daic")
         self.last_detection  = Detection(False, 0, 0, 0, 0)
-        self.planner = Planner(img_w=args.video_w, img_h=args.video_h)
+        self._vehicle_time_s: float | None = None
+        self.intake = IntakeMeter(float(args.fps))
+        self._ticks_since_heartbeat = 0
+        self._last_module_heartbeat = -1e9
+        self._hello_sent = False
+        self._tick_cadence = PeriodicDeadline(float(args.fps))
+        self.planner = Planner(img_w=args.video_w, img_h=args.video_h,
+                               clock=self._vehicle_clock)
         self._alt_lock = True
         self._last_heartbeat = 0.0
         self._pending_enable_ai = args.enable_ai
@@ -1591,20 +1667,80 @@ class HeadlessAgent:
             self.reporter = RunReporter(Path(report_dir) / "daic")
 
     def run(self) -> None:
-        frame_period = 1.0 / max(1, self.args.fps)
         if self.args.verbose:
             print(f"daic headless: id={self.args.id}", file=sys.stderr)
+        cadence = getattr(self, "_tick_cadence", None)
+        if cadence is None:
+            cadence = self._tick_cadence = PeriodicDeadline(float(self.args.fps))
+        cadence.reset(time.monotonic())
         try:
             while self.running:
                 tick_start = time.monotonic()
                 self._tick(tick_start)
                 elapsed = time.monotonic() - tick_start
-                time.sleep(max(0.0, frame_period - elapsed))
+                values = {} if self.status is None else self.status.getAll()
+                frame_period = simulated_poll_delay(
+                    max(1, self.args.fps), values,
+                    checks_per_period=1.0, maximum_s=1.0)
+                self._tick_cadence.set_rate(1.0 / frame_period)
+                current = time.monotonic()
+                self._tick_cadence.advance(current)
+                time.sleep(self._tick_cadence.delay(current))
         finally:
             # Cleanup belongs here rather than in the signal handler: the loop
             # also stops on its own when the video buffer disappears, and the
             # report must be written in that case too.
             self.close()
+
+    def _announce(self, now: float) -> None:
+        """Say we are here, once a second, and how well we are keeping up.
+
+        daic previously only listened on the bus, so it never appeared in the
+        pipeline view at all -- a module nobody could see was also a module
+        nobody could see struggling.
+        """
+        if now - self._last_module_heartbeat < 1.0:
+            return
+        self._last_module_heartbeat = now
+        self.intake.record(self._ticks_since_heartbeat)
+        self._ticks_since_heartbeat = 0
+        payload = {
+            "intake": self.intake.report(self._vehicle_clock(),
+                                         overruns=self.module_bus.overruns),
+            "state": self._last_planner_state_name or "IDLE",
+            # Readiness is the planner actually running, which both front ends
+            # can answer; only the windowed one has an AI toggle.
+            "ready": (self._last_planner_state_name or "IDLE") != "IDLE",
+            "capabilities": ["vision", "obstacle_avoidance"],
+        }
+        if not self._hello_sent:
+            self._hello_sent = True
+            self.module_bus.publish("module.hello", payload=payload)
+        self.module_bus.publish("module.heartbeat", payload=payload)
+
+    def _note_vehicle_clock(self, status: dict) -> None:
+        """Take the vehicle's clock from the snapshot the planner will see.
+
+        Read here rather than inside the planner so the planner stays pure
+        logic with no idea where time comes from, and so both front ends feed
+        it the same way.
+        """
+        try:
+            value = float(status.get("sim.time_s"))
+        except (TypeError, ValueError):
+            return
+        self._vehicle_time_s = value
+
+    def _vehicle_clock(self) -> float:
+        """The vehicle's clock, or the wall clock when no vehicle publishes one.
+
+        The planner's timers all gate flight, so they read this. A link that
+        reports no time at all leaves the wall clock as the only estimate
+        there is -- the same fallback the flow detector makes.
+        """
+        if self._vehicle_time_s is not None:
+            return self._vehicle_time_s
+        return time.monotonic()
 
     def _tick(self, now: float) -> None:
         self.open_missing()
@@ -1612,6 +1748,8 @@ class HeadlessAgent:
             self.running = False
             return
         self._maintain_control(now)
+        self._ticks_since_heartbeat += 1
+        self._announce(now)
 
         if self._pending_enable_ai and self.command is not None:
             self._pending_enable_ai = False
@@ -1623,6 +1761,7 @@ class HeadlessAgent:
         # Read latest video frame and run detector + SLAM.
         if self.video is not None:
             seq = self.video.getSeq()
+            self.intake.note_sequence(seq)
             if seq != self.last_video_seq and seq > 0:
                 self.last_video_seq = seq
                 slot  = self.video.getPtr(-1)
@@ -1634,7 +1773,8 @@ class HeadlessAgent:
                     pass
                 if self.slam_detector is not None and self.slam_detector._available:
                     try:
-                        self._last_slam_sectors = self.slam_detector.detect_obstacles(rgb)
+                        self._last_slam_sectors = self.slam_detector.detect_obstacles(
+                            rgb, timestamp_s=self._vehicle_time_s)
                     except Exception:
                         pass
                 try:
@@ -1668,6 +1808,7 @@ class HeadlessAgent:
             status_snap = self.status.getAll()
             if now - self.last_status_time > 2.0:
                 status_snap["_stale"] = "1"
+        self._note_vehicle_clock(status_snap)
         if status_snap.get("control.owner") != self.control_source:
             # Acquisition is asynchronous. Do not advance the planner on
             # commands the simulator is guaranteed to reject.

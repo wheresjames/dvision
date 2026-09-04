@@ -300,7 +300,8 @@ class ORBSLAM3Detector:
     # Main API
     # ------------------------------------------------------------------
 
-    def detect_obstacles(self, frame_rgb: np.ndarray) -> ObstacleSectors:
+    def detect_obstacles(self, frame_rgb: np.ndarray, *,
+                         timestamp_s: float | None = None) -> ObstacleSectors:
         """Feed a new RGB frame and return the current obstacle sectors.
 
         Non-blocking: the frame is queued for the SLAM thread; this method
@@ -310,7 +311,11 @@ class ORBSLAM3Detector:
         if not self._available:
             return _NULL_SECTORS
 
-        ts   = time.monotonic()
+        # ORB_SLAM3's tracker uses the interval between these stamps in its
+        # motion model, so it is a measurement of the flight rather than a log
+        # entry: the vehicle's clock when the caller has one, the wall clock
+        # when it does not.
+        ts   = time.monotonic() if timestamp_s is None else float(timestamp_s)
         gray = _to_gray(frame_rgb)
 
         # Drop oldest frame if queue is full — we prefer fresh frames.

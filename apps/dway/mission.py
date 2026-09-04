@@ -23,6 +23,7 @@ from typing import Any, Callable
 from dvision2_common import (
     DEFAULT_REPORT_ID, SimMap, load_map, new_run_id, report_root,
 )
+from dcmn.pacing import PeriodicDeadline
 from dway.follower import (
     AIRBORNE_MIN_M, Follower, FollowerEvent, MIN_TAKEOFF_ALT_M, Sample,
     StrategyError, build_legs, select_strategy,
@@ -94,7 +95,15 @@ class Mission:
     root: Path = ROOT
     sim_map: SimMap | None = None
     recorder: FlightRecorder | None = None
+    #: Simulated time: everything about the flight is measured against the
+    #: clock the vehicle keeps, so a busy host cannot shorten a dwell or expire
+    #: a leg. In production this is the link's ``sim_time_s``.
     clock: Callable[[], float] = time.monotonic
+    #: Wall time, and only for liveness: how old the state we received is.
+    #: A dead simulator stops simulated time, so a staleness check measured on
+    #: it could never fire. It must match the clock ``VehicleState`` was
+    #: stamped with -- see ``DsimLink.__init__``.
+    wall: Callable[[], float] = time.monotonic
 
     def __post_init__(self) -> None:
         self.config.validate()
@@ -117,13 +126,15 @@ class Mission:
         self._paused_s = 0.0
         self._paused_at: float | None = None
         self._deadline: float | None = None
-        self._last_stream_s = 0.0
+        self._stream_cadence = PeriodicDeadline(self.config.stream_hz)
         self._last_heartbeat_s = 0.0
         self._armed_sent = False
         self._takeoff_alt_m: float | None = None
         self._finished_s: float | None = None
         self._current_index = -1
         self._conditions: dict[str, Any] = {}
+        #: Setpoints actually put on the wire, for the keeping-up report.
+        self.setpoints_sent = 0
 
     # ------------------------------------------------------------------
     # Clocks and logging
@@ -196,7 +207,7 @@ class Mission:
             self._paused_s += self.clock() - self._paused_at
             self._paused_at = None
         self.reason = ""
-        self._last_stream_s = 0.0
+        self._stream_cadence.reset(self.clock())
         if self.follower is not None:
             self.follower.begin_leg(self._sample(state, self.clock()))
         self._transition(MissionState.FLYING)
@@ -278,6 +289,11 @@ class Mission:
             self._deadline = now + CONNECT_TIMEOUT_S
         if self.link.connect() and self.link.capabilities().vehicle:
             self._deadline = None
+            # Anchor mission time on the first reading we can actually take.
+            # Constructing the mission reads a clock that has no vehicle behind
+            # it yet, so a simulator that had been up for a while would make
+            # the flight appear to have started before it was launched.
+            self._t0 = self.clock()
             self._log("connected")
             return self._transition(MissionState.PREFLIGHT)
         if now > self._deadline:
@@ -477,12 +493,13 @@ class Mission:
     def _enter_flying(self, now: float, state: VehicleState) -> MissionState:
         assert self.follower is not None
         self.follower.begin_leg(self._sample(state, now))
-        self._last_stream_s = 0.0
+        self._stream_cadence.reset(now)
         self._transition(MissionState.FLYING)
         return self._step_flying(now)
 
     def _step_flying(self, now: float) -> MissionState:
         assert self.follower is not None
+        self._stream_cadence.set_rate(self.config.stream_hz)
         state = self._observe(now)
         if state is None:
             return self.state
@@ -505,7 +522,7 @@ class Mission:
                 f"waypoint {self.follower.index} not reached within its leg timeout")
 
         due = (event is FollowerEvent.ARRIVED
-               or now - self._last_stream_s >= 1.0 / self.config.stream_hz)
+               or self._stream_cadence.due(now))
         if due:
             return self._stream(now, state, sample)
         return self.state
@@ -517,7 +534,12 @@ class Mission:
         if leg is None:
             return self._begin_completion(now)
         result = self.strategy.send(self.link, leg, sample, self.speed_mps)
-        self._last_stream_s = now
+        self.setpoints_sent += 1
+        # Advance an absolute simulated-time grid. Anchoring this to ``now``
+        # turns every late poll into permanent drift (10 Hz became ~7.5 Hz on
+        # a 30 Hz vehicle clock). Do not burst to catch up: skip deadlines
+        # already behind us and retain the original phase.
+        self._stream_cadence.advance(now)
         self._log("setpoint", state=state, request_id=result.request_id,
                   accepted=result.accepted, reason=result.reason,
                   waypoint=leg.index, strategy=self.strategy.name)
@@ -600,7 +622,9 @@ class Mission:
         """Everything that must hold before another setpoint may be sent."""
         if not state.link_connected:
             return "vehicle link disconnected"
-        age = now - state.sample_monotonic_s
+        # Wall against wall: state.sample_wall_s was stamped by the link on the
+        # wall clock, and `now` here is simulated time.
+        age = self.wall() - state.sample_wall_s
         if age > self.tour.max_state_age_s:
             return f"vehicle state is {age:.2f}s old"
         if state.mode == "CRASHED":
@@ -667,7 +691,7 @@ class Mission:
             return "velocity estimate is invalid (est.velocity_valid=0)"
         if not state.attitude_valid:
             return "attitude estimate is invalid (est.attitude_valid=0)"
-        age = self.clock() - state.sample_monotonic_s
+        age = self.wall() - state.sample_wall_s
         if age > self.tour.max_state_age_s:
             return (f"vehicle state is {age:.2f}s old, older than the tour's "
                     f"{self.tour.max_state_age_s:.2f}s limit")

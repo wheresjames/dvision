@@ -28,7 +28,7 @@ for _path in (str(ROOT), str(APPS)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from dcmn import theme
+from dcmn import health, theme
 from dcmn.module_bus import (PipelineView, PymembusModuleBus, SHUTDOWN_EVENT,
                              requests_shutdown)
 from dcmn.mapview import MapView, draw_map_axes
@@ -37,6 +37,7 @@ from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
 from dsim.realism import GEOFENCE_ACTIONS, GPS_MODES, REALISM_DEFAULTS, Realism, SENSOR_NOISE_PROFILES
 from dsim.realism_panel import RealismPanel
+from dsim.health import SimulationHealth
 from dsim.scene import SCENE_PRESETS
 from dvision2_common import (
     BERLIN_CENTER_ALT_M,
@@ -558,6 +559,13 @@ _POSITION_TRIM_SPEED_MPS = 0.5 # ...and the vehicle is hovering, not travelling
 
 # Obstacles occupy their full map cell.  Map object centres are at x/y + 0.5,
 # so a half extent of 0.5 makes adjacent wall cells touch with no seam.
+#: ``--sim-speed`` resolved to a number: ``None`` is real time, a positive
+#: float is that multiple of it, and ``UNPACED`` is "as fast as this machine
+#: manages". Real time is deliberately a distinct value rather than 1.0,
+#: because it also selects a measured rather than a fixed timestep.
+UNPACED = 0.0
+
+
 _OBSTACLE_HALF_EXTENT_M = 0.5
 _COLLISION_SWEEP_STEP_M = 0.1
 
@@ -654,6 +662,10 @@ class DroneSimulator:
     #: simulator built with ``__new__`` by a test rig still has a clock.
     sim_time_s = 0.0
 
+    #: Whether the simulation and its pipeline are keeping up. A class default
+    #: so a rig built with ``__new__`` can read status without one.
+    health: SimulationHealth | None = None
+
     #: The most recent command results, oldest first, as published lines. A
     #: tuple replaced wholesale on every append, so this class default is
     #: shared by no one and a rig built with ``__new__`` still records.
@@ -710,6 +722,7 @@ class DroneSimulator:
         self.dsim_report_dir.mkdir(parents=True, exist_ok=True)
         print(f"dsim: report directory → {self.report_root}", file=sys.stderr)
 
+        self.health = SimulationHealth(self.dsim_report_dir)
         self.flight_positions: list[tuple[float, float, float]] = []  # (x, y, elapsed_s)
         self.crash_pos: tuple[float, float] | None = None
 
@@ -816,6 +829,45 @@ class DroneSimulator:
             "state": "ready", "capabilities": ["vehicle", "video", "status"]})
         self.publish_status(force=True)
 
+    #: The speeds the monitor offers. ``None`` is real time, which is not the
+    #: same as 1.0: real time also measures its timestep instead of fixing it.
+    SPEED_CHOICES: tuple[tuple[str, float | None], ...] = (
+        ("real time", None), ("0.25x", 0.25), ("0.5x", 0.5), ("1x", 1.0),
+        ("2x", 2.0), ("4x", 4.0), ("10x", 10.0), ("max", UNPACED),
+    )
+
+    def set_sim_speed(self, speed: float | None) -> None:
+        """Change how fast simulated time runs, mid-flight.
+
+        Sound at any moment because nothing downstream reads the rate: clients
+        ask whether enough simulated time has passed, and that question has the
+        same answer however fast the clock is turning. The new value is
+        published as ``sim.speed`` on the next status, so a client that does
+        care -- the vehicle link stretches its acknowledgement bound for a
+        slow-motion vehicle -- sees it without being told.
+
+        Validated before it is stored, so a rejected change leaves the
+        simulation running exactly as it was.
+        """
+        if speed is not None:
+            speed = float(speed)
+            if not math.isfinite(speed) or speed < 0.0:
+                raise ValueError("sim speed must be a positive multiple, "
+                                 "0 for unpaced, or None for real time")
+        self.args.sim_speed = speed
+
+    def _published_speed(self) -> float:
+        """The speed clients see: 1.0 in real time, 0.0 when unpaced."""
+        speed = getattr(self.args, "sim_speed", None)
+        return 1.0 if speed is None else float(speed)
+
+    def _video_tick_divisor(self) -> int:
+        """Physics ticks per published frame; 1 unless ``--video-hz`` lowers it."""
+        video_hz = getattr(self.args, "video_hz", None)
+        if not video_hz:
+            return 1
+        return max(1, int(round(self.args.fps / float(video_hz))))
+
     def _remove_ipc_names(self) -> None:
         pm = self.pymembus
         pm.memvid.remove(self.names["video"])
@@ -833,6 +885,10 @@ class DroneSimulator:
             elapsed = time.monotonic() - self.started
             summary = {
                 "duration_s": round(elapsed, 3),
+                "sim_time_s": round(self.sim_time_s, 3),
+                "sim_speed": self._published_speed(),
+                "video_hz": (float(self.args.fps) if not getattr(
+                    self.args, "video_hz", None) else float(self.args.video_hz)),
                 "crashed": bool(self.state.crashed),
                 "mode": self.state.mode,
                 "status_message": self.state.status_message,
@@ -841,11 +897,19 @@ class DroneSimulator:
                 "z_m": round(self.state.z, 4),
                 "speed_mps": round(math.hypot(self.state.vx, self.state.vy), 4),
                 "crash_position": self.crash_pos,
+                "health": (None if self.health is None
+                           else self.health.summary()),
             }
             (self.dsim_report_dir / "summary.json").write_text(
                 json.dumps(summary, indent=2), encoding="utf-8")
         except Exception as exc:
             print(f"dsim: summary error: {exc}", file=sys.stderr)
+        if self.health is not None:
+            try:
+                self.health.write_report(self.dsim_report_dir)
+            except Exception as exc:
+                print(f"dsim: health report error: {exc}", file=sys.stderr)
+            self.health.close()
         if self.ui is not None:
             self.ui.close()
         if self.p3d is not None:
@@ -883,8 +947,15 @@ class DroneSimulator:
                   f"command={self.names['command']} status={self.names['status']}")
 
         frame_period = 1.0 / max(1, self.args.fps)
+        # How many physics ticks pass between published frames. Rendering is
+        # the whole cost of a tick -- physics is microseconds and a frame is
+        # milliseconds -- so publishing at the rate consumers actually sample
+        # is what makes a scaled run fast. The simulated interval between
+        # frames is unchanged, so no consumer can tell the difference.
+        video_every = self._video_tick_divisor()
         last = time.monotonic()
         frames_left = self.args.frames
+        tick = 0
         try:
             while self.running:
                 bus_events = [] if self.module_bus is None else self.module_bus.receive()
@@ -894,23 +965,51 @@ class DroneSimulator:
                     self.running = False
                     break
                 now = time.monotonic()
-                dt  = clamp(now - last, 0.001, 0.1)
+                # Read every tick rather than hoisted, so the monitor can
+                # change the speed while the simulation is running.
+                speed = getattr(self.args, "sim_speed", None)
+                real_time = speed is None
+                # Real time measures the step it actually took: if the host
+                # stalls, the vehicle is owed the truth about how long that
+                # was. A scaled clock is not a measurement of the room, so
+                # measuring it would be meaningless -- and a fixed step is
+                # what makes a scaled run repeatable.
+                dt = clamp(now - last, 0.001, 0.1) if real_time else frame_period
                 last = now
                 self.step(dt, drain_commands=True)
                 self.flight_positions.append(
-                    (self.state.x, self.state.y, now - self.started))
-                self.publish_frame(now)
+                    (self.state.x, self.state.y, self.sim_time_s))
+                render_s = None
+                if tick % video_every == 0:
+                    render_started = time.monotonic()
+                    self.publish_frame(now)
+                    render_s = time.monotonic() - render_started
                 self.publish_status()
+                if self.health is not None:
+                    self.health.note_tick(render_s)
+                    # Sampling is once a second and costs a few floats; it must
+                    # never become per-tick work in the loop it is measuring.
+                    self.health.sample(
+                        wall_now=time.monotonic(), sim_now=self.sim_time_s,
+                        requested=self._published_speed(),
+                        members=self.pipeline.members(include_expired=True),
+                        member_expiry_s=self.pipeline.expiry_s)
                 if self.ui is not None:
                     self.ui.update()
                     if self.ui.closed:
                         self.running = False
+                tick += 1
                 if frames_left is not None:
                     frames_left -= 1
                     if frames_left <= 0:
                         break
                 elapsed = time.monotonic() - now
-                time.sleep(max(0.0, frame_period - elapsed))
+                if real_time:
+                    time.sleep(max(0.0, frame_period - elapsed))
+                elif speed > UNPACED:
+                    time.sleep(max(0.0, frame_period / speed - elapsed))
+                # UNPACED sleeps not at all, and runs at whatever the render
+                # and publish path sustains.
         finally:
             self.close()
 
@@ -1619,6 +1718,19 @@ class DroneSimulator:
             "sim.id":                self.args.id,
             "sim.map":               str(self.map.path),
             "sim.time_s":            f"{self.sim_time_s:.3f}",
+            # How simulated seconds map onto real ones: 1 for real time, the
+            # configured multiple for a scaled run, 0 for a run that is not
+            # paced at all. A client that must refuse to run faster than real
+            # time reads this rather than guessing from timestamps.
+            "sim.speed":             f"{self._published_speed():.4f}",
+            # What the pace actually came out at, and one word for whether
+            # anything on this instance is struggling to hold it. Diagnostic
+            # only: nothing waits on either of them.
+            "sim.speed_achieved":    ("" if self.health is None
+                                      or self.health.achieved is None
+                                      else f"{self.health.achieved:.4f}"),
+            "sim.health":            ("unknown" if self.health is None
+                                      else self.health.grade.value),
             "sim.report_dir":        str(self.report_root),
             "sim.camera_in_geometry": "1" if self.is_blocked(st.x, st.y, st.z) else "0",
             "vehicle.type":          "dsim",
@@ -1860,6 +1972,29 @@ class TopDownUi:
         ttk.Label(header, text=str(sim.map.path), style="HeaderDim.TLabel").grid(
             row=0, column=1, sticky="w")
 
+        # Speed sits in the header rather than on the Realism page because it
+        # is not a property of the environment: it changes how fast the whole
+        # simulation runs, and an operator wants it visible on every tab.
+        ttk.Label(header, text="speed", style="HeaderDim.TLabel").grid(
+            row=0, column=2, sticky="e", padx=(12, 6))
+        self._speed_labels = [name for name, _ in sim.SPEED_CHOICES]
+        self.speed_var = tk.StringVar(value=self._speed_label(sim))
+        self.speed_box = ttk.Combobox(
+            header, textvariable=self.speed_var, state="readonly", width=10,
+            values=self._speed_labels)
+        self.speed_box.grid(row=0, column=3, sticky="e")
+        self.speed_box.bind("<<ComboboxSelected>>", self._speed_selected)
+
+        # What the pace actually came out at, and one light for whether
+        # anything on this instance is struggling to hold it. Both are read
+        # from the health record; neither gates anything.
+        self.achieved_var = tk.StringVar(value="")
+        ttk.Label(header, textvariable=self.achieved_var,
+                  style="HeaderDim.TLabel").grid(row=0, column=4, sticky="e",
+                                                 padx=(8, 6))
+        self.health_dot = ttk.Label(header, text="\u25cf", style="HeaderDim.TLabel")
+        self.health_dot.grid(row=0, column=5, sticky="e")
+
         # Two tabs. The header and footer stay outside them: the status line
         # and Reset are about the vehicle whichever page you are reading.
         notebook = ttk.Notebook(self.root)
@@ -1882,12 +2017,25 @@ class TopDownUi:
 
         pipeline = ttk.Frame(notebook, padding=10)
         notebook.add(pipeline, text="Pipeline")
-        columns = ("role", "implementation", "version", "state", "ready", "run", "age")
+        columns = ("role", "implementation", "version", "state", "ready", "run",
+                   "age", "rate", "skipped")
         self.pipeline_tree = ttk.Treeview(pipeline, columns=columns, show="headings",
                                           height=12)
+        # Widths per column rather than one figure for all of them: nine
+        # uniform columns overflow the window the map sizes, and the two that
+        # matter -- what a module wanted against what it got -- were the ones
+        # pushed off the edge.
+        widths = {"role": 92, "implementation": 108, "version": 58,
+                  "state": 88, "ready": 56, "run": 96, "age": 56,
+                  "rate": 108, "skipped": 66}
         for column in columns:
             self.pipeline_tree.heading(column, text=column)
-            self.pipeline_tree.column(column, width=105, stretch=True)
+            self.pipeline_tree.column(column, width=widths.get(column, 96),
+                                      anchor="w", stretch=True)
+        for grade, colour in ((health.OK, theme.OK), (health.WARN, theme.WARN),
+                              (health.BAD, theme.DANGER),
+                              (health.UNKNOWN, theme.DIM)):
+            self.pipeline_tree.tag_configure(grade, foreground=colour)
         self.pipeline_tree.grid(row=0, column=0, sticky="nsew")
         pipeline.rowconfigure(0, weight=1); pipeline.columnconfigure(0, weight=1)
 
@@ -1916,6 +2064,38 @@ class TopDownUi:
 
         restore_window_pos(self.root, f"dsim.{sim.args.id}")
 
+    @staticmethod
+    def _speed_label(sim: DroneSimulator) -> str:
+        """The menu entry for the speed the simulator is running at.
+
+        A speed given on the command line need not be one of the presets, so
+        an unlisted value is shown as itself rather than silently snapping the
+        display to a neighbour it is not running at.
+        """
+        current = getattr(sim.args, "sim_speed", None)
+        for name, value in sim.SPEED_CHOICES:
+            if value == current or (value is None and current is None):
+                return name
+        return f"{current:g}x"
+
+    def _speed_selected(self, _event=None) -> None:
+        chosen = self.speed_var.get()
+        for name, value in self.sim.SPEED_CHOICES:
+            if name == chosen:
+                self.sim.set_sim_speed(value)
+                return
+        # An unlisted entry is the launch value the menu was seeded with;
+        # selecting it again is not a change.
+        self.speed_var.set(self._speed_label(self.sim))
+
+    def _sync_speed_box(self) -> None:
+        """Follow a speed changed from anywhere other than this menu."""
+        label = self._speed_label(self.sim)
+        if label not in self._speed_labels:
+            self.speed_box.configure(values=[*self._speed_labels, label])
+        if self.speed_var.get() != label:
+            self.speed_var.set(label)
+
     def close(self) -> None:
         self.closed = True
         try:
@@ -1928,6 +2108,8 @@ class TopDownUi:
         if self.closed:
             return
         self.draw_drone()
+        self._sync_speed_box()
+        self._refresh_health()
         self.realism_panel.refresh()
         self._refresh_pipeline()
         self.root.update_idletasks()
@@ -1937,11 +2119,31 @@ class TopDownUi:
         self.pipeline_tree.delete(*self.pipeline_tree.get_children())
         for member, age in self.sim.pipeline.members(include_expired=True):
             expired = age > self.sim.pipeline.expiry_s
-            self.pipeline_tree.insert("", "end", values=(
+            intake = health.describe(member.intake)
+            wanted, achieved = intake["wanted_hz"], intake["achieved_hz"]
+            # "4.4/5.0 Hz" reads as a shortfall at a glance in a way a bare
+            # percentage does not, and it names the target the module set
+            # itself rather than one this window invented for it.
+            rate = ("-" if not wanted or achieved is None
+                    else f"{achieved:.1f}/{wanted:.1f} Hz"
+                    + (" wall" if intake["basis"] == "wall" else ""))
+            grade = health.BAD if expired else intake["grade"]
+            self.pipeline_tree.insert("", "end", tags=(grade,), values=(
                 member.role, member.implementation, member.protocol_version,
                 "expired" if expired else member.state,
                 "yes" if member.ready and not expired else "no",
-                member.run_id[:10], f"{age:.1f}s"))
+                member.run_id[:10], f"{age:.1f}s", rate,
+                intake["skipped"] or ""))
+
+    def _refresh_health(self) -> None:
+        """The header pair: achieved pace, and the worst grade on the bus."""
+        monitor = self.sim.health
+        achieved = None if monitor is None else monitor.achieved
+        self.achieved_var.set("" if achieved is None else f"{achieved:.2f}x actual")
+        grade = health.UNKNOWN if monitor is None else monitor.grade.value
+        self.health_dot.configure(foreground={
+            health.OK: theme.OK, health.WARN: theme.WARN,
+            health.BAD: theme.DANGER}.get(grade, theme.GRID))
 
     def xy(self, x: float, y: float) -> tuple[float, float]:
         return self.view.xy(x, y)
@@ -2014,6 +2216,26 @@ class TopDownUi:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _sim_speed(text: str) -> float:
+    """Parse ``--sim-speed``: a positive multiplier, or ``max``.
+
+    ``0`` is accepted as an alias for ``max``. Negatives are rejected: a
+    negative multiplier reads like running time backwards, which is not what
+    it would do.
+    """
+    if str(text).strip().lower() == "max":
+        return UNPACED
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"expected a number or 'max', got {text!r}") from None
+    if not math.isfinite(value) or value < 0.0:
+        raise argparse.ArgumentTypeError(
+            "sim-speed must be a positive multiplier or 'max'")
+    return value
+
+
 def _resolve_realism(args: argparse.Namespace) -> None:
     """Merge realism settings: an explicit flag beats a profile beats a default.
 
@@ -2054,6 +2276,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--height",   type=int,   default=480)
     parser.add_argument("--fps",      type=int,   default=30)
     parser.add_argument("--bufs",     type=int,   default=4)
+    parser.add_argument("--sim-speed", type=_sim_speed, default=None,
+                        metavar="MULTIPLIER",
+                        help="advance simulated time at this multiple of real "
+                             "time, or 'max' for no pacing at all. Omitted "
+                             "means real time, which is never made to wait")
+    parser.add_argument("--video-hz", type=float, default=None,
+                        help="publish video at this rate instead of --fps; the "
+                             "physics tick rate is unchanged")
     parser.add_argument("--range-sensor", choices=("none", "exact",
                         "lidar_flash_short", "lidar_tof_wide"), default="none",
                         help="range configuration advertised to observers")
@@ -2133,6 +2363,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     _resolve_realism(args)
     if args.width <= 0 or args.height <= 0 or args.fps <= 0 or args.bufs <= 0:
         raise SystemExit("width, height, fps, and bufs must be positive")
+    if args.video_hz is not None and not 0.0 < args.video_hz <= args.fps:
+        raise SystemExit("video-hz must be positive and no greater than fps")
     if args.setpoint_timeout < 0:
         raise SystemExit("setpoint timeout must be non-negative")
     if min(args.control_lease_timeout, args.max_speed_mps,

@@ -22,12 +22,6 @@ maps onto a MAVLink one, and the autonomy stack is split into detector,
 planner, avoidance, local mapping, and control layers so each piece can be
 tested or replaced independently.
 
-The design documents at the repository root are the contracts the code was
-written against, not notes: [`DV-DWAY.md`](DV-DWAY.md) is the vehicle
-interface and waypoint navigation, [`DV-DALG.md`](DV-DALG.md) the algorithm
-demonstrator, [`DV-WORKBENCH.md`](DV-WORKBENCH.md) the test workbench. Change
-one before writing code that diverges from it.
-
 ## Contents
 
 - [Project Layout](#project-layout)
@@ -52,11 +46,11 @@ one before writing code that diverges from it.
 ```text
 dvision2_common.py          Shared protocol, map loading, ids, status keys
 OVERVIEW.md                 Architecture and API reference
-DV-DWAY.md                  Contract: vehicle interface and waypoint navigation
-DV-DALG.md                  Contract: the algorithm demonstrator
-DV-WORKBENCH.md             Contract: the test workbench
 docs/
+  clock.md                  Simulated vs wall time, module sync, and the failure modes
+  modcom.md                 Module communication: the four shared-memory planes
   reports.md                Report layout: who owns what, and the rules
+  sensors-protocols.md      Sensor configuration and the protocols behind it
   mavlink-slam-nav.md       The reference architecture the vehicle seam borrows from
 
 apps/                       The seven applications. A source root rather than
@@ -66,6 +60,7 @@ apps/                       The seven applications. A source root rather than
     theme.py                  The one dvision2 colour palette
     tktheme.py                That palette applied to ttk, shared by every window
     mapview.py                Top-down map and vehicle drawing, shared by every view
+    pacing.py                 Repaint caps, so a window never paces control
 
   dsim/
     dsim.py                   Simulator: physics, rendering, IPC server, UI
@@ -152,6 +147,7 @@ tests/
   test_dcmn_mapview.py      Shared map geometry, both drawing backends
   test_dcmn_theme.py        One palette, and no module keeping its own copy
   test_dvision_wall_clock_independence.py  Nothing depends on how busy the machine is
+  test_dvision_sim_speed_conformance.py  The same tour flown at two speeds, and the same report
   test_dtest_harness.py     The suite's own invariants, including staying off screen
   test_dway_*.py            Vehicle contract, tours, flights, realism, editor, transports
   dway_repeatability.py     Repeated baseline flights, aggregated into variance
@@ -388,8 +384,10 @@ Options:
 | `--id` | Required instance id |
 | `--map` | Map file to load |
 | `--width`, `--height` | Rendered video frame size |
-| `--fps` | Simulation and video update rate |
+| `--fps` | Physics tick and video update rate |
 | `--bufs` | Video ring-buffer slot count |
+| `--sim-speed` | Advance simulated time at this multiple of real time, or `max` for no pacing. Omitted means real time, which is never made to wait. Changeable while running, from the monitor's header |
+| `--video-hz` | Publish video at this rate instead of `--fps`; the physics tick rate is unchanged |
 | `--cmd-size` | Command buffer size in bytes |
 | `--start-alt` | Override initial altitude; otherwise map `drone-height` or `1.5` |
 | `--origin-lat/lon/alt` | GPS coordinate for the map center |
@@ -404,6 +402,56 @@ Options:
 | `--verbose` | Print runtime diagnostics |
 
 The environment flags are a section of their own, below.
+
+### Running faster than real time
+
+Omit `--sim-speed` and the simulator runs in real time, exactly as it always
+has: it publishes and moves on, and a client that cannot keep up drops frames.
+That is the contract a real vehicle needs, so nothing on the bus is ever
+allowed to hold the simulation back.
+
+`--sim-speed` scales the vehicle's clock. Every timer that gates flight reads
+`sim.time_s`, so a run at four times real time is the same flight, four times
+sooner -- the conformance suite flies one tour at both speeds and compares the
+reports. Speed can also be changed mid-flight from the monitor's header.
+
+The cost of a tick is almost entirely rendering: the physics is microseconds
+and a frame is about 12 ms, so publishing video at the rate consumers actually
+sample is what makes a scaled run fast. `--video-hz` does that without changing
+the physics rate or the *simulated* interval between frames.
+
+```sh
+# An unattended measurement sweep, as fast as this machine manages.
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_020.txt \
+        --no-ui --sim-speed max --video-hz 5 &
+simulator=$!
+python3 apps/dalg/dalg.py --id area1 --no-ui \
+        --profile assets/profiles/optical-flow-maze020.json &
+algorithm=$!
+python3 apps/dway/dway.py --id area1 --no-ui --exit-on-finish \
+        --tour assets/tours/maze_020.default.v1.json \
+        --wait-for algorithm:optical-flow-maze020 &
+navigator=$!
+
+# The flight and the measurement end themselves; the vehicle does not, because
+# a vehicle has no idea it was only wanted for one tour.
+wait $navigator $algorithm
+kill $simulator
+```
+
+That block is measured, not illustrative: it completes a 131-second flight in
+about 11 seconds of wall time, roughly 12x, and exits on its own. Dropping
+`--video-hz` costs almost all of it -- a scaled run with every physics tick
+still rendering tops out near 2.9x, because a `representative` frame is about
+12 ms and thirty of them a second is already most of a second.
+
+One caveat worth knowing before trusting a fast run: a consumer polls on its
+own wall-clock loop, so the same frames arriving in a shorter wall interval
+outrun it. `dalg` asking for 5 frames per simulated second captured 4.9 in real
+time, 4.0 at `--sim-speed 4` and 2.3 at `max`. The *flight* is unaffected at
+every speed -- arrival, path and duration all hold -- but a measurement taken
+at `max` is built from fewer samples than it asked for. Pick a bounded speed
+when the samples matter.
 
 ### Environment and Sensor Realism
 
@@ -506,7 +554,12 @@ sensor and the physics agree. A crash puts the drone in `CRASHED` until reset.
 ### Monitor window
 
 Two tabs. The status line, Save Snapshot and Reset drone sit outside them,
-because they are about the vehicle whichever page you are reading.
+because they are about the vehicle whichever page you are reading. So does the
+**speed** menu in the header: it is not a property of the environment the way
+the Realism settings are, it changes how fast the whole simulation runs, and
+it takes effect on the next tick. Nothing downstream has to be told -- clients
+ask whether enough simulated time has passed, and that has the same answer
+however fast the clock is turning.
 
 **Map** is the top-down monitor: the map, the drone's position and heading, its
 view cone, and the armed/mode state.
@@ -583,7 +636,7 @@ Options:
 |---|---|
 | `--id` | Required instance id |
 | `--width`, `--height` | Maximum displayed video size |
-| `--fps` | UI refresh rate |
+| `--fps` | Control tick rate. Painting is capped separately: 30 Hz video, 4 Hz text |
 | `--cmd-size` | Command buffer size |
 | `--speed` | Horizontal speed sent to dsim in m/s |
 | `--vertical-speed` | Vertical speed sent to dsim |
@@ -670,7 +723,7 @@ Options:
 | `--id` | Instance id; required unless `--install` is used |
 | `--display-w`, `--display-h` | Maximum displayed video size, `0` for native |
 | `--video-w`, `--video-h` | Expected frame size for detector/servo gains |
-| `--fps` | UI/control loop refresh rate |
+| `--fps` | Control loop rate. Painting is capped separately: 30 Hz video, 10 Hz maps, 4 Hz text |
 | `--cmd-size` | Command buffer size |
 | `--enable-ai` | Enable AI immediately on startup |
 | `--no-ui` | Headless mode |
@@ -1453,6 +1506,7 @@ Common status keys:
 | `sim.id` | Instance id |
 | `sim.map` | Loaded map path |
 | `sim.time_s` | Simulated seconds since the run began -- time the vehicle experienced, not time that passed in the room |
+| `sim.speed` | How simulated seconds map onto real ones: `1` in real time, the configured multiple under `--sim-speed`, `0` when unpaced |
 | `sim.report_dir` | This run's report root; every module writes into its own subdirectory of it |
 | `sim.camera_in_geometry` | `"1"` when the camera is inside a wall or tree, so a vision test can discard the frame |
 | `camera.width_px`, `camera.height_px` | Video dimensions |
@@ -1565,15 +1619,26 @@ Velocity command values in logs are SI setpoints. Status velocity keys show the
 actual simulated world-frame response after lag and collision handling.
 
 **Simulated time is the vehicle's clock.** `sim.time_s` counts the seconds the
-physics advanced, and every timer that gates flight -- the guided setpoint
-failsafe, the control lease, telemetry latency -- reads it rather than the wall
-clock. In the live loop `dt` comes from the wall clock, so the two track each
-other and nothing changes; under a fixed-timestep harness they do not, and a
-failsafe that fires because the machine was busy rather than because the
-vehicle flew for two seconds is measuring the wrong thing. The live loop clamps
-`dt` to 100 ms, so a process stalled longer than that advances simulated time
-by less than the wall clock -- which is the honest answer, because the physics
-did not run.
+physics advanced, and every timer that gates flight reads it rather than the
+wall clock: the guided setpoint failsafe, the control lease and telemetry
+latency in `dsim`; the whole mission clock in `dway` -- dwell, arrival gates,
+leg timeouts, the setpoint stream; the planner's state timers in `daic`; the
+frame capture rate in `dalg`. A failsafe that fires because the machine was
+busy rather than because the vehicle flew for two seconds is measuring the
+wrong thing.
+
+In real time `dt` comes from the wall clock, so the two track each other and
+nothing changes. The live loop clamps `dt` to 100 ms, so a process stalled
+longer than that advances simulated time by less than the wall clock -- the
+honest answer, because the physics did not run. Under `--sim-speed` the step is
+fixed at `1/fps` instead: a scaled clock is not a measurement of the room, so
+measuring it would be meaningless, and a fixed step is what makes a scaled run
+repeatable.
+
+Only two things may read the wall clock: liveness between processes
+(heartbeats, expiry, acknowledgement deadlines) and how often a window
+repaints. [`docs/clock.md`](docs/clock.md) is the full contract, including the
+failure modes that follow from getting the split wrong.
 
 A client that infers a distance from motion needs the same clock. `daic`'s
 optical-flow detector turns expansion into a range using `speed x elapsed`, and
@@ -1622,6 +1687,12 @@ python3 tests/vision_debug_report.py /tmp/maze002.jsonl
   and the mission-upload handshake is deliberately not implemented.
 - Physics and collision are simplified. Wind is an environment, not
   aerodynamics -- see [Development Notes](#development-notes).
+- A time-scaled run is repeatable, not deterministic. `--sim-speed` fixes the
+  timestep, which removes the load-dependent jitter real time has, but without
+  a tick barrier the interleaving of client commands against simulator ticks
+  still varies between runs. Consumers also sample less of a fast run than a
+  slow one, because each polls on its own wall clock -- see
+  [Running faster than real time](#running-faster-than-real-time).
 - `dsim` accepts position and velocity setpoints but not attitude ones; nothing
   in the project needs that rung of the ladder.
 - One vehicle per instance. Buffer names are per-`--id`, so two vehicles means

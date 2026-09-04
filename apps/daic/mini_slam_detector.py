@@ -160,6 +160,8 @@ class MiniSLAMDetector:
         if not self._available:
             return _NULL_SECTORS
 
+        # Queued alongside the frame for symmetry with the ORB_SLAM3 wrapper;
+        # this detector's worker never reads it, so it stays a wall stamp.
         ts   = time.monotonic()
         gray = _to_gray(frame_rgb)
 

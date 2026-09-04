@@ -52,7 +52,12 @@ class VelocityTarget:
 
 @dataclass(frozen=True)
 class VehicleState:
-    sample_monotonic_s: float
+    #: When this state was *received*, on the wall clock. It answers "is the
+    #: link alive", which is a fact about processes, so it is never simulated
+    #: time -- and it must only ever be compared against another wall-clock
+    #: reading. The name says which clock so a mismatch is visible at the call
+    #: site rather than discovered as a nonsensical age.
+    sample_wall_s: float
     link_connected: bool
     armed: bool
     mode: str
@@ -114,7 +119,7 @@ DIAGNOSTIC_KEYS = (
     "origin.lat_deg", "origin.lon_deg", "origin.alt_m",
     "home.lat_deg", "home.lon_deg", "home.alt_m",
     "drone.lat_deg", "drone.lon_deg", "drone.alt_m",
-    "sim.map", "sim.report_dir",
+    "sim.map", "sim.report_dir", "sim.speed", "sim.speed_achieved",
 )
 
 #: How long a link waits for the acknowledgement of one command. Queue
@@ -217,6 +222,14 @@ class DsimLink:
                  cmd_size: int = 65536,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep) -> None:
+        """``clock`` is the wall clock, and only the wall clock.
+
+        Everything this link times is a bound on a peer process -- how old the
+        state it received is, and how long to wait for an acknowledgement --
+        never a property of the flight. Handing it a simulated clock would make
+        a dead simulator undetectable, because the clock that would catch it
+        stops when it does.
+        """
         self.instance_id = instance_id
         self.client_id = client_id or f"dway-{instance_id}"
         self.lease_id = uuid.uuid4().hex
@@ -226,7 +239,7 @@ class DsimLink:
         self._clock = clock
         self._sleep = sleep
         self._epoch = -1
-        self._sample_monotonic = clock()
+        self._sample_wall = clock()
         self._values: dict[str, str] = {}
 
     # -- connection ----------------------------------------------------
@@ -261,7 +274,7 @@ class DsimLink:
         if values and (epoch != self._epoch or values != self._values):
             self._epoch = epoch
             self._values = values
-            self._sample_monotonic = self._clock()
+            self._sample_wall = self._clock()
         return self._values
 
     def capabilities(self) -> VehicleCapabilities:
@@ -292,7 +305,7 @@ class DsimLink:
         # lands; a link reports what the vehicle says and assumes validity only
         # where the vehicle has no way to say otherwise.
         return VehicleState(
-            sample_monotonic_s=self._sample_monotonic,
+            sample_wall_s=self._sample_wall,
             link_connected=bool(values) and self._transport.connected,
             armed=values.get("drone.armed") == "1",
             mode=mode,
@@ -359,8 +372,26 @@ class DsimLink:
             return CommandResult(request_id, accepted, reason)
         return None
 
+    def _ack_timeout_s(self) -> float:
+        """The acknowledgement bound, stretched for a slow-motion vehicle.
+
+        The bound stays on the wall clock, because it asks whether the peer is
+        alive rather than how long the flight has been. But a vehicle running
+        at a fraction of real time also *answers* at that fraction, so a fixed
+        wall bound would start expiring commands that were going to be
+        answered. Speeds at or above real time need no stretch: they answer
+        sooner, not later.
+        """
+        try:
+            speed = float(self._read().get("sim.speed", "1") or 1.0)
+        except ValueError:
+            return self.ack_timeout_s
+        if not 0.0 < speed < 1.0:
+            return self.ack_timeout_s
+        return self.ack_timeout_s / speed
+
     def _await_result(self, request_id: str) -> CommandResult:
-        deadline = self._clock() + self.ack_timeout_s
+        deadline = self._clock() + self._ack_timeout_s()
         while True:
             result = self._result_for(self._read(), request_id)
             if result is not None:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import signal
 import sys
 import time
@@ -30,7 +31,9 @@ for _path in (str(ROOT), str(APPS)):
         sys.path.insert(0, _path)
 
 from dcmn import theme
+from dcmn.health import IntakeMeter
 from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.pacing import MAP_HZ, Paced, TEXT_HZ, simulated_poll_delay
 from dcmn.mapview import MapView
 from dcmn.tktheme import apply_theme
 from dcmn.window import (disable_input_method, restore_window_pos,
@@ -97,6 +100,11 @@ class Flight:
                              ack_timeout_s=args.ack_timeout)
         self.mission = Mission(
             self.link, self.tour, root=ROOT,
+            # The flight is measured on the vehicle's clock, so a busy host --
+            # or a simulator running faster or slower than real time -- cannot
+            # shorten a dwell, expire a leg, or starve the setpoint stream.
+            # `wall` stays the default: staleness is a fact about processes.
+            clock=self.link.sim_time_s,
             config=MissionConfig(
                 strategy=args.strategy, speed_mps=args.speed,
                 stream_hz=args.stream_hz, finish_action=args.finish_action,
@@ -118,6 +126,11 @@ class Flight:
         self._last_bus_heartbeat = -1e9
         self._last_prepare = -1e9
         self._hello_sent = False
+        # What dway owes the vehicle is a setpoint stream at --stream-hz; the
+        # rate it actually achieves in simulated seconds is what a fast run
+        # erodes, and what this reports.
+        self.intake = IntakeMeter(float(args.stream_hz))
+        self._streamed = 0
 
     # -- lifecycle ------------------------------------------------------
 
@@ -176,7 +189,15 @@ class Flight:
                     f"{event.role} rejected run: "
                     f"{event.payload.get('reason', 'unspecified reason')}")
         if now - self._last_bus_heartbeat >= 1.0:
+            sent = getattr(self.mission, "setpoints_sent", 0)
+            self.intake.record(max(0, sent - self._streamed))
+            self._streamed = sent
+            # Only FLYING streams waypoint setpoints. Waiting, takeoff and a
+            # deliberate pause are not failures to meet the stream target.
+            self.intake.set_wanted(float(self.args.stream_hz)
+                                   if state is MissionState.FLYING else 0.0)
             self.bus.publish("module.heartbeat", run_id=self.run_id, payload={
+                "intake": self.intake.report(now, overruns=self.bus.overruns),
                 "state": state.value, "ready": state is MissionState.READY,
                 "capabilities": ["waypoint_navigation"],
             })
@@ -246,10 +267,10 @@ class Flight:
         return 0 if summary["outcome"] == "complete" else 1
 
     def run_headless(self) -> int:
-        period = 0.5 / max(self.args.stream_hz, 1.0)
         while self.running and self.mission.state not in TERMINAL_STATES:
             self.step()
-            time.sleep(period)
+            time.sleep(simulated_poll_delay(
+                max(self.args.stream_hz, 1.0), self.link.diagnostics()))
         return self.finish()
 
 
@@ -273,6 +294,9 @@ class FlyWindow:
 
         self.flight = flight
         self.closed = False
+        # Painting is capped on the wall clock; flight.step() is not.
+        self._paint_map = Paced(MAP_HZ)
+        self._paint_text = Paced(TEXT_HZ)
         self.root = tk.Tk()
         self.root.title(f"dway {flight.args.id}")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -557,13 +581,22 @@ class FlyWindow:
         if not self.flight.running:
             self.close()
             return
-        self._draw_map()
-        self._draw_vehicle()
-        self._refresh_text()
+        # flight.step() above is the mission; everything here is for looking
+        # at, and is capped on the wall clock.
+        if self._paint_map.due():
+            self._draw_map()
+            self._draw_vehicle()
+        if self._paint_text.due():
+            self._refresh_text()
         if self.flight.mission.state in TERMINAL_STATES and self.flight.args.exit_on_finish:
             self.close()
             return
-        self.root.after(int(500 / max(self.flight.args.stream_hz, 1.0)), self.tick)
+        delay = simulated_poll_delay(
+            max(self.flight.args.stream_hz, 1.0),
+            self.flight.link.diagnostics())
+        # Tk accepts whole milliseconds; round upward so this polling hint
+        # never creates an early extra iteration.
+        self.root.after(max(1, math.ceil(delay * 1000)), self.tick)
 
     def run(self) -> int:
         self.root.after(50, self.tick)

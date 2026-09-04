@@ -150,7 +150,10 @@ class Rig:
         self.tour = load_tour(tour_path)
         self.report_dir = mission_report_dir(self.link, "dway-test")
         self.mission = Mission(
-            self.link, self.tour, root=ROOT, clock=self.clock.read,
+            self.link, self.tour, root=ROOT,
+            # In the rig the virtual clock is the only clock there is: it is
+            # patched over dsim's monotonic, so it stands in for both roles.
+            clock=self.clock.read, wall=self.clock.read,
             recorder=FlightRecorder(self.report_dir),
             config=MissionConfig(strategy=strategy, finish_action=finish_action,
                                  autostart=autostart))

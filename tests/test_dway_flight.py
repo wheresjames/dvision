@@ -143,6 +143,22 @@ def test_pause_stops_the_vehicle_and_resume_restreams(monkeypatch, tmp_path) -> 
     assert rig.fly() is MissionState.COMPLETE, rig.mission.reason
 
 
+def test_setpoint_cadence_does_not_accumulate_polling_lateness(
+        monkeypatch, tmp_path) -> None:
+    """A 30 Hz vehicle clock must not drag a 10 Hz stream down to 7.5 Hz."""
+    rig = Rig(monkeypatch, tmp_path)
+    rig.fly(limit_s=10.0, dt=.067,
+            until=lambda mission: mission.state is MissionState.FLYING)
+    before = rig.mission.setpoints_sent
+    started = rig.clock.now
+    for _ in range(45):
+        assert rig.mission.state is MissionState.FLYING
+        rig.step(.067)
+    elapsed = rig.clock.now - started
+    achieved = (rig.mission.setpoints_sent - before) / elapsed
+    assert achieved >= 9.5
+
+
 def test_paused_time_is_excluded_from_every_reported_timestamp(
         monkeypatch, tmp_path) -> None:
     """The summary's clock is the one the mission reports elsewhere.

@@ -29,7 +29,9 @@ for _path in (str(ROOT), str(APPS)):
         sys.path.insert(0, _path)
 
 from dcmn import theme
+from dcmn.health import IntakeMeter
 from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.pacing import PeriodicDeadline, Paced, TEXT_HZ, VIDEO_HZ
 from dcmn.tktheme import apply_theme
 from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
@@ -234,6 +236,16 @@ class DroneController:
         self._last_heartbeat = 0.0
         self._last_module_heartbeat = 0.0
         self._last_open_attempt = 0.0
+        # Painting is for the operator and is capped on the wall clock; the
+        # control path in tick() is not.
+        # This is the operator/control window's wall-paced loop, not a sensor
+        # consumer that owes one sample per simulated interval. Keeping that
+        # distinction in the payload prevents accelerated simulation from
+        # making a healthy UI look proportionally slower.
+        self.intake = IntakeMeter(float(args.fps), basis="wall")
+        self._tick_cadence = PeriodicDeadline(float(args.fps))
+        self._paint_video = Paced(VIDEO_HZ)
+        self._paint_text = Paced(TEXT_HZ)
         self.measurement_run_id = ""
         self._measurement_state = "IDLE"
         self._measurement_ready: set[str] = set()
@@ -745,6 +757,7 @@ class DroneController:
                 self.log("status connected")
 
     def run(self) -> None:
+        self._tick_cadence.reset(time.monotonic(), immediate=False)
         self.root.after(50, self.tick)
         self.root.mainloop()
 
@@ -757,16 +770,24 @@ class DroneController:
             self.close()
             return
         self._coordinate_measurement(events)
+        self.intake.record()
+        # Control runs every tick. Only the three painting calls below are
+        # capped -- send_held_velocity() shares this timer, and throttling it
+        # would throttle manual flight.
         self._maintain_control()
-        self.update_connection_text()
-        self.update_video()
-        self.update_status()
+        if self._paint_video.due():
+            self.update_video()
+        if self._paint_text.due():
+            self.update_connection_text()
+            self.update_status()
         if self._ui_ready:
             self.joy.poll()
             self._handle_joy_buttons()
             self._update_joy_legend()
             self.send_held_velocity()
-        self.root.after(max(10, int(1000 / max(1, self.args.fps))), self.tick)
+        current = time.monotonic()
+        self._tick_cadence.advance(current)
+        self.root.after(self._tick_cadence.delay_ms(current), self.tick)
 
     def _sim_time(self) -> float:
         try:
@@ -824,7 +845,10 @@ class DroneController:
         now = time.monotonic()
         if now - self._last_module_heartbeat >= 1.0:
             self.module_bus.publish("module.heartbeat", run_id=self.measurement_run_id,
-                                    payload={"state": self._measurement_state,
+                                    payload={"intake": self.intake.report(
+                                                 now,
+                                                 overruns=self.module_bus.overruns),
+                                             "state": self._measurement_state,
                                              "ready": self.status is not None,
                                              "capabilities": ["manual_flight"]})
             self._last_module_heartbeat = now
@@ -933,6 +957,7 @@ class DroneController:
         if self.video is None:
             return
         seq = self.video.getSeq()
+        self.intake.note_sequence(seq)
         if seq == self.last_video_seq or seq <= 0:
             return
         self.last_video_seq = seq

@@ -86,6 +86,9 @@ class PipelineMember:
     run_id: str
     capabilities: Any
     seen_monotonic: float
+    #: The module's own account of whether it is keeping up, straight off the
+    #: heartbeat. ``None`` from a module that does not report one.
+    intake: Any = None
 
 
 class PipelineView:
@@ -103,7 +106,8 @@ class PipelineView:
         self._members[event.process_id] = PipelineMember(
             event.role, event.implementation, event.process_id, SCHEMA_VERSION,
             str(p.get("state", "")), bool(p.get("ready", False)), event.run_id,
-            p.get("capabilities", ()), time.monotonic() if now is None else now)
+            p.get("capabilities", ()), time.monotonic() if now is None else now,
+            p.get("intake"))
 
     def members(self, now: float | None = None, *, include_expired=False):
         current = time.monotonic() if now is None else now
