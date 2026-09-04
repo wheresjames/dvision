@@ -1,0 +1,7 @@
+{
+  "name": "constant-maze020",
+  "algorithm": "constant",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {}
+}

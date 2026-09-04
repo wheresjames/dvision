@@ -1,0 +1,11 @@
+{
+  "name": "sgbm-default",
+  "algorithm": "sgbm",
+  "tour": "assets/tours/maze_012.forward.v1.json",
+  "sensors": ["rgb"],
+  "settings": {
+    "num_disparities": 128,
+    "block_size": 5,
+    "uniqueness_ratio": 12
+  }
+}

@@ -196,6 +196,8 @@ class Realism:
                                        profile["altitude_drift_m"])
         if self.telemetry is None:
             self.telemetry = TelemetryDelay(self._rng, 0.0, 0.0)
+        else:
+            self._bind_telemetry_rng()
 
     # ------------------------------------------------------------------
     # Construction
@@ -299,9 +301,22 @@ class Realism:
             self._gps_east = _Correlated(self._rng, _GPS_TAU_S, 0.0)
             self._gps_alt = _Correlated(self._rng, _GPS_TAU_S, 0.0)
             self._baro_drift = _Correlated(self._rng, _BARO_TAU_S, 0.0)
+            self._bind_telemetry_rng()
         self._retune()
         self.telemetry.latency_s = candidate.telemetry.latency_s
         self.telemetry.jitter_s = candidate.telemetry.jitter_s
+
+    def _bind_telemetry_rng(self) -> None:
+        """Point the delay ring at this environment's own generator.
+
+        ``from_settings`` has to build the ring before it can build the
+        environment, so it hands it a generator of its own. Left in place that
+        generator is seeded identically to ``self._rng`` -- so jitter and sensor
+        noise draw the same number stream rather than sharing one -- and it
+        survives a reseed, which is how ``realism_seed`` came to change every
+        random process except telemetry jitter.
+        """
+        self.telemetry._rng = self._rng
 
     def _retune(self) -> None:
         """Point every noise process at the sigma its setting now implies."""

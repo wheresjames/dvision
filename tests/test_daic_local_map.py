@@ -56,22 +56,6 @@ def test_compass_heading_north_routes_forward_to_north_target() -> None:
     assert abs(planned.fields["yaw_rate_dps"]) < 1.0
 
 
-def test_compass_heading_north_routes_forward_to_north_target() -> None:
-    local_map = LocalOccupancyMap(cell_m=0.5, half_width_m=8.0)
-    pose = pose_from_status({
-        "drone.x_m": "17.5",
-        "drone.y_m": "16.5",
-        "drone.heading_deg": "0",
-    })
-
-    assert pose is not None
-    planned = local_map.plan_to_target(pose, (17.5, 7.5))
-
-    assert planned is not None
-    assert planned.fields["forward_mps"] > 0.0
-    assert abs(planned.fields["yaw_rate_dps"]) < 1.0
-
-
 def test_target_xy_from_status_converts_gps_offset_to_map_axes() -> None:
     status = {
         "drone.x_m": "10.0",

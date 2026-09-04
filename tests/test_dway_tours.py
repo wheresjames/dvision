@@ -309,3 +309,29 @@ def test_report_metrics_measure_overshoot_and_cross_track() -> None:
     # Path length is summed between observed samples, not along the plan.
     assert follower.path_length_m == pytest.approx(
         math.hypot(2.25, 0.3) + 0.25, abs=1e-6)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("arrival_speed_mps", 0.0),
+    ("arrival_speed_mps", -0.1),
+    ("heading_tolerance_deg", 0.0),
+    ("max_state_age_s", -1.0),
+    ("min_clearance_m", -0.5),
+    ("settle_s", -1.0),
+])
+def test_unsatisfiable_arrival_gates_are_refused(tmp_path, key, value):
+    """A negative gate is not a tighter gate; it can never be satisfied.
+
+    Left unchecked, these reached the follower and the flight failed at the
+    first waypoint with a message about vehicle health rather than about the
+    tour that asked for the impossible.
+    """
+    payload = json.loads(FORWARD_TOUR.read_text())
+    payload[key] = value
+    path = tmp_path / "bad_gate.json"
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(TourError) as excinfo:
+        load_tour(path)
+
+    assert key in str(excinfo.value)

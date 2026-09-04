@@ -6,7 +6,9 @@ import pytest
 
 import dsim.dsim as dsim_module
 from dsim.dsim import DroneSimulator, DroneState
-from dvision2_common import local_ned_to_map, map_to_local_ned
+from dsim.realism import Realism
+from dvision2_common import (COMMAND_RESULT_HISTORY, local_ned_to_map,
+                             map_to_local_ned, parse_command_results)
 
 
 class Clock:
@@ -183,3 +185,128 @@ def test_status_advertises_the_vehicle_contract(monkeypatch) -> None:
     assert values["vehicle.setpoint_timeout_s"] == "2.000"
     assert values["control.owner"] == "test"
     assert values["home.lat_deg"]
+
+
+# ---------------------------------------------------------------------------
+# Command acknowledgement under more than one client
+# ---------------------------------------------------------------------------
+
+def test_a_second_client_in_the_same_tick_does_not_erase_the_first_result(monkeypatch):
+    """A whole command queue is drained per tick, but status is published once.
+
+    The single ``command.result.*`` slot only ever remembers the last command
+    of that tick, which is how a client whose command had been accepted sat
+    waiting for an acknowledgement that had already been overwritten.
+    """
+    sim, _ = make_sim(monkeypatch)
+    command(sim, "heartbeat")                       # request-heartbeat, accepted
+    sim.apply_command({"type": "velocity", "source_id": "other",
+                       "lease_id": "no-lease", "request_id": "intruder",
+                       "forward_mps": 1.0})         # rejected, and later
+    values = sim.status_fields()
+
+    assert values["command.result.request_id"] == "intruder"   # the slot moved on
+    results = parse_command_results(values["command.results"])
+    assert results["request-heartbeat"] == (True, "")
+    assert results["intruder"] == (False, "control lease required")
+
+
+def test_result_history_is_bounded_and_keeps_the_newest(monkeypatch):
+    sim, _ = make_sim(monkeypatch)
+    for n in range(COMMAND_RESULT_HISTORY + 4):
+        sim.apply_command({"type": "heartbeat", "source_id": "test",
+                           "lease_id": "lease", "request_id": f"r{n}"})
+    results = parse_command_results(sim.status_fields()["command.results"])
+
+    assert len(results) == COMMAND_RESULT_HISTORY
+    assert "r0" not in results
+    assert f"r{COMMAND_RESULT_HISTORY + 3}" in results
+
+
+def test_reset_keeps_the_acknowledgements_other_clients_are_waiting_for(monkeypatch):
+    """``reset`` replaces the whole vehicle state, which the history outlives."""
+    sim, _ = make_sim(monkeypatch)
+    command(sim, "heartbeat")
+    sim.apply_command({"type": "reset", "source_id": "test",
+                       "lease_id": "lease", "request_id": "reset-1"})
+    results = parse_command_results(sim.status_fields()["command.results"])
+
+    assert "request-heartbeat" in results
+    assert results["reset-1"] == (True, "")
+    assert sim.state.status_message == "reset"      # unchanged by the recording
+
+
+def test_reset_requires_the_control_lease(monkeypatch):
+    """A reset moves the vehicle further than any motion command does."""
+    sim, _ = make_sim(monkeypatch, armed=True)
+    command(sim, "velocity", forward_mps=1.0)
+    sim.state.x = 5.0
+
+    sim.apply_command({"type": "reset", "source_id": "intruder",
+                       "lease_id": "other", "request_id": "reset-2"})
+
+    assert sim.state.result_accepted is False
+    assert sim.state.result_reason == "control lease required"
+    assert sim.state.x == 5.0
+    assert sim.state.control_owner == "test"
+
+
+def test_reset_recovers_a_crashed_vehicle_for_the_lease_holder(monkeypatch):
+    """The lease check sits above the crashed gate, so recovery still works."""
+    sim, _ = make_sim(monkeypatch, armed=True)
+    sim.crash()
+
+    command(sim, "reset")
+
+    assert sim.state.crashed is False
+    assert sim.state.x == sim.start_x
+    assert sim.crash_pos is None
+
+
+def test_results_without_a_request_id_are_not_published_as_one(monkeypatch):
+    """dfgb-era clients send no request id; their results address nobody."""
+    sim, _ = make_sim(monkeypatch)
+    before = sim.status_fields()["command.results"]
+    sim.apply_command({"type": "heartbeat", "source_id": "test", "lease_id": "lease"})
+
+    assert sim.status_fields()["command.results"] == before
+
+
+def test_gps_altitude_carries_the_fix_error_and_not_the_barometer(monkeypatch):
+    """``drone.alt_m`` is the GNSS triple's altitude, so it has one noise model.
+
+    It used to be run through the barometer as well as the GPS vertical error,
+    which put two independent draws on one reading -- so drone.alt_m minus
+    drone.z_m did not come to origin.alt_m for any client that checked, and the
+    two disagreed by more under a noisier profile.
+    """
+    sim, _ = make_sim(monkeypatch)
+    sim.realism = Realism.from_settings({"gps": "off", "sensor_noise": "none",
+                                         "realism_seed": 7})
+    sim.state.z = 5.0
+
+    values = sim.status_fields()
+
+    # GPS off means no fix error, and no sensor noise means no barometer draw,
+    # so the two altitudes differ by exactly the origin.
+    assert (float(values["drone.alt_m"]) - float(values["drone.z_m"])
+            == pytest.approx(float(values["origin.alt_m"]), abs=1e-6))
+
+
+def test_gps_altitude_is_not_perturbed_twice_under_sensor_noise(monkeypatch):
+    sim, _ = make_sim(monkeypatch)
+    sim.realism = Realism.from_settings({"gps": "off", "sensor_noise": "heavy",
+                                         "realism_seed": 7})
+    sim.state.z = 5.0
+    for _ in range(50):
+        sim.realism.update(0.05)
+
+    values = sim.status_fields()
+
+    # z_m carries the barometer; alt_m carries the (here disabled) fix error.
+    # Only one of the two is perturbed, so their difference is the origin plus
+    # exactly one barometer draw rather than two.
+    baro = float(values["drone.z_m"]) - sim.state.z
+    assert baro != 0.0
+    assert (float(values["drone.alt_m"]) - float(values["drone.z_m"])
+            == pytest.approx(float(values["origin.alt_m"]) - baro, abs=1e-6))

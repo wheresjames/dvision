@@ -3,7 +3,6 @@
 import math
 
 import numpy as np
-import pytest
 
 from daic.detector import detect, Detection
 from daic.controller import _MIN_CONFIDENCE
@@ -233,7 +232,6 @@ def test_a_ragged_red_blob_is_not_a_pad():
     differs. Solidity is what separates them.
     """
     import cv2
-    import math
     frame = _make_frame(480, 640)
     points = []
     for i in range(40):

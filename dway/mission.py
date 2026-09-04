@@ -564,7 +564,15 @@ class Mission:
     # -- shared ---------------------------------------------------------
 
     def _sample(self, state: VehicleState, now: float) -> Sample:
-        return Sample.from_state(state, self.context, now)
+        """The follower works in mission time, which does not run while paused.
+
+        Every clock the follower keeps is a difference of this one -- a dwell,
+        a leg deadline, a trim step -- and none of them should advance while
+        the tour is held. It is also what makes the waypoint timestamps in
+        :meth:`summary` the same quantity as ``duration_s`` and as the
+        ``arrival_s`` written into the event log.
+        """
+        return Sample.from_state(state, self.context, self.elapsed(now))
 
     def _observe(self, now: float, *, gate_health: bool = True) -> VehicleState | None:
         state = self.link.state()
@@ -684,8 +692,8 @@ class Mission:
                 waypoints.append({
                     "index": entry.index,
                     "target": leg.waypoint.describe(),
-                    "first_target_s": _relative(entry.first_target_s, self._t0),
-                    "arrival_s": _relative(entry.arrival_s, self._t0),
+                    "first_target_s": _round_opt(entry.first_target_s),
+                    "arrival_s": _round_opt(entry.arrival_s),
                     "dwell_s": round(entry.dwell_s, 3),
                     "overshoot_m": round(entry.overshoot_m, 4),
                     "max_cross_track_error_m": round(entry.max_cross_track_error_m, 4),
@@ -738,8 +746,9 @@ class Mission:
         return report_dir
 
 
-def _relative(stamp: float | None, origin: float) -> float | None:
-    return None if stamp is None else round(stamp - origin, 3)
+def _round_opt(stamp: float | None) -> float | None:
+    """A follower timestamp, already in mission time, ready for the report."""
+    return None if stamp is None else round(stamp, 3)
 
 
 def mission_report_dir(link, instance_id: str | None) -> Path:

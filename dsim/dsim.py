@@ -23,8 +23,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dcmn import theme
+from dcmn.module_bus import (PipelineView, PymembusModuleBus, SHUTDOWN_EVENT,
+                             requests_shutdown)
 from dcmn.mapview import MapView, draw_map_axes
 from dcmn.tktheme import apply_theme
+from dcmn.window import (disable_input_method, restore_window_pos,
+                          save_window_pos)
 from dsim.realism import GEOFENCE_ACTIONS, GPS_MODES, REALISM_DEFAULTS, Realism, SENSOR_NOISE_PROFILES
 from dsim.realism_panel import RealismPanel
 from dsim.scene import SCENE_PRESETS
@@ -32,10 +36,12 @@ from dvision2_common import (
     BERLIN_CENTER_ALT_M,
     BERLIN_CENTER_LAT_DEG,
     BERLIN_CENTER_LON_DEG,
+    COMMAND_RESULT_HISTORY,
     STATUS_KEYS,
     SimMap,
     clamp,
     decode_command,
+    format_command_result,
     load_map,
     load_pymembus,
     memkv_aligned_name_len,
@@ -43,8 +49,6 @@ from dvision2_common import (
     local_to_gps,
     new_run_id,
     report_root,
-    restore_window_pos,
-    save_window_pos,
     shared_names,
     validate_id,
 )
@@ -552,6 +556,17 @@ _OBSTACLE_HALF_EXTENT_M = 0.5
 _COLLISION_SWEEP_STEP_M = 0.1
 
 
+def _obstacle_height_m(kind: str) -> float:
+    """How tall a map object stands, in metres above the ground.
+
+    The same figures the renderer builds the scene from and the range sensor
+    casts against, read from one place so a collision box cannot drift away
+    from the geometry a client can see.
+    """
+    return (Panda3DRenderer.WALL_H if kind == "wall"
+            else Panda3DRenderer.TREE_MODEL_H)
+
+
 def scene_object_seed(map_path: Path, x: float, y: float) -> str:
     """Stable scene seed independent of path spelling and checkout location."""
     map_sha = hashlib.sha256(Path(map_path).read_bytes()).hexdigest()
@@ -633,10 +648,19 @@ class DroneSimulator:
     #: simulator built with ``__new__`` by a test rig still has a clock.
     sim_time_s = 0.0
 
+    #: The most recent command results, oldest first, as published lines. A
+    #: tuple replaced wholesale on every append, so this class default is
+    #: shared by no one and a rig built with ``__new__`` still records.
+    _result_log: tuple[str, ...] = ()
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.pymembus = load_pymembus()
         self.names = shared_names(args.id)
+        # Remove a previous crashed session before renderer/UI construction.
+        # Otherwise clients launched in the same shell line can attach to the
+        # stale buffers and send commands that this process can never read.
+        self._remove_ipc_names()
         self.map = load_map(Path(args.map))
         self.target_x, self.target_y = self._find_target_position()
         start_alt = args.start_alt
@@ -658,6 +682,9 @@ class DroneSimulator:
         self.video = None
         self.command = None
         self.status = None
+        self.module_bus = None
+        self._last_module_heartbeat = -1e9
+        self.pipeline = PipelineView()
         self.ui = None
         self.p3d: Panda3DRenderer | None = None
 
@@ -734,9 +761,7 @@ class DroneSimulator:
 
     def open_ipc(self) -> None:
         pm = self.pymembus
-        pm.memvid.remove(self.names["video"])
-        pm.memcmd.remove(self.names["command"])
-        pm.memkv.remove(self.names["status"])
+        self._remove_ipc_names()
 
         self.video = pm.memvid()
         fmt = getattr(pm.video_format, "rgb24", 24)
@@ -755,7 +780,10 @@ class DroneSimulator:
             )
 
         self.status = pm.memkv()
-        max_value_len = 512
+        # Wide enough for the command-result history, which is by far the
+        # longest value published: COMMAND_RESULT_HISTORY entries of an id, a
+        # flag and a reason.
+        max_value_len = 4096
         max_name_len = memkv_aligned_name_len(
             max(len(k) for k in STATUS_KEYS) + 1, max_value_len
         )
@@ -770,7 +798,24 @@ class DroneSimulator:
                 raise RuntimeError(
                     f"failed to define status key {key}: {pm.last_error_message()}"
                 )
+        self.module_bus = PymembusModuleBus(
+            self.args.id, "simulator", "dsim", create=True,
+            sim_time=self.clock)
+        if not self.module_bus.connect():
+            raise RuntimeError(
+                f"failed to create event buffer {self.names['events']}: "
+                f"{pm.last_error_message()}"
+            )
+        self.module_bus.publish("module.hello", payload={
+            "state": "ready", "capabilities": ["vehicle", "video", "status"]})
         self.publish_status(force=True)
+
+    def _remove_ipc_names(self) -> None:
+        pm = self.pymembus
+        pm.memvid.remove(self.names["video"])
+        pm.memcmd.remove(self.names["command"])
+        pm.memkv.remove(self.names["status"])
+        pm.memmsg.remove(self.names["events"])
 
     def close(self) -> None:
         if self.flight_positions:
@@ -799,13 +844,22 @@ class DroneSimulator:
             self.ui.close()
         if self.p3d is not None:
             self.p3d.close()
+        if getattr(self, "module_bus", None) is not None:
+            self.module_bus.publish("module.goodbye", payload={"state": "stopped"})
+            self.module_bus.close()
         for handle in (self.status, self.command, self.video):
             if handle is not None:
                 handle.close()
 
+    def kill_all(self) -> None:
+        """Ask every module on this instance, including DSIM, to exit cleanly."""
+        if self.module_bus is not None:
+            self.module_bus.publish(SHUTDOWN_EVENT, payload={
+                "reason": "operator requested shutdown", "scope": "instance"})
+        self.running = False
+
     def run(self) -> None:
         self._init_renderer()
-        self.open_ipc()
         if not self.args.no_ui:
             try:
                 self.ui = TopDownUi(self)
@@ -813,6 +867,9 @@ class DroneSimulator:
                 raise RuntimeError(
                     f"failed to open dsim UI; use --no-ui for headless mode: {exc}"
                 ) from exc
+        # Publishing IPC is the readiness boundary: clients may issue a
+        # command immediately after the status area appears.
+        self.open_ipc()
         if self.args.verbose:
             print(f"dsim {self.args.id}: map={self.map.path} "
                   f"size={self.map.width}x{self.map.height}")
@@ -824,6 +881,12 @@ class DroneSimulator:
         frames_left = self.args.frames
         try:
             while self.running:
+                bus_events = [] if self.module_bus is None else self.module_bus.receive()
+                for event in bus_events:
+                    self.pipeline.observe(event)
+                if any(requests_shutdown(event) for event in bus_events):
+                    self.running = False
+                    break
                 now = time.monotonic()
                 dt  = clamp(now - last, 0.001, 0.1)
                 last = now
@@ -903,10 +966,18 @@ class DroneSimulator:
                 self._command_result(request_id, True)
             return
         if typ == "reset":
+            # Above the `crashed` gate, so a lease holder can recover a crashed
+            # vehicle -- but still behind the lease, because a reset moves the
+            # vehicle further than any motion command and every other one of
+            # those is refused without it. `land` is the only exemption.
+            if not self._owns_control(payload):
+                self._command_result(request_id, False, "control lease required")
+                return
             self.reset_drone()
             self.state.result_request_id = request_id
             self.state.result_accepted = True
             self.state.result_reason = ""
+            self._record_result(request_id, True)
             return
         if self.state.crashed:
             self.state.status_message = "crashed"
@@ -1100,6 +1171,18 @@ class DroneSimulator:
         self.state.result_accepted = accepted
         self.state.result_reason = reason
         self.state.status_message = "ok" if accepted else reason
+        self._record_result(request_id, accepted, reason)
+
+    def _record_result(self, request_id: str, accepted: bool, reason: str = "") -> None:
+        """Keep this result readable after the next command overwrites the slot.
+
+        A whole queue is drained per frame but the status is published once, so
+        every result but the last would otherwise never be seen by anyone.
+        """
+        if not request_id:
+            return
+        entry = format_command_result(request_id, accepted, reason)
+        self._result_log = (self._result_log + (entry,))[-COMMAND_RESULT_HISTORY:]
 
     def _lease_active(self) -> bool:
         stamp = self.state.lease_heartbeat_monotonic
@@ -1157,6 +1240,10 @@ class DroneSimulator:
         self.state.control_lease_id = lease_id
         self.state.lease_acquired_monotonic = acquired
         self.state.lease_heartbeat_monotonic = heartbeat
+        # crash() only records a position when it has none, so leaving the old
+        # one here made every later crash in the session report the first
+        # crash's coordinates in the run summary.
+        self.crash_pos = None
 
     def crash(self) -> None:
         st = self.state
@@ -1302,7 +1389,8 @@ class DroneSimulator:
         wind_x, wind_y = self.realism.wind_vector() if st.armed else (0.0, 0.0)
         next_x = st.x + (st.vx + wind_x) * dt
         next_y = st.y + (st.vy + wind_y) * dt
-        if self.path_blocked(st.x, st.y, next_x, next_y):
+        # The height the horizontal move happens at: z is integrated below.
+        if self.path_blocked(st.x, st.y, next_x, next_y, st.z):
             self.crash()
             return
         st.x = clamp(next_x, 0.1, self.map.width  - 0.1)
@@ -1416,22 +1504,33 @@ class DroneSimulator:
                 st.target_alt = 0.0
                 st.mode = "LAND"
 
-    def is_blocked(self, x: float, y: float) -> bool:
+    def is_blocked(self, x: float, y: float, z: float = 0.0) -> bool:
+        """Whether this point is inside an obstacle's box, height included.
+
+        Objects are boxes, not infinite columns: a wall is ``WALL_H`` tall and
+        a tree ``TREE_MODEL_H``, which is exactly what ``dsim.range``'s ray cast
+        already models. Ignoring ``z`` here made the two disagree -- the range
+        sensor reported clear air above a wall while the physics crashed the
+        vehicle into it, and an RTL climbing to a safe height still hit the
+        maze on the way home.
+        """
         for obj in self.map.objects:
             if (obj.kind in ("wall", "tree")
                     and abs(obj.x - x) <= _OBSTACLE_HALF_EXTENT_M
-                    and abs(obj.y - y) <= _OBSTACLE_HALF_EXTENT_M):
+                    and abs(obj.y - y) <= _OBSTACLE_HALF_EXTENT_M
+                    and z <= _obstacle_height_m(obj.kind)):
                 return True
         return False
 
-    def path_blocked(self, x0: float, y0: float, x1: float, y1: float) -> bool:
+    def path_blocked(self, x0: float, y0: float, x1: float, y1: float,
+                     z: float = 0.0) -> bool:
         dist = math.hypot(x1 - x0, y1 - y0)
         steps = max(1, math.ceil(dist / _COLLISION_SWEEP_STEP_M))
         for i in range(1, steps + 1):
             t = i / steps
             x = x0 + (x1 - x0) * t
             y = y0 + (y1 - y0) * t
-            if self.is_blocked(x, y):
+            if self.is_blocked(x, y, z):
                 return True
         return False
 
@@ -1441,6 +1540,11 @@ class DroneSimulator:
         values = self.published_fields(force=force)
         if values is not None:
             self.status.setAll(values)
+        if (getattr(self, "module_bus", None) is not None
+                and self.clock() - self._last_module_heartbeat >= 1.0):
+            self.module_bus.publish("module.heartbeat", payload={
+                "state": "ready", "capabilities": ["vehicle", "video", "status"]})
+            self._last_module_heartbeat = self.clock()
 
     def published_fields(self, *, force: bool = False) -> dict[str, str] | None:
         """What a client should be able to read right now.
@@ -1510,7 +1614,7 @@ class DroneSimulator:
             "sim.map":               str(self.map.path),
             "sim.time_s":            f"{self.sim_time_s:.3f}",
             "sim.report_dir":        str(self.report_root),
-            "sim.camera_in_geometry": "1" if self.is_blocked(st.x, st.y) else "0",
+            "sim.camera_in_geometry": "1" if self.is_blocked(st.x, st.y, st.z) else "0",
             "vehicle.type":          "dsim",
             "vehicle.frames":        "map,local_ned",
             "vehicle.accepts_position": "1",
@@ -1534,6 +1638,7 @@ class DroneSimulator:
             "command.result.request_id": st.result_request_id,
             "command.result.accepted": "1" if st.result_accepted else "0",
             "command.result.reason": st.result_reason,
+            "command.results": "\n".join(self._result_log),
             "drone.armed":           "1" if st.armed else "0",
             "drone.mode":            st.mode,
             "drone.x_m":             f"{st.x:.3f}",
@@ -1541,7 +1646,12 @@ class DroneSimulator:
             "drone.z_m":             f"{altitude_m:.3f}",
             "drone.lat_deg":         f"{lat:.7f}",
             "drone.lon_deg":         f"{lon:.7f}",
-            "drone.alt_m":           f"{self.realism.noisy_altitude_m(alt):.3f}",
+            # The GNSS triple, so it carries the fix's own vertical error and
+            # nothing else: `alt` already has it. Running it through the
+            # barometer as well applied two independent noise draws to one
+            # reading, so drone.alt_m minus drone.z_m did not come to
+            # origin.alt_m for any client that checked.
+            "drone.alt_m":           f"{alt:.3f}",
             "target.lat_deg":        target_lat_s,
             "target.lon_deg":        target_lon_s,
             "target.alt_m":          target_alt_s,
@@ -1574,6 +1684,7 @@ class DroneSimulator:
             "camera.width_px":       str(cam_w),
             "camera.height_px":      str(cam_h),
             "camera.fps":            str(self.args.fps),
+            "range.config":          getattr(self.args, "range_sensor", "none"),
         }
         values.update(self.realism.status_fields())
         if st.home_x is not None:
@@ -1730,7 +1841,7 @@ class TopDownUi:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         apply_theme(self.root)
 
-        self.view = MapView.fitted(sim.map)
+        self.view = MapView.fitted(sim.map, min_cell_px=1)
         canvas_w, canvas_h = self.view.canvas_size(sim.map)
 
         self.status_var = tk.StringVar(value="")
@@ -1756,11 +1867,23 @@ class TopDownUi:
                                 bg=theme.CANVAS, highlightthickness=1,
                                 highlightbackground=theme.GRID)
         self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.bind("<Configure>", self._resize_map)
 
         # The realism form is taller than the map; it asks for the map's height
         # and scrolls, so the notebook stays the size the monitor wants.
         self.realism_panel = RealismPanel(notebook, sim, height=canvas_h)
         notebook.add(self.realism_panel.page, text="Realism")
+
+        pipeline = ttk.Frame(notebook, padding=10)
+        notebook.add(pipeline, text="Pipeline")
+        columns = ("role", "implementation", "version", "state", "ready", "run", "age")
+        self.pipeline_tree = ttk.Treeview(pipeline, columns=columns, show="headings",
+                                          height=12)
+        for column in columns:
+            self.pipeline_tree.heading(column, text=column)
+            self.pipeline_tree.column(column, width=105, stretch=True)
+        self.pipeline_tree.grid(row=0, column=0, sticky="nsew")
+        pipeline.rowconfigure(0, weight=1); pipeline.columnconfigure(0, weight=1)
 
         footer = ttk.Frame(self.root, padding=(12, 8, 12, 12), style="Header.TFrame")
         footer.grid(row=2, column=0, sticky="ew")
@@ -1775,11 +1898,15 @@ class TopDownUi:
         ttk.Button(footer, text="Reset drone", command=self.sim.reset_drone,
                    style="Accent.TButton").grid(row=0, column=2, rowspan=2,
                                                 sticky="e", padx=(8, 0))
+        ttk.Button(footer, text="Kill all", command=self.sim.kill_all,
+                   style="Danger.TButton").grid(row=0, column=3, rowspan=2,
+                                                sticky="e", padx=(8, 0))
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
 
-        self.draw_static_map()
         self.drone_items: list[int] = []
+        self._canvas_size = (canvas_w, canvas_h)
+        self.draw_static_map()
 
         restore_window_pos(self.root, f"dsim.{sim.args.id}")
 
@@ -1796,14 +1923,34 @@ class TopDownUi:
             return
         self.draw_drone()
         self.realism_panel.refresh()
+        self._refresh_pipeline()
         self.root.update_idletasks()
         self.root.update()
+
+    def _refresh_pipeline(self) -> None:
+        self.pipeline_tree.delete(*self.pipeline_tree.get_children())
+        for member, age in self.sim.pipeline.members(include_expired=True):
+            expired = age > self.sim.pipeline.expiry_s
+            self.pipeline_tree.insert("", "end", values=(
+                member.role, member.implementation, member.protocol_version,
+                "expired" if expired else member.state,
+                "yes" if member.ready and not expired else "no",
+                member.run_id[:10], f"{age:.1f}s"))
 
     def xy(self, x: float, y: float) -> tuple[float, float]:
         return self.view.xy(x, y)
 
     def draw_static_map(self) -> None:
-        self.view.draw_map(self.canvas, self.sim.map)
+        self.canvas.delete("map")
+        self.view.draw_map(self.canvas, self.sim.map, tags="map")
+
+    def _resize_map(self, event) -> None:
+        size = (max(1, event.width), max(1, event.height))
+        if size == getattr(self, "_canvas_size", None): return
+        self._canvas_size = size
+        self.view.fit_canvas(self.sim.map, *size)
+        self.draw_static_map()
+        self.draw_drone()
 
     def draw_drone(self) -> None:
         for item in self.drone_items:
@@ -1901,6 +2048,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--height",   type=int,   default=480)
     parser.add_argument("--fps",      type=int,   default=30)
     parser.add_argument("--bufs",     type=int,   default=4)
+    parser.add_argument("--range-sensor", choices=("none", "exact",
+                        "lidar_flash_short", "lidar_tof_wide"), default="none",
+                        help="range configuration advertised to observers")
     parser.add_argument(
         "--scene-preset",
         choices=tuple(SCENE_PRESETS),
@@ -1986,6 +2136,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    disable_input_method()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     sim  = DroneSimulator(args)
 

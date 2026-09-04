@@ -17,6 +17,8 @@ from contextlib import contextmanager
 
 import pytest
 
+from dcmn.window import disable_input_method
+
 
 def hidden_root():
     """A withdrawn ``Tk`` root, or a skip when no display is available.
@@ -24,6 +26,7 @@ def hidden_root():
     The caller destroys it. Prefer :func:`hidden_tk`, which does that for you.
     """
     tkinter = pytest.importorskip("tkinter")
+    disable_input_method()
     try:
         root = tkinter.Tk()
     except tkinter.TclError as exc:

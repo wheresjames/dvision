@@ -1,0 +1,8 @@
+{
+  "name": "features-maze020",
+  "algorithm": "feature_triangulation",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {"max_features": 1000, "ratio_test": 0.72,
+               "min_parallax_deg": 1.5, "keyframe_distance_m": 0.35}
+}

@@ -117,13 +117,6 @@ def _focal_length_px(img_w: int) -> float:
     return img_w / (2.0 * math.tan(math.radians(_FOV_H_DEG / 2.0)))
 
 
-# Approximate vertical half-FOV in degrees (70° horizontal, 4:3 frame).
-_FOV_V_HALF_DEG = 26.5
-
-# Downward camera pitch in degrees (matches dsim CAM_PITCH).
-_CAM_PITCH_DEG = 5.0
-
-
 def estimate_horiz_dist(radius_px: float, altitude_m: float,
                         img_w: int) -> float:
     """Estimate horizontal distance to target from apparent radius and altitude.

@@ -7,7 +7,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Literal, Protocol
 
-from dvision2_common import controlled_command_with_id, load_pymembus, shared_names
+from dvision2_common import (controlled_command_with_id, load_pymembus,
+                             parse_command_results, shared_names)
 
 Frame = Literal["map", "local_ned", "global"]
 
@@ -119,7 +120,7 @@ DIAGNOSTIC_KEYS = (
 #: How long a link waits for the acknowledgement of one command. Queue
 #: admission is not acceptance -- a lease or mode check may still refuse it --
 #: so every command, streamed setpoints included, waits for its result.
-DEFAULT_ACK_TIMEOUT_S = 1.0
+DEFAULT_ACK_TIMEOUT_S = 3.0
 
 
 class StatusTransport(Protocol):
@@ -243,6 +244,12 @@ class DsimLink:
     def report_dir(self) -> str:
         return self._read().get("sim.report_dir", "")
 
+    def sim_time_s(self) -> float:
+        try:
+            return float(self._read().get("sim.time_s", "0") or 0.0)
+        except ValueError:
+            return 0.0
+
     def map_path(self) -> str:
         return self._read().get("sim.map", "")
 
@@ -332,14 +339,32 @@ class DsimLink:
             return CommandResult(request_id, False, "command queue unavailable")
         return self._await_result(request_id)
 
+    def _result_for(self, values: dict[str, str],
+                    request_id: str) -> CommandResult | None:
+        """This client's result, from the latest slot or the published history.
+
+        The latest slot is preferred because it carries the untruncated reason,
+        but it holds one result for the whole vehicle: any other client whose
+        command lands in the same tick replaces it before it is published. The
+        history is what makes the correlation survive a second commanding
+        client; a vehicle that publishes none behaves exactly as it used to.
+        """
+        if values.get("command.result.request_id") == request_id:
+            return CommandResult(
+                request_id, values.get("command.result.accepted") == "1",
+                values.get("command.result.reason", ""))
+        recorded = parse_command_results(values.get("command.results", ""))
+        if request_id in recorded:
+            accepted, reason = recorded[request_id]
+            return CommandResult(request_id, accepted, reason)
+        return None
+
     def _await_result(self, request_id: str) -> CommandResult:
         deadline = self._clock() + self.ack_timeout_s
         while True:
-            values = self._read()
-            if values.get("command.result.request_id") == request_id:
-                return CommandResult(
-                    request_id, values.get("command.result.accepted") == "1",
-                    values.get("command.result.reason", ""))
+            result = self._result_for(self._read(), request_id)
+            if result is not None:
+                return result
             if self._clock() >= deadline:
                 return CommandResult(request_id, False, "acknowledgement timeout")
             self._sleep(0.005)

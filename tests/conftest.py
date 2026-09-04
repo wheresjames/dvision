@@ -15,6 +15,7 @@ _MODULE_REQUIREMENTS = {
     "test_dvision_process_transport": ("panda3d", "cv2", "pymembus"),
     "test_dvision_nightly": ("panda3d", "pymembus"),
     "test_dway_process": ("panda3d", "pymembus"),
+    "test_dalg_process": ("panda3d", "pymembus", "cv2"),
     "test_dvision_perception_chain": ("panda3d", "cv2"),
 }
 

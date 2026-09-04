@@ -106,7 +106,7 @@ class HeadlessSimulator:
         if not (0.0 <= x <= self.sim.map.width
                 and 0.0 <= y <= self.sim.map.height and z >= 0.0):
             raise ValueError("pose is outside map bounds")
-        if self.sim.is_blocked(x, y):
+        if self.sim.is_blocked(x, y, z):
             raise ValueError("pose camera is inside collision geometry")
         state = self.sim.state
         state.x, state.y, state.z = float(x), float(y), float(z)

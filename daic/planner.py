@@ -17,14 +17,13 @@ the appropriate velocity / control commands.
 
 from __future__ import annotations
 
-import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any
 
 from dvision2_common import gps_bearing, gps_distance_m
-from .controller import (ControlOutput, hover, navigate_to_bearing,
+from .controller import (ControlOutput, navigate_to_bearing,
                          servo, search_step, turn, estimate_horiz_dist)
 from .detector import Detection
 
@@ -429,8 +428,11 @@ class Planner:
         # drone.compass_deg is 0=north, 90=east (true compass heading).
         compass = _try_float(status.get("drone.compass_deg"))
         if compass is None:
-            # Fallback: convert sim yaw to compass bearing.
-            compass = (_heading(status) + 90.0) % 360.0
+            # drone.heading_deg is published as a compass heading too, so this
+            # is the same quantity from the other key -- not a conversion. It
+            # used to add 90 degrees, from when heading_deg carried the
+            # renderer's internal yaw.
+            compass = _heading(status)
         yaw_error = (bearing - compass + 360.0) % 360.0
         return navigate_to_bearing(yaw_error, dist_m)
 

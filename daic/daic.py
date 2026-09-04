@@ -24,14 +24,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dvision2_common import (
-    STATUS_KEYS, controlled_command, load_pymembus, new_control_identity,
-    restore_window_pos, save_window_pos, shared_names, validate_id,
+    controlled_command, load_pymembus, new_control_identity,
+    shared_names, validate_id,
 )
+from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.window import (disable_input_method, restore_window_pos,
+                          save_window_pos)
 from daic.detector import detect, Detection
 from daic.planner import Planner, State
 from daic.flight_log import FlightLogger
-from daic.avoidance import (apply_obstacle_avoidance, apply_search_approach_brake,
-                            sectors_confident)
+from daic.avoidance import apply_search_approach_brake, sectors_confident
 from daic.optical_flow_avoidance import (
     OpticalFlowAvoidance, fuse_obstacle_sectors,
 )
@@ -78,7 +80,7 @@ def _download_vocab(dest: Path, verbose: bool = False) -> None:
                 print(f"\r    [{bar}] {pct:3d}%  {mb:.0f} MB",
                       end="", flush=True)
 
-    print(f"  downloading from GitHub...", flush=True)
+    print("  downloading from GitHub...", flush=True)
     try:
         urllib.request.urlretrieve(_VOCAB_URL, tgz,
                                    None if verbose else _progress)
@@ -198,8 +200,8 @@ def _cmd_install(verbose: bool = False) -> int:
     print("  git clone https://github.com/niconielsen32/ORB-SLAM3-python")
     print("  cd ORB-SLAM3-python && pip install .")
     print()
-    print(f"  # 4. Run daic with full ORB_SLAM3")
-    print(f"  ./daic/daic.py --id area1 --enable-ai \\")
+    print("  # 4. Run daic with full ORB_SLAM3")
+    print("  ./daic/daic.py --id area1 --enable-ai \\")
     print(f"    --slam-vocab {vocab}")
     print()
     print("=" * 56)
@@ -527,6 +529,7 @@ class DaicController:
         self.last_video_seq  = -1
         self.running = True
         self._closed = False
+        self.module_bus = PymembusModuleBus(args.id, "controller", "daic")
         self._next_tick = 0.0
         self._last_map_draw = 0.0
 
@@ -834,6 +837,9 @@ class DaicController:
         now = time.monotonic()
 
         self.open_missing()
+        if any(requests_shutdown(event) for event in self.module_bus.receive()):
+            self.request_stop()
+            return
         self._maintain_control(now)
         if self._pending_enable_ai and self.command is not None:
             self._pending_enable_ai = False
@@ -1474,6 +1480,9 @@ class DaicController:
                                  ("video", self.video)):
                 if handle is not None:
                     self._best_effort(f"{name} close", handle.close)
+            module_bus = getattr(self, "module_bus", None)
+            if module_bus is not None:
+                self._best_effort("module bus close", module_bus.close)
         finally:
             self._best_effort(
                 "save window position",
@@ -1505,6 +1514,7 @@ class HeadlessAgent:
         self.last_video_seq  = -1
         self.running = True
         self._closed = False
+        self.module_bus = PymembusModuleBus(args.id, "controller", "daic")
         self.last_detection  = Detection(False, 0, 0, 0, 0)
         self.planner = Planner(img_w=args.video_w, img_h=args.video_h)
         self._alt_lock = True
@@ -1592,6 +1602,9 @@ class HeadlessAgent:
 
     def _tick(self, now: float) -> None:
         self.open_missing()
+        if any(requests_shutdown(event) for event in self.module_bus.receive()):
+            self.running = False
+            return
         self._maintain_control(now)
 
         if self._pending_enable_ai and self.command is not None:
@@ -1844,6 +1857,9 @@ class HeadlessAgent:
                         handle.close()
                     except Exception:
                         pass
+            module_bus = getattr(self, "module_bus", None)
+            if module_bus is not None:
+                module_bus.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1887,6 +1903,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    disable_input_method()
     args = parse_args(sys.argv[1:] if argv is None else argv)
 
     if args.install:

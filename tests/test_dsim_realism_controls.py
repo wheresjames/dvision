@@ -374,3 +374,37 @@ def _widget_for(panel, name: str):
         if str(child.cget("textvariable") or "") == variable:
             return child
     raise AssertionError(f"no widget bound to {name}")
+
+
+def test_reseeding_reseeds_telemetry_jitter_too():
+    """``realism_seed`` asks for the dice back -- all of them.
+
+    TelemetryDelay used to keep the generator it was built with, so a reseed
+    changed every random process except the one it did not reach.
+    """
+    realism = Realism.from_settings({"telemetry_jitter_ms": 40.0,
+                                     "realism_seed": 1})
+
+    def jitter_stream(env):
+        stream = []
+        for tick in range(6):
+            env.telemetry.push(float(tick), {})
+            stream.append(round(env.telemetry._last_release, 6))
+        return stream
+
+    first = jitter_stream(realism)
+    realism.apply(realism_seed=99)
+    reseeded = jitter_stream(realism)
+    realism.apply(realism_seed=1)
+
+    assert reseeded != first
+    assert realism.telemetry._rng is realism._rng
+
+
+def test_telemetry_and_sensor_noise_share_one_seeded_stream():
+    """Two generators seeded alike are not one stream; they are the same one
+    drawn twice, which is a correlation nobody asked for."""
+    realism = Realism.from_settings({"telemetry_jitter_ms": 40.0,
+                                     "sensor_noise": "heavy"})
+
+    assert realism.telemetry._rng is realism._rng

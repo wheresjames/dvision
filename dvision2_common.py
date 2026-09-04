@@ -63,6 +63,7 @@ STATUS_KEYS = [
     "command.result.request_id",
     "command.result.accepted",
     "command.result.reason",
+    "command.results",
     "drone.armed",
     "drone.mode",
     "drone.x_m",
@@ -103,6 +104,7 @@ STATUS_KEYS = [
     "camera.width_px",
     "camera.height_px",
     "camera.fps",
+    "range.config",
 ]
 
 def memkv_aligned_name_len(min_name_len: int, max_value_len: int) -> int:
@@ -202,6 +204,7 @@ def shared_names(instance_id: str) -> dict[str, str]:
         "video": f"{base}.video",
         "command": f"{base}.control",
         "status": f"{base}.status",
+        "events": f"{base}.events",
     }
 
 
@@ -247,6 +250,41 @@ def local_ned_to_map(north_m: float, east_m: float, down_m: float,
                      width_m: float, height_m: float) -> tuple[float, float, float]:
     """Convert local NED at map centre back to map coordinates."""
     return east_m + width_m / 2.0, height_m / 2.0 - north_m, -down_m
+
+
+# The three ``command.result.*`` keys hold one latest value, which is only
+# enough while a single client is commanding: a vehicle that applies two
+# clients' commands in the same tick publishes one result and silently drops
+# the other, and the client whose result was dropped times out waiting for an
+# acknowledgement its command had already earned. ``command.results`` carries
+# the last few results alongside it so a client can still find its own.
+COMMAND_RESULT_HISTORY = 16
+COMMAND_RESULT_REASON_MAX = 96
+
+
+def format_command_result(request_id: str, accepted: bool, reason: str = "") -> str:
+    """One line of the published command-result history.
+
+    The reason is last because it is the only free-form field; it is flattened
+    onto one line so the entry separator stays unambiguous.
+    """
+    flattened = " ".join(str(reason).split())[:COMMAND_RESULT_REASON_MAX]
+    return f"{request_id} {'1' if accepted else '0'} {flattened}"
+
+
+def parse_command_results(raw: str) -> dict[str, tuple[bool, str]]:
+    """The published history as ``{request_id: (accepted, reason)}``.
+
+    Results for commands that carried no request id are not addressed to
+    anyone, so they are dropped rather than given an empty-string key.
+    """
+    results: dict[str, tuple[bool, str]] = {}
+    for line in str(raw or "").splitlines():
+        request_id, _, rest = line.partition(" ")
+        accepted, _, reason = rest.partition(" ")
+        if request_id:
+            results[request_id] = (accepted == "1", reason)
+    return results
 
 
 def decode_command(raw: str | bytes) -> dict[str, Any] | None:
@@ -398,58 +436,13 @@ def clamp(value: float, low: float, high: float) -> float:
     return min(high, max(low, value))
 
 
-# ---------------------------------------------------------------------------
-# Window position persistence
-# ---------------------------------------------------------------------------
+# Backward-compatible imports for out-of-tree users. UI code should import
+# these from dcmn.window; the protocol module no longer owns window behavior.
+from dcmn.window import (restore_window_geometry, restore_window_pos,
+                         save_window_geometry, save_window_pos)
 
-_WIN_POS_FILE = Path.home() / ".config" / "dvision2" / "window_pos.json"
-
-
-def _read_pos_store() -> dict:
-    try:
-        return json.loads(_WIN_POS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _write_pos_store(data: dict) -> None:
-    try:
-        _WIN_POS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _WIN_POS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def save_window_pos(root: Any, key: str) -> None:
-    """Save *root* window position under *key*.  Call just before destroy()."""
-    try:
-        x, y = root.winfo_x(), root.winfo_y()
-        data = _read_pos_store()
-        data[key] = {"x": x, "y": y}
-        _write_pos_store(data)
-    except Exception:
-        pass
-
-
-def restore_window_pos(root: Any, key: str) -> None:
-    """Restore window position from a previous run.
-
-    The saved top-left corner (x, y) is only applied when it falls inside the
-    current virtual desktop reported by Tkinter.  If the display layout has
-    changed (monitor removed, resolution reduced) the position is silently
-    ignored and the OS places the window normally.
-    """
-    try:
-        data = _read_pos_store()
-        if key not in data:
-            return
-        x = int(data[key]["x"])
-        y = int(data[key]["y"])
-        sw = root.winfo_screenwidth()
-        sh = root.winfo_screenheight()
-        # Require the top-left corner to be fully inside the current screen so
-        # a window that lived on a now-absent monitor is not half-off-screen.
-        if 0 <= x < sw and 0 <= y < sh:
-            root.geometry(f"+{x}+{y}")
-    except Exception:
-        pass
+#: Named so a linter can tell a deliberate re-export from an import this module
+#: forgot to use. Nothing here calls them; out-of-tree callers still import
+#: them from this module.
+_WINDOW_REEXPORTS = (restore_window_geometry, restore_window_pos,
+                     save_window_geometry, save_window_pos)

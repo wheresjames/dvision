@@ -1,0 +1,16 @@
+{
+  "name": "monocular-depth-maze020",
+  "algorithm": "monocular_depth",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {
+    "model_path": "assets/models/depth/metric-depth.onnx",
+    "input_width": 280,
+    "input_height": 210,
+    "scale": 1.0,
+    "offset_m": 0.0,
+    "min_range_m": 0.3,
+    "max_range_m": 20.0,
+    "stride": 8
+  }
+}

@@ -12,9 +12,11 @@ a window, and the loop that drives them.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import signal
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +24,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dcmn import theme
+from dcmn.module_bus import PymembusModuleBus, requests_shutdown
 from dcmn.mapview import MapView
 from dcmn.tktheme import apply_theme
+from dcmn.window import (disable_input_method, restore_window_pos,
+                          save_window_pos)
 from dvision2_common import validate_id
 from dway.follower import PositionStrategy, Sample
 from dway.link import DsimLink
@@ -61,6 +66,21 @@ def _describe_waypoint(waypoint) -> str:
             f"   dwell {dwell:g}s")
 
 
+def fit_fly_map(view: MapView, sim_map, *, max_cell_px: int = 28) -> int:
+    """Fit the map into a square whose side follows its natural fitted height."""
+    view.fit(sim_map, max_cell_px=max_cell_px)
+    _width, height = view.canvas_size(sim_map)
+    side = max(1, round(height))
+    view.fit_canvas(sim_map, side, side)
+    return side
+
+
+def fly_canvas_side(width: int, height: int, controls_width: int) -> int:
+    """Square map size available beside the controls in the Fly tab."""
+    return max(120, min(max(1, height - 16),
+                        max(1, width - controls_width - 28)))
+
+
 class Flight:
     """One mission, its link, and the artefacts it leaves behind."""
 
@@ -74,11 +94,24 @@ class Flight:
             config=MissionConfig(
                 strategy=args.strategy, speed_mps=args.speed,
                 stream_hz=args.stream_hz, finish_action=args.finish_action,
-                autostart=not args.wait_for_start,
+                autostart=False,
             ))
         self.report_dir: Path | None = None
         self.running = True
         self._deadline = time.monotonic() + args.timeout if args.timeout else None
+        self.run_id = uuid.uuid4().hex
+        self.bus = PymembusModuleBus(
+            args.id, "navigator", "dway", sim_time=self.link.sim_time_s)
+        self._prepare_sent = False
+        self._ready_roles: set[str] = set()
+        self._ready_processes: dict[str, set[str]] = {}
+        self._ready_deadline: float | None = None
+        self._start_sim_time: float | None = None
+        self._started_announced = False
+        self._terminal_announced = False
+        self._last_bus_heartbeat = -1e9
+        self._last_prepare = -1e9
+        self._hello_sent = False
 
     # -- lifecycle ------------------------------------------------------
 
@@ -88,10 +121,96 @@ class Flight:
             self.report_dir = mission_report_dir(self.link, self.args.id)
             self.mission.recorder = FlightRecorder(self.report_dir)
             print(f"dway: report directory -> {self.report_dir}", file=sys.stderr)
+        self._coordinate(state)
         if (self._deadline is not None and time.monotonic() > self._deadline
                 and state not in TERMINAL_STATES):
             self.mission.abort("mission timeout")
         return state
+
+    def _prepare_payload(self) -> dict:
+        tour_bytes = self.tour.path.read_bytes()
+        return {
+            "tour_id": self.tour.tour_id,
+            "tour_digest": hashlib.sha256(tour_bytes).hexdigest(),
+            "map_digest": self.tour.map_sha or "",
+            "coordinate_frame": self.tour.coordinate_frame,
+            "required_roles": list(self.args.wait_for),
+        }
+
+    def _coordinate(self, state: MissionState) -> None:
+        if not self.bus.connect():
+            return
+        now = self.link.sim_time_s()
+        if not self._hello_sent:
+            self.bus.publish("module.hello", run_id=self.run_id, payload={
+                "state": state.value, "capabilities": ["waypoint_navigation"]})
+            self._hello_sent = True
+        for event in self.bus.receive():
+            if requests_shutdown(event):
+                self.stop("instance shutdown requested")
+                return
+            if event.run_id != self.run_id:
+                continue
+            if event.type == "run.ready":
+                for requirement in self.args.wait_for:
+                    role, _, selector = requirement.partition(":")
+                    matches_selector = (not selector or selector in (
+                        event.payload.get("profile"), event.payload.get("algorithm"),
+                        event.process_id) or selector in event.payload.get(
+                            "capabilities", {}).get("algorithms", ()))
+                    if event.role == role and matches_selector:
+                        self._ready_roles.add(requirement)
+                        matches = self._ready_processes.setdefault(requirement, set())
+                        matches.add(event.process_id)
+                        if len(matches) > 1:
+                            self.mission.abort(
+                                f"ambiguous exclusive participant: {requirement}")
+            elif event.type == "run.reject":
+                self.mission.abort(
+                    f"{event.role} rejected run: "
+                    f"{event.payload.get('reason', 'unspecified reason')}")
+        if now - self._last_bus_heartbeat >= 1.0:
+            self.bus.publish("module.heartbeat", run_id=self.run_id, payload={
+                "state": state.value, "ready": state is MissionState.READY,
+                "capabilities": ["waypoint_navigation"],
+            })
+            self.bus.publish("run.state", run_id=self.run_id, payload={
+                "state": state.value, "tour_id": self.tour.tour_id,
+                "start_sim_time_s": self._start_sim_time,
+                "waypoint_index": getattr(self.mission, "_current_index", -1),
+                "waypoint_count": len(self.tour.waypoints),
+            })
+            self._last_bus_heartbeat = now
+        if state is MissionState.READY and not self.args.wait_for_start:
+            if not self._prepare_sent:
+                self._prepare_sent = True
+                self._ready_deadline = now + self.args.ready_timeout_s
+            # Repeat the complete preparation snapshot for late joiners.
+            if now - self._last_prepare >= 1.0:
+                self.bus.publish("run.prepare", run_id=self.run_id,
+                                 payload=self._prepare_payload())
+                self._last_prepare = now
+            missing = set(self.args.wait_for) - self._ready_roles
+            if missing and self._ready_deadline is not None \
+                    and now >= self._ready_deadline:
+                self.mission.abort("readiness timeout waiting for "
+                                   + ", ".join(sorted(missing)))
+            elif not missing and self._start_sim_time is None:
+                self._start_sim_time = now + self.args.start_delay_s
+                self.bus.publish("run.start_scheduled", run_id=self.run_id,
+                                 payload={"start_sim_time_s": self._start_sim_time})
+            elif self._start_sim_time is not None and now >= self._start_sim_time:
+                if self.mission.start():
+                    self._started_announced = True
+                    self.bus.publish("run.started", run_id=self.run_id,
+                                     payload={"start_sim_time_s": self._start_sim_time})
+        if state in TERMINAL_STATES and not self._terminal_announced:
+            self._terminal_announced = True
+            kind = "run.completed" if state is MissionState.COMPLETE else "run.aborted"
+            self.bus.publish(kind, run_id=self.run_id, payload={
+                "state": state.value, "outcome": self.mission.outcome,
+                "reason": self.mission.reason,
+            })
 
     def stop(self, reason: str = "shutdown") -> None:
         """Hold, keep the vehicle where it is, and give control back."""
@@ -109,6 +228,9 @@ class Flight:
         if self.mission.recorder is not None:
             self.mission.recorder.close()
         self.link.close()
+        self.bus.publish("module.goodbye", run_id=self.run_id,
+                         payload={"state": self.mission.state.value})
+        self.bus.close()
         for warning in summary["warnings"]:
             print(f"dway: warning: {warning}", file=sys.stderr)
         print(f"dway: {summary['outcome']}"
@@ -143,8 +265,6 @@ class FlyWindow:
         import tkinter as tk
         from tkinter import ttk
 
-        from dvision2_common import restore_window_pos
-
         self.flight = flight
         self.closed = False
         self.root = tk.Tk()
@@ -158,16 +278,18 @@ class FlyWindow:
         self.root.columnconfigure(0, weight=1)
         fly = ttk.Frame(notebook, padding=8)
         notebook.add(fly, text="Fly")
+        self.fly = fly
 
         # The map arrives with preflight, so the canvas starts at a neutral
         # size and is resized to the map the first time one is available.
         self.view = MapView(cell=16, margin=12)
-        self.canvas = tk.Canvas(fly, width=640, height=480,
+        self.canvas = tk.Canvas(fly, width=480, height=480,
                                 background=_UI_CANVAS, highlightthickness=1,
                                 highlightbackground=_UI_GRID)
         self.canvas.grid(row=0, column=0, rowspan=2, sticky="nw")
 
         info = ttk.Frame(fly, padding=(12, 0))
+        self.info = info
         info.grid(row=0, column=1, sticky="nw")
         self.vars = {}
         self.labels = {}
@@ -186,6 +308,7 @@ class FlyWindow:
         # wider than the map beside them needs. The rows also group the
         # controls -- running the tour above, ending it below.
         buttons = ttk.Frame(fly, padding=(12, 12))
+        self.buttons = buttons
         buttons.grid(row=1, column=1, sticky="nw")
         for index, (text, action) in enumerate((
                 ("Start", flight.mission.start), ("Pause", flight.mission.pause),
@@ -199,7 +322,9 @@ class FlyWindow:
             buttons.columnconfigure(column, weight=1, uniform="control")
 
         self._map_drawn = False
+        self._map_side = 480
         self._dynamic: list[int] = []
+        fly.bind("<Configure>", self._resize_map)
 
         vehicle = ttk.Frame(notebook, padding=12)
         notebook.add(vehicle, text="Vehicle")
@@ -254,28 +379,42 @@ class FlyWindow:
     def _to_canvas(self, x: float, y: float) -> tuple[float, float]:
         return self.view.xy(x, y)
 
-    def _draw_map(self) -> None:
+    def _draw_map(self, *, force: bool = False, side: int | None = None) -> None:
         sim_map = self.flight.mission.sim_map
-        if sim_map is None or self._map_drawn:
+        if sim_map is None or (self._map_drawn and not force):
             return
-        # The map arrives with preflight, so the view is sized here rather
-        # than when the window was built. Cells are capped smaller than dsim's
-        # because the map shares this tab with the telemetry column.
-        self.view.fit(sim_map, max_cell_px=28)
-        width, height = self.view.canvas_size(sim_map)
-        self.canvas.config(width=width, height=height)
-        self.view.draw_map(self.canvas, sim_map)
+        # Keep the Fly tab compact for wide maps: use the fitted map height as
+        # both canvas dimensions, then contain and centre the complete map.
+        if side is None:
+            side = fit_fly_map(self.view, sim_map)
+        else:
+            self.view.fit_canvas(sim_map, side, side)
+        self._map_side = side
+        self.canvas.config(width=side, height=side)
+        self.canvas.delete("map-static")
+        self.view.draw_map(self.canvas, sim_map, tags="map-static")
         planned = self.flight.mission.planned
         for index, (x, y) in enumerate(planned):
             cx, cy = self._to_canvas(x, y)
             if index:
                 px, py = self._to_canvas(*planned[index - 1])
-                self.canvas.create_line(px, py, cx, cy, fill=_UI_WARN, dash=(4, 3))
+                self.canvas.create_line(px, py, cx, cy, fill=_UI_WARN,
+                                        dash=(4, 3), tags="map-static")
             self.canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
-                                    outline=_UI_WARN, width=2)
+                                    outline=_UI_WARN, width=2, tags="map-static")
             self.canvas.create_text(cx + 9, cy - 9, text=str(index),
-                                    fill=_UI_WARN, font=("TkDefaultFont", 7))
+                                    fill=_UI_WARN, font=("TkDefaultFont", 7),
+                                    tags="map-static")
         self._map_drawn = True
+
+    def _resize_map(self, event) -> None:
+        sim_map = self.flight.mission.sim_map
+        if sim_map is None: return
+        controls_width = max(self.info.winfo_reqwidth(), self.buttons.winfo_reqwidth())
+        side = fly_canvas_side(event.width, event.height, controls_width)
+        if abs(side - self._map_side) < 2: return
+        self._draw_map(force=True, side=side)
+        self._draw_vehicle()
 
     def _draw_vehicle(self) -> None:
         for item in self._dynamic:
@@ -409,6 +548,9 @@ class FlyWindow:
         if self.closed:
             return
         self.flight.step()
+        if not self.flight.running:
+            self.close()
+            return
         self._draw_map()
         self._draw_vehicle()
         self._refresh_text()
@@ -423,8 +565,6 @@ class FlyWindow:
         return self.flight.finish()
 
     def close(self) -> None:
-        from dvision2_common import save_window_pos
-
         if self.closed:
             return
         self.closed = True
@@ -444,7 +584,6 @@ class EditorWindow:
                  tour_path: str | None = None) -> None:
         import tkinter as tk
 
-        from dvision2_common import restore_window_pos
         from dway.editor import TourEditor
 
         self.root = tk.Tk()
@@ -466,8 +605,6 @@ class EditorWindow:
         return 0
 
     def close(self) -> None:
-        from dvision2_common import save_window_pos
-
         save_window_pos(self.root, "dway.editor")
         self.root.destroy()
 
@@ -495,9 +632,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="what to do once the last waypoint is reached")
     parser.add_argument("--wait-for-start", action="store_true",
                         help="stay in READY until Start is pressed")
+    parser.add_argument("--wait-for", action="append", default=[], metavar="ROLE",
+                        help="require a module role to acknowledge this run")
+    parser.add_argument("--ready-timeout-s", type=float, default=15.0,
+                        help="simulated seconds to wait for required modules")
+    parser.add_argument("--start-delay-s", type=float, default=3.0,
+                        help="simulated seconds between readiness and start")
     parser.add_argument("--client-id", default=None,
                         help="control-lease identity (default: dway-<id>)")
-    parser.add_argument("--ack-timeout", type=float, default=1.0,
+    parser.add_argument("--ack-timeout", type=float, default=3.0,
                         help="seconds to wait for a command acknowledgement")
     parser.add_argument("--timeout", type=float, default=0.0,
                         help="abort the flight after this many seconds")
@@ -523,10 +666,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         raise SystemExit("stream rate must be positive")
     if args.timeout < 0.0:
         raise SystemExit("timeout must not be negative")
+    if args.ready_timeout_s <= 0.0 or args.start_delay_s < 0.0:
+        raise SystemExit("readiness timeout must be positive and start delay non-negative")
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
+    disable_input_method()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.edit:
         try:

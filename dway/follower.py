@@ -54,14 +54,19 @@ def _clamp(value: float, limit: float) -> float:
 
 @dataclass(frozen=True)
 class Sample:
-    """One vehicle observation reduced to the follower's working frame."""
+    """One vehicle observation reduced to the follower's working frame.
+
+    ``clock_s`` is mission time, not the wall clock: the follower only ever
+    takes differences of it -- a dwell, a leg deadline, a trim step -- and none
+    of those should run while the tour is paused.
+    """
 
     north_m: float
     east_m: float
     down_m: float
     heading_deg: float
     speed_mps: float
-    monotonic_s: float
+    clock_s: float
 
     @classmethod
     def from_state(cls, state: VehicleState, context: FrameContext,
@@ -160,10 +165,10 @@ class VelocityStrategy:
             self._trim_index = leg.index
             self._trim_north = self._trim_east = 0.0
             self._trim_sample_s = None
-        previous, self._trim_sample_s = self._trim_sample_s, sample.monotonic_s
+        previous, self._trim_sample_s = self._trim_sample_s, sample.clock_s
         if previous is None:
             return
-        dt = sample.monotonic_s - previous
+        dt = sample.clock_s - previous
         if dt <= 0.0:
             return
         if (math.hypot(north_err, east_err) > _POSITION_TRIM_BAND_M
@@ -308,14 +313,14 @@ class Follower:
         if leg is None:
             return
         self._leg_start = (sample.north_m, sample.east_m, sample.down_m)
-        self._leg_started_s = sample.monotonic_s
+        self._leg_started_s = sample.clock_s
         self._in_gate_since = None
         distance = leg.distance_to(sample)
-        self._leg_deadline_s = sample.monotonic_s + self.tour.leg_timeout(
+        self._leg_deadline_s = sample.clock_s + self.tour.leg_timeout(
             distance, self.speed_mps)
         entry = self.progress[self.index]
         if entry.first_target_s is None:
-            entry.first_target_s = sample.monotonic_s
+            entry.first_target_s = sample.clock_s
 
     def in_gate(self, sample: Sample) -> bool:
         leg = self.leg
@@ -344,15 +349,15 @@ class Follower:
 
         if self.in_gate(sample):
             if self._in_gate_since is None:
-                self._in_gate_since = sample.monotonic_s
-            held = sample.monotonic_s - self._in_gate_since
+                self._in_gate_since = sample.clock_s
+            held = sample.clock_s - self._in_gate_since
             if held >= self.legs[self.index].dwell_s:
                 return self._arrive(sample, held)
         else:
             self._in_gate_since = None
 
         if (self._leg_deadline_s is not None
-                and sample.monotonic_s > self._leg_deadline_s):
+                and sample.clock_s > self._leg_deadline_s):
             return FollowerEvent.LEG_TIMEOUT
         return FollowerEvent.NONE
 
@@ -382,7 +387,7 @@ class Follower:
 
     def _arrive(self, sample: Sample, held_s: float) -> FollowerEvent:
         entry = self.progress[self.index]
-        entry.arrival_s = sample.monotonic_s
+        entry.arrival_s = sample.clock_s
         entry.dwell_s = held_s
         self.index += 1
         self._leg_start = None

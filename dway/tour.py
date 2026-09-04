@@ -223,6 +223,31 @@ def parse_tour(payload: Any, *, path: Path) -> Tour:
     leg_timeout = _optional_number(payload, "leg_timeout_s", None, where=where)
     if leg_timeout is not None and leg_timeout <= 0.0:
         raise TourError(f"{path}: leg_timeout_s must be positive")
+    # The arrival gates were previously taken on trust. A tour is a file, and a
+    # negative gate is not a tighter one: it can never be satisfied, so the
+    # flight fails at the first waypoint with a message about vehicle health
+    # rather than about the tour that asked for the impossible.
+    gates = {
+        "arrival_speed_mps": (_optional_number(
+            payload, "arrival_speed_mps", DEFAULT_ARRIVAL_SPEED_MPS,
+            where=where), True),
+        "heading_tolerance_deg": (_optional_number(
+            payload, "heading_tolerance_deg", DEFAULT_HEADING_TOLERANCE_DEG,
+            where=where), True),
+        "max_state_age_s": (_optional_number(
+            payload, "max_state_age_s", DEFAULT_MAX_STATE_AGE_S,
+            where=where), True),
+        "min_clearance_m": (_optional_number(
+            payload, "min_clearance_m", DEFAULT_MIN_CLEARANCE_M,
+            where=where), False),
+        "settle_s": (_optional_number(payload, "settle_s", 0.0,
+                                      where=where), False),
+    }
+    for key, (value, strictly_positive) in gates.items():
+        if strictly_positive and value <= 0.0:
+            raise TourError(f"{path}: {key} must be positive")
+        if not strictly_positive and value < 0.0:
+            raise TourError(f"{path}: {key} must not be negative")
     anchor = (_parse_geo_anchor(payload["geo_anchor"])
               if payload.get("geo_anchor") is not None else None)
 
@@ -230,16 +255,11 @@ def parse_tour(payload: Any, *, path: Path) -> Tour:
         tour_id=tour_id, schema_version=int(version), coordinate_frame=frame,
         waypoints=waypoints, path=path, map_path=map_path, map_sha=map_sha,
         default_speed_mps=speed, waypoint_tolerance_m=tolerance,
-        arrival_speed_mps=_optional_number(payload, "arrival_speed_mps",
-                                           DEFAULT_ARRIVAL_SPEED_MPS, where=where),
-        heading_tolerance_deg=_optional_number(payload, "heading_tolerance_deg",
-                                               DEFAULT_HEADING_TOLERANCE_DEG,
-                                               where=where),
-        max_state_age_s=_optional_number(payload, "max_state_age_s",
-                                         DEFAULT_MAX_STATE_AGE_S, where=where),
-        min_clearance_m=_optional_number(payload, "min_clearance_m",
-                                         DEFAULT_MIN_CLEARANCE_M, where=where),
-        settle_s=_optional_number(payload, "settle_s", 0.0, where=where),
+        arrival_speed_mps=gates["arrival_speed_mps"][0],
+        heading_tolerance_deg=gates["heading_tolerance_deg"][0],
+        max_state_age_s=gates["max_state_age_s"][0],
+        min_clearance_m=gates["min_clearance_m"][0],
+        settle_s=gates["settle_s"][0],
         leg_timeout_s=leg_timeout, geo_anchor=anchor,
     )
 

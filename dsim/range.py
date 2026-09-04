@@ -94,44 +94,57 @@ def range_config(name: str) -> RangeConfig:
 
 def raycast_map(sim_map, pose, intrinsics, *, config: RangeConfig = RangeConfig(),
                 stride: int = 1) -> tuple[np.ndarray, np.ndarray]:
-    """Ray-cast walls and collision tree cells; deterministic exact fallback."""
+    """Ray-cast walls and collision tree cells; deterministic exact fallback.
+
+    Vectorised over rays rather than over obstacles: this runs once per frame
+    inside the perception loop, and a per-pixel Python loop across a few
+    hundred maze walls took most of a second per cast -- slower than real time
+    at the capture rate, which is what starved every downstream watchdog.
+    """
     height, width = intrinsics.height_px, intrinsics.width_px
     ranges = np.full((height, width), np.nan, np.float32)
     confidence = np.zeros((height, width), np.uint8)
-    heading = math.radians(pose.heading_deg)
-    pitch0 = math.radians(pose.pitch_deg + Panda3DRenderer.CAM_PITCH)
     obstacles = [obj for obj in sim_map.objects if obj.kind in ("wall", "tree")]
-    for py in range(0, height, stride):
-        v = (py - intrinsics.cy_px) / intrinsics.fy_px
-        pitch = pitch0 - math.atan(v)
-        cp = math.cos(pitch)
-        for px in range(0, width, stride):
-            u = (px - intrinsics.cx_px) / intrinsics.fx_px
-            yaw = heading + math.atan(u)
-            dx, dy, dz = math.sin(yaw) * cp, -math.cos(yaw) * cp, math.sin(pitch)
-            best = config.max_range_m
-            for obj in obstacles:
-                zmax = (Panda3DRenderer.WALL_H if obj.kind == "wall"
-                        else Panda3DRenderer.TREE_MODEL_H)
-                for axis_origin, axis_dir, lo, hi, other_origin, other_dir, olo, ohi in (
-                    (pose.x_m, dx, obj.x - .5, obj.x + .5,
-                     pose.y_m, dy, obj.y - .5, obj.y + .5),
-                    (pose.y_m, dy, obj.y - .5, obj.y + .5,
-                     pose.x_m, dx, obj.x - .5, obj.x + .5),
-                ):
-                    if abs(axis_dir) < 1e-9:
-                        continue
-                    for boundary in (lo, hi):
+    rows = np.arange(0, height, stride)
+    columns = np.arange(0, width, stride)
+    if obstacles and len(rows) and len(columns):
+        pitch = (math.radians(pose.pitch_deg + Panda3DRenderer.CAM_PITCH)
+                 - np.arctan((rows - intrinsics.cy_px) / intrinsics.fy_px))
+        yaw = (math.radians(pose.heading_deg)
+               + np.arctan((columns - intrinsics.cx_px) / intrinsics.fx_px))
+        cos_pitch = np.cos(pitch)[:, None]
+        dx = np.sin(yaw)[None, :] * cos_pitch
+        dy = -np.cos(yaw)[None, :] * cos_pitch
+        dz = np.sin(pitch)[:, None]
+        camera_z = pose.z_m + Panda3DRenderer.CAM_Z_OFFSET
+        # Running nearest hit. Seeding it at the far plane is also the range
+        # gate: a candidate is only taken when it beats what is already there.
+        best = np.full(dx.shape, config.max_range_m, np.float64)
+        for obj in obstacles:
+            zmax = (Panda3DRenderer.WALL_H if obj.kind == "wall"
+                    else Panda3DRenderer.TREE_MODEL_H)
+            for axis_origin, axis_dir, lo, hi, other_origin, other_dir, olo, ohi in (
+                (pose.x_m, dx, obj.x - .5, obj.x + .5,
+                 pose.y_m, dy, obj.y - .5, obj.y + .5),
+                (pose.y_m, dy, obj.y - .5, obj.y + .5,
+                 pose.x_m, dx, obj.x - .5, obj.x + .5),
+            ):
+                usable = np.abs(axis_dir) >= 1e-9
+                if not usable.any():
+                    continue
+                for boundary in (lo, hi):
+                    with np.errstate(divide="ignore", invalid="ignore"):
                         t = (boundary - axis_origin) / axis_dir
-                        if not (config.min_range_m <= t < best):
-                            continue
-                        other = other_origin + t * other_dir
-                        z = pose.z_m + Panda3DRenderer.CAM_Z_OFFSET + t * dz
-                        if olo <= other <= ohi and 0.0 <= z <= zmax:
-                            best = t
-            if best < config.max_range_m:
-                ranges[py, px] = best
-                confidence[py, px] = 255
+                    other = other_origin + t * other_dir
+                    z = camera_z + t * dz
+                    hit = (usable & (t >= config.min_range_m) & (t < best)
+                           & (other >= olo) & (other <= ohi)
+                           & (z >= 0.0) & (z <= zmax))
+                    best = np.where(hit, t, best)
+        found = best < config.max_range_m
+        grid = np.ix_(rows, columns)
+        ranges[grid] = np.where(found, best, np.nan).astype(np.float32)
+        confidence[grid] = np.where(found, 255, 0)
     if config.name != "exact":
         rng = np.random.default_rng(config.seed)
         valid = np.isfinite(ranges)

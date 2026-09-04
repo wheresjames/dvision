@@ -48,11 +48,12 @@ from dvision2_common import (
     clamp,
     decode_command,
     load_pymembus,
-    restore_window_pos,
-    save_window_pos,
     shared_names,
     validate_id,
 )
+from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.window import (disable_input_method, restore_window_pos,
+                          save_window_pos)
 
 PROTOCOLS_DIR = Path(__file__).parent / "protocols"
 SHARED_MODELS_URL = "https://us1mirror.flightgear.org/terrasync/SharedModels.txz"
@@ -483,6 +484,7 @@ class FGBridge:
         self.video   = None
         self.command = None
         self.status  = None
+        self.module_bus = None
 
         # Latest raw RGB24 frame from the video reader thread
         self._frame_bytes: bytes|None = None
@@ -830,6 +832,7 @@ class FGBridge:
         pm.memvid.remove(self.names["video"])
         pm.memcmd.remove(self.names["command"])
         pm.memkv.remove(self.names["status"])
+        pm.memmsg.remove(self.names["events"])
 
         self.video = pm.memvid()
         fmt = getattr(pm.video_format, "rgb24", 24)
@@ -859,6 +862,14 @@ class FGBridge:
         for idx, key in enumerate(STATUS_KEYS):
             if not self.status.setName(idx, key):
                 raise RuntimeError(f"failed to set status key {key!r}")
+        self.module_bus = PymembusModuleBus(
+            self.args.id, "simulator", "dfgb", create=True,
+            sim_time=lambda: time.monotonic() - self.started)
+        if not self.module_bus.connect():
+            raise RuntimeError(
+                f"failed to create event buffer {self.names['events']}")
+        self.module_bus.publish("module.hello", payload={
+            "state": "ready", "capabilities": ["vehicle", "video", "status"]})
 
     def _open_sockets(self) -> None:
         self._ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1201,6 +1212,11 @@ class FGBridge:
             frame_period = 1.0 / max(1, self.args.fps)
             while self.running:
                 t0 = time.monotonic()
+                if (self.module_bus is not None and
+                        any(requests_shutdown(event)
+                            for event in self.module_bus.receive())):
+                    self.running = False
+                    break
                 self._drain_commands()
                 self._recv_state()
                 self._send_control()
@@ -1217,6 +1233,9 @@ class FGBridge:
 
     def _stop(self) -> None:
         self.running = False
+        if getattr(self, "module_bus", None) is not None:
+            self.module_bus.publish("module.goodbye", payload={"state": "stopped"})
+            self.module_bus.close()
         if self.ui is not None:
             self.ui.close()
         for proc in (self._proc_ffmpeg, self._proc_fg, self._proc_xvfb):
@@ -1484,6 +1503,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    disable_input_method()
     args = parse_args(sys.argv[1:] if argv is None else argv)
 
     if args.install:

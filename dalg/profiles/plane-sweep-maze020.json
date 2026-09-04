@@ -1,0 +1,24 @@
+{
+  "name": "plane-sweep-maze020",
+  "algorithm": "plane_sweep",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {
+    "depth_min_m": 0.5,
+    "depth_max_m": 15.0,
+    "depth_steps": 16,
+    "min_baseline_m": 0.5,
+    "max_baseline_m": 2.5,
+    "match_scale": 0.5,
+    "min_keyframe_distance_m": 0.5,
+    "max_heading_delta_deg": 15.0,
+    "window_px": 5,
+    "min_texture_std": 0.025,
+    "confidence_margin": 0.18,
+    "max_cost": 0.15,
+    "stride": 4,
+    "max_keyframes": 256,
+    "preview_batch": 2,
+    "preview_interval_s": 0.75
+  }
+}

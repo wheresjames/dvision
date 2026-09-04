@@ -1,0 +1,10 @@
+{
+  "name": "sgbm-manual",
+  "algorithm": "sgbm",
+  "sensors": ["rgb"],
+  "settings": {
+    "num_disparities": 128,
+    "block_size": 5,
+    "uniqueness_ratio": 12
+  }
+}

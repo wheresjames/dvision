@@ -1,0 +1,8 @@
+{
+  "name": "optical-flow-maze020",
+  "algorithm": "optical_flow_triangulation",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {"max_corners": 800, "quality_level": 0.02,
+               "min_baseline_m": 0.3, "min_parallax_deg": 1.5}
+}

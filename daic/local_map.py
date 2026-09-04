@@ -73,6 +73,15 @@ _SECTOR_BANDS = {
     "front_right": _sector_band(_INNER_DEG, _OUTER_DEG),
     "right":       _sector_band(_OUTER_DEG, 90.0),
 }
+# The cheapest a single A* step can be, and therefore the scale its heuristic
+# has to be measured in. _cell_dist counts cells, so an unscaled heuristic
+# charges 1.0 for a step the cost function charges 0.7 for -- an overestimate,
+# which makes A* inadmissible and lets it settle for the first route it finds
+# instead of the cheapest one.
+_FREE_CELL_COST = 0.7
+_UNKNOWN_CELL_COST = 1.5
+_OCCUPIED_CELL_PENALTY = 4.0
+
 _WAYPOINT_LOOKAHEAD_M = 2.0
 _MAX_YAW_DPS = 18.0
 _YAW_GAIN = 0.45
@@ -423,7 +432,7 @@ class LocalOccupancyMap:
                     continue
                 came_from[nb] = current
                 g_score[nb] = tentative
-                f = tentative + _cell_dist(nb, goal)
+                f = tentative + _FREE_CELL_COST * _cell_dist(nb, goal)
                 heapq.heappush(open_heap, (f, nb))
 
         return []
@@ -433,8 +442,8 @@ class LocalOccupancyMap:
         if value >= _OCCUPIED:
             return math.inf
         if value <= _FREE:
-            return 0.7
-        return 1.5 + max(0.0, value) * 4.0
+            return _FREE_CELL_COST
+        return _UNKNOWN_CELL_COST + max(0.0, value) * _OCCUPIED_CELL_PENALTY
 
     def _cell(self, x: float, y: float) -> tuple[int, int]:
         return (round(x / self.cell_m), round(y / self.cell_m))

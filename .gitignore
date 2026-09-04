@@ -9,6 +9,7 @@ creds
 build
 release
 output
+/assets/models/
 /captures/
 /tmp/
 dfgb-*.log

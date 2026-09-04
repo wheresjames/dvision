@@ -33,6 +33,15 @@ DEFAULT_MAX_CELL_PX = 42
 DEFAULT_MARGIN_PX = 18
 
 
+def contained_size(source_width: float, source_height: float,
+                   available_width: float, available_height: float) -> tuple[int, int]:
+    """Largest positive integer size fitting the box without changing aspect."""
+    if min(source_width, source_height, available_width, available_height) <= 0:
+        return 1, 1
+    scale = min(available_width / source_width, available_height / source_height)
+    return max(1, round(source_width * scale)), max(1, round(source_height * scale))
+
+
 @dataclass(frozen=True)
 class Shape:
     """One primitive of a drawn map, in **map metres**.
@@ -118,10 +127,12 @@ class MapView:
     `dsim` keeps its static map and repaints only the vehicle.
     """
 
-    def __init__(self, *, cell: int = DEFAULT_MIN_CELL_PX,
+    def __init__(self, *, cell: float = DEFAULT_MIN_CELL_PX,
                  margin: int = DEFAULT_MARGIN_PX) -> None:
-        self.cell = int(cell)
+        self.cell = float(cell)
         self.margin = int(margin)
+        self.offset_x = float(margin)
+        self.offset_y = float(margin)
 
     @classmethod
     def fitted(cls, sim_map, *, max_edge_px: int = DEFAULT_MAX_EDGE_PX,
@@ -137,6 +148,18 @@ class MapView:
         """Resize in place for a map that arrived after the window was built."""
         sized = self.fitted(sim_map, margin=self.margin, **kwargs)
         self.cell = sized.cell
+        self.offset_x = self.offset_y = float(self.margin)
+        return self
+
+    def fit_canvas(self, sim_map, width_px: float, height_px: float) -> "MapView":
+        """Contain and centre a map in the current canvas."""
+        inner_w = max(1.0, float(width_px) - 2 * self.margin)
+        inner_h = max(1.0, float(height_px) - 2 * self.margin)
+        self.cell = max(.01, min(inner_w / max(sim_map.width, 1),
+                                 inner_h / max(sim_map.height, 1)))
+        drawn_w, drawn_h = sim_map.width * self.cell, sim_map.height * self.cell
+        self.offset_x = (float(width_px) - drawn_w) / 2
+        self.offset_y = (float(height_px) - drawn_h) / 2
         return self
 
     # -- geometry -------------------------------------------------------
@@ -147,11 +170,11 @@ class MapView:
 
     def xy(self, x: float, y: float) -> tuple[float, float]:
         """Map metres to canvas pixels."""
-        return self.margin + x * self.cell, self.margin + y * self.cell
+        return self.offset_x + x * self.cell, self.offset_y + y * self.cell
 
     def to_map(self, px: float, py: float) -> tuple[float, float]:
         """Canvas pixels back to map metres; the exact inverse of ``xy``."""
-        return (px - self.margin) / self.cell, (py - self.margin) / self.cell
+        return (px - self.offset_x) / self.cell, (py - self.offset_y) / self.cell
 
     # -- drawing --------------------------------------------------------
 

@@ -125,6 +125,9 @@ def analyze_log(log_path: str | Path,
                 pass
 
     ticks = [r for r in records if "state" in r and "telem" in r]
+    # log_event() records -- start, stop, and whatever the run reported -- were
+    # collected here and then dropped, so nothing a run announced ever reached
+    # the summary. They are few and small, so they are carried through whole.
     events = [r for r in records if "event" in r]
 
     if not ticks:
@@ -132,6 +135,7 @@ def analyze_log(log_path: str | Path,
 
     # ── Target position from map ──────────────────────────────────────
     target_pos: tuple[float, float] | None = None
+    target_error: str | None = None
     if map_path is not None:
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -141,7 +145,10 @@ def analyze_log(log_path: str | Path,
             if targets:
                 target_pos = (targets[0].x, targets[0].y)
         except Exception as exc:
-            pass  # non-fatal
+            # Non-fatal, but not silent: without the map there is no target, so
+            # landing_error_m comes back None and the reason belongs in the
+            # summary rather than only in the mind of whoever wrote this.
+            target_error = f"{type(exc).__name__}: {exc}"
 
     # ── Drone trajectory ──────────────────────────────────────────────
     positions: list[tuple[float, float, float, float, str]] = []  # t,x,y,z,state
@@ -233,6 +240,8 @@ def analyze_log(log_path: str | Path,
                              "z": round(final_pos[2], 3)},
         "target_position":  {"x": target_pos[0], "y": target_pos[1]}
                              if target_pos else None,
+        "target_position_error": target_error,
+        "events":           events,
         "landing_error_m":  landing_error,
         "min_dist_to_target_m": min_dist,
         "state_times_s":    {k: round(v, 2) for k, v in state_times.items()},

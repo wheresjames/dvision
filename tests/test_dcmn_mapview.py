@@ -13,8 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 from dcmn import theme
-from dcmn.mapview import MapView, draw_map_axes, map_shapes
+from dcmn.mapview import MapView, contained_size, draw_map_axes, map_shapes
 from dvision2_common import load_map
+from dway.dway import fit_fly_map, fly_canvas_side
 
 ROOT = Path(__file__).resolve().parents[1]
 MAZE_012 = ROOT / "assets/maps/maze_012.txt"
@@ -54,6 +55,40 @@ def test_a_map_is_fitted_to_the_space_it_is_given() -> None:
     width, height = view.canvas_size(sim_map)
     assert width == sim_map.width * view.cell + view.margin * 2
     assert height == sim_map.height * view.cell + view.margin * 2
+
+
+def test_wide_map_is_contained_and_centered_without_distortion() -> None:
+    sim_map = SimpleNamespace(width=67, height=35)
+    view = MapView().fit_canvas(sim_map, 800, 500)
+    x0, y0 = view.xy(0, 0)
+    x1, y1 = view.xy(sim_map.width, sim_map.height)
+    assert x0 >= view.margin and y0 >= view.margin
+    assert x1 <= 800 - view.margin and y1 <= 500 - view.margin
+    assert (x1-x0) / (y1-y0) == pytest.approx(67/35)
+    assert view.to_map(x1, y1) == pytest.approx((67, 35))
+
+
+def test_contained_raster_size_upscales_as_well_as_downscales() -> None:
+    assert contained_size(268, 140, 600, 400) == (600, 313)
+    assert contained_size(1000, 500, 300, 300) == (300, 150)
+
+
+def test_dway_wide_map_uses_a_height_sized_square() -> None:
+    sim_map = SimpleNamespace(width=67, height=35)
+    view = MapView(cell=16, margin=12)
+    side = fit_fly_map(view, sim_map)
+    assert side == 35 * 18 + 24
+    x0, y0 = view.xy(0, 0)
+    x1, y1 = view.xy(67, 35)
+    assert 0 <= x0 < x1 <= side
+    assert 0 <= y0 < y1 <= side
+    assert (x1-x0) / (y1-y0) == pytest.approx(67/35)
+
+
+def test_dway_square_reacts_to_available_window_space() -> None:
+    assert fly_canvas_side(1000, 700, 300) == 672
+    assert fly_canvas_side(700, 900, 300) == 372
+    assert fly_canvas_side(200, 100, 300) == 120
 
 
 def test_every_object_kind_is_drawn_including_ones_nobody_named() -> None:

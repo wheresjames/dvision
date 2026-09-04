@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import signal
 import sys
 import time
 import tkinter as tk
+import uuid
 from pathlib import Path
 from tkinter import ttk
 
@@ -21,10 +23,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dcmn import theme
+from dcmn.module_bus import PymembusModuleBus, requests_shutdown
 from dcmn.tktheme import apply_theme
+from dcmn.window import (disable_input_method, restore_window_pos,
+                          save_window_pos)
 from dvision2_common import (
-    STATUS_KEYS, controlled_command, load_pymembus, new_control_identity,
-    restore_window_pos, save_window_pos, shared_names, validate_id,
+    controlled_command, load_pymembus, new_control_identity,
+    shared_names, validate_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -213,10 +218,23 @@ class DroneController:
         self.last_status_update = 0.0
         self.held: set[str] = set()
         self.running = True
+        # Simulated time, like every other module on the bus: the default is
+        # the wall clock, which would stamp dctl's events with monotonic
+        # seconds while dsim and dalg stamp simulated ones.
+        self.module_bus = PymembusModuleBus(args.id, "controller", "dctl",
+                                            sim_time=self._sim_time)
         self._joy_legend_shown = None  # None = not yet determined
         self._held_velocity_active = False
         self._last_heartbeat = 0.0
+        self._last_module_heartbeat = 0.0
         self._last_open_attempt = 0.0
+        self.measurement_run_id = ""
+        self._measurement_state = "IDLE"
+        self._measurement_ready: set[str] = set()
+        self._measurement_last_prepare = 0.0
+        self._measurement_last_state = 0.0
+        self._measurement_deadline = 0.0
+        self._measurement_start_sim_s: float | None = None
 
         self.joy = _DisabledJoystick()
         self._interfaces_initializing = True
@@ -225,6 +243,8 @@ class DroneController:
 
         stage_started = time.perf_counter()
         self.root = tk.Tk()
+        self.measurement_profile = tk.StringVar(self.root, value="sgbm-manual")
+        self.measurement_status = tk.StringVar(self.root, value="idle")
         self._trace(f"Tk created in {time.perf_counter() - stage_started:.3f}s")
         self.root.title(f"dctl {args.id}")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -525,6 +545,22 @@ class DroneController:
             ttk.Label(telemetry, textvariable=var, width=14).grid(
                 row=grid_row, column=col_base + 1, sticky="w")
 
+        measurement = ttk.LabelFrame(side, text="Algorithm measurement", padding=8)
+        measurement.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(measurement, text="profile", style="Dim.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(measurement, textvariable=self.measurement_profile, width=22).grid(
+            row=0, column=1, columnspan=2, sticky="ew")
+        ttk.Button(measurement, text="Start measurement",
+                   command=self.start_measurement).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0), padx=(0, 6))
+        ttk.Button(measurement, text="Stop", command=self.stop_measurement).grid(
+            row=1, column=2, sticky="ew", pady=(6, 0))
+        ttk.Label(measurement, textvariable=self.measurement_status,
+                  style="Dim.TLabel").grid(row=2, column=0, columnspan=3,
+                                           sticky="w", pady=(6, 0))
+        measurement.columnconfigure(1, weight=1)
+
         # ── Log ───────────────────────────────────────────────────────
         # A Configure handler used to assign the label's current width back to
         # wraplength on every geometry event. That changes the requested size,
@@ -532,7 +568,7 @@ class DroneController:
         # a first-map feedback loop on some window managers.
         _log_lbl = ttk.Label(side, textvariable=self.log_var,
                              style="Dim.TLabel", wraplength=420)
-        _log_lbl.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        _log_lbl.grid(row=4, column=0, sticky="ew", pady=(10, 0))
 
         # ── Legends (joystick or keyboard) under the video ────────────
         below_video = ttk.Frame(video_area, padding=(0, 8, 0, 0))
@@ -710,6 +746,11 @@ class DroneController:
         if not self.running:
             return
         self.open_missing()
+        events = self.module_bus.receive()
+        if any(requests_shutdown(event) for event in events):
+            self.close()
+            return
+        self._coordinate_measurement(events)
         self._maintain_control()
         self.update_connection_text()
         self.update_video()
@@ -720,6 +761,109 @@ class DroneController:
             self._update_joy_legend()
             self.send_held_velocity()
         self.root.after(max(10, int(1000 / max(1, self.args.fps))), self.tick)
+
+    def _sim_time(self) -> float:
+        try:
+            return float(({} if self.status is None else self.status.getAll()).get(
+                "sim.time_s", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _measurement_prepare(self) -> dict:
+        values = {} if self.status is None else self.status.getAll()
+        map_path = Path(values.get("sim.map", ""))
+        if map_path and not map_path.is_absolute(): map_path = ROOT / map_path
+        digest = hashlib.sha256(map_path.read_bytes()).hexdigest() \
+            if map_path.is_file() else ""
+        profile = self.measurement_profile.get().strip()
+        requirement = "algorithm" + (f":{profile}" if profile else "")
+        return {"tour_id": "", "tour_digest": "", "map_digest": digest,
+                "coordinate_frame": "map", "flight_mode": "manual",
+                "required_roles": [requirement]}
+
+    def start_measurement(self) -> None:
+        if self._measurement_state != "IDLE":
+            self.measurement_status.set("a measurement is already active")
+            return
+        if self.status is None:
+            self.measurement_status.set("waiting for dsim")
+            return
+        self.measurement_run_id = uuid.uuid4().hex
+        self._measurement_state = "PREPARING"
+        self._measurement_ready.clear()
+        self._measurement_last_prepare = 0.0
+        self._measurement_last_state = 0.0
+        self._measurement_deadline = time.monotonic() + 15.0
+        self._measurement_start_sim_s = None
+        self.measurement_status.set("waiting for algorithm readiness")
+
+    def stop_measurement(self) -> None:
+        if self._measurement_state == "IDLE": return
+        self.module_bus.publish("run.completed", run_id=self.measurement_run_id,
+                                payload={"state": "COMPLETE", "outcome": "complete",
+                                         "reason": "manual measurement stopped"})
+        self._measurement_state = "IDLE"
+        self.measurement_run_id = ""
+        self.measurement_status.set("complete")
+
+    def _abort_measurement(self, reason: str) -> None:
+        self.module_bus.publish("run.aborted", run_id=self.measurement_run_id,
+                                payload={"state": "FAILED", "outcome": "failed",
+                                         "reason": reason})
+        self._measurement_state = "IDLE"
+        self.measurement_run_id = ""
+        self.measurement_status.set(f"failed: {reason}")
+
+    def _coordinate_measurement(self, events) -> None:
+        now = time.monotonic()
+        if now - self._last_module_heartbeat >= 1.0:
+            self.module_bus.publish("module.heartbeat", run_id=self.measurement_run_id,
+                                    payload={"state": self._measurement_state,
+                                             "ready": self.status is not None,
+                                             "capabilities": ["manual_flight"]})
+            self._last_module_heartbeat = now
+        if self._measurement_state == "IDLE": return
+        for event in events:
+            if event.run_id != self.measurement_run_id: continue
+            if event.type == "run.reject":
+                self._abort_measurement(str(event.payload.get("reason", "rejected")))
+                return
+            if event.type == "run.ready" and event.role == "algorithm":
+                self._measurement_ready.add(event.process_id)
+        if len(self._measurement_ready) > 1:
+            self._abort_measurement("ambiguous matching algorithm instances")
+            return
+        if self._measurement_state == "PREPARING":
+            if now >= self._measurement_deadline:
+                self._abort_measurement("algorithm readiness timeout")
+                return
+            if now - self._measurement_last_prepare >= 1.0:
+                self.module_bus.publish("run.prepare", run_id=self.measurement_run_id,
+                                        payload=self._measurement_prepare())
+                self._measurement_last_prepare = now
+            if self._measurement_ready:
+                self._measurement_start_sim_s = self._sim_time() + 1.0
+                self.module_bus.publish("run.start_scheduled",
+                                        run_id=self.measurement_run_id,
+                                        payload={"start_sim_time_s":
+                                                 self._measurement_start_sim_s})
+                self._measurement_state = "SCHEDULED"
+                self.measurement_status.set("scheduled")
+        elif self._measurement_state == "SCHEDULED":
+            if self._sim_time() >= float(self._measurement_start_sim_s or 0):
+                self._measurement_state = "RUNNING"
+                self.module_bus.publish("run.started", run_id=self.measurement_run_id,
+                                        payload={"start_sim_time_s":
+                                                 self._measurement_start_sim_s})
+                self.measurement_status.set("recording manual flight")
+        if (self._measurement_state in ("SCHEDULED", "RUNNING") and
+                now - self._measurement_last_state >= 1.0):
+            self.module_bus.publish("run.state", run_id=self.measurement_run_id,
+                                    payload={"state": self._measurement_state,
+                                             "flight_mode": "manual",
+                                             "start_sim_time_s":
+                                             self._measurement_start_sim_s})
+            self._measurement_last_state = now
 
     def _maintain_control(self) -> None:
         if self.command is None or self.status is None:
@@ -881,6 +1025,8 @@ class DroneController:
     def close(self) -> None:
         self.running = False
         try:
+            if self._measurement_state != "IDLE":
+                self._abort_measurement("controller closed")
             owner = "" if self.status is None else \
                 self.status.getAll().get("control.owner", "")
             if owner == self.control_source:
@@ -888,6 +1034,7 @@ class DroneController:
                 self.send_command("release_control", quiet=True)
         finally:
             self.joy.close()
+            self.module_bus.close()
             for handle in (self.status, self.command, self.video):
                 if handle is not None:
                     handle.close()
@@ -997,6 +1144,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    disable_input_method()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.verbose:
         print(f"dctl startup: imports completed in "

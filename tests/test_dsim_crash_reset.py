@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from dsim.dsim import DroneSimulator, DroneState, parse_args
+import numpy as np
+
+import dsim.range as range_module
+from dsim.dsim import (DroneSimulator, DroneState, Panda3DRenderer,
+                       parse_args)
 from dvision2_common import (
     BERLIN_CENTER_ALT_M,
     BERLIN_CENTER_LAT_DEG,
@@ -184,3 +188,46 @@ def test_status_reports_target_gps_when_target_exists():
     assert sim.status.values["target.lat_deg"] == f"{BERLIN_CENTER_LAT_DEG:.7f}"
     assert sim.status.values["target.lon_deg"] == f"{BERLIN_CENTER_LON_DEG:.7f}"
     assert sim.status.values["target.alt_m"] == f"{BERLIN_CENTER_ALT_M:.3f}"
+
+
+def test_obstacles_are_boxes_not_infinite_columns():
+    """Collision uses the height the object is drawn and ray-cast at."""
+    sim = _sim()
+    sim.map.objects = [
+        SimpleNamespace(kind="wall", x=2.5, y=1.5),
+        SimpleNamespace(kind="tree", x=4.5, y=1.5),
+    ]
+
+    assert sim.is_blocked(2.5, 1.5, 0.0)
+    assert sim.is_blocked(2.5, 1.5, Panda3DRenderer.WALL_H - 0.01)
+    assert not sim.is_blocked(2.5, 1.5, Panda3DRenderer.WALL_H + 0.01)
+    # A tree stands taller than a wall, so the clear height differs per kind.
+    assert sim.is_blocked(4.5, 1.5, Panda3DRenderer.WALL_H + 0.5)
+    assert not sim.is_blocked(4.5, 1.5, Panda3DRenderer.TREE_MODEL_H + 0.01)
+
+
+def test_flying_over_a_wall_does_not_crash():
+    sim = _sim()
+    sim.map.objects = [SimpleNamespace(kind="wall", x=2.5, y=1.5)]
+
+    assert sim.path_blocked(1.0, 1.5, 4.0, 1.5, 1.0)
+    assert not sim.path_blocked(1.0, 1.5, 4.0, 1.5,
+                                Panda3DRenderer.WALL_H + 0.5)
+
+
+def test_collision_height_matches_what_the_range_sensor_casts_against():
+    """The sensor and the physics must agree on how tall an obstacle is.
+
+    dsim.range clips a wall hit at WALL_H; a collision test that ignored z
+    crashed the vehicle into geometry the range sensor reported as clear air.
+    """
+    sim = _sim()
+    sim.map.objects = [SimpleNamespace(kind="wall", x=2.5, y=1.5)]
+    above = Panda3DRenderer.WALL_H + 1.0
+    pose = range_module.Pose(1.0, 1.5, above, 90.0)
+    intrinsics = range_module.Intrinsics(32, 24, 20.0, 20.0, 16.0, 12.0)
+
+    ranges, _ = range_module.raycast_map(sim.map, pose, intrinsics, stride=4)
+
+    assert not np.isfinite(ranges).any()
+    assert not sim.is_blocked(2.5, 1.5, above)

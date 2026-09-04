@@ -1,0 +1,8 @@
+{
+  "name": "ground-plane-maze020",
+  "algorithm": "ground_plane",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {"column_stride": 4, "edge_threshold": 28.0,
+               "camera_pitch_down_deg": 5.0, "max_range_m": 20.0}
+}

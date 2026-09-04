@@ -260,6 +260,17 @@ python3 daic/daic.py --install
 That mode checks the OpenCV features needed by the optical-flow and mini-SLAM
 paths and reports optional ORB_SLAM3 setup status.
 
+### X input methods
+
+Every Tk front end here declines the X input method as it starts, by setting
+`XMODIFIERS=@im=none` before it builds a window. The XIM handshake costs
+several hundred milliseconds of a bare Tk start-up, and ibus additionally
+leaks a pair of windows per client until the session ends, so a desk that
+launches these apps all day watches every launch get slower. None of these
+windows takes text an input method exists to compose.
+
+Set `DVISION2_INPUT_METHOD=1` to keep the session's input method instead.
+
 ## Quick Start
 
 Manual control:
@@ -471,8 +482,10 @@ with the FlightGear bridge: `drone.roll_deg` is positive for a right-wing-down
 bank (a right strafe banks right) and `drone.pitch_deg` is positive nose-up (so
 forward flight pitches nose down).
 
-Collision is cell based: wall and tree objects occupy their full map cell, and
-a crash puts the drone in `CRASHED` until reset.
+Collision is box based: wall and tree objects occupy their full map cell and
+stand as tall as they are drawn (2.5 m for a wall, 4.5 m for a tree), so flying
+over one clears it -- the same heights `dsim.range` casts against, so the range
+sensor and the physics agree. A crash puts the drone in `CRASHED` until reset.
 
 ### Monitor window
 
@@ -718,10 +731,13 @@ Options:
 | `--speed` | Override the tour's `default_speed_mps` |
 | `--stream-hz` | Setpoint stream rate, default 10 |
 | `--finish-action` | `land` (default), `hold`, or `rtl` after the last waypoint |
-| `--wait-for-start` | Stay in `READY` until Start is pressed |
+| `--wait-for-start` | Stay in `READY` until Start is pressed. Disables the readiness barrier below |
+| `--wait-for` | Require a module role to acknowledge this run before it starts, e.g. `algorithm:sgbm-maze020`. Repeatable |
+| `--ready-timeout-s` | Simulated seconds to wait for those modules, default 15 |
+| `--start-delay-s` | Simulated seconds between readiness and the start, default 3 |
 | `--client-id` | Control-lease identity, default `dway-<id>` |
-| `--ack-timeout` | Seconds to wait for a command acknowledgement, default 1 |
-| `--timeout` | Abort the flight after this many seconds |
+| `--ack-timeout` | Seconds to wait for a command acknowledgement, default 3 |
+| `--timeout` | Abort the flight after this many wall-clock seconds |
 | `--exit-on-finish` | Close the window when the flight ends |
 | `--no-ui` | Run headless, for scripted flights |
 | `--edit` | Open the tour editor alone, with no vehicle and no `--id` |
@@ -731,6 +747,52 @@ Options:
 # Author a tour without a simulator running at all
 python3 dway/dway.py --edit --map assets/maps/maze_012.txt
 ```
+
+### Waiting for other modules
+
+A tour is a stimulus other modules measure, and a measurement that begins
+after the flight does is a shorter measurement than the one that was asked
+for. `--wait-for` makes `dway` the coordinator: it publishes `run.prepare` on
+the instance's event bus, holds in `READY` until every named role has answered
+`run.ready` for that exact run, then schedules a start at an absolute
+simulated time so every participant begins together.
+
+```sh
+python3 dsim/dsim.py --id area1 --map assets/maps/maze_020.txt &
+python3 dway/dway.py --id area1 \
+        --tour assets/tours/maze_020.default.v1.json \
+        --wait-for algorithm:optical-flow-maze020 &
+python3 dalg/dalg.py --id area1 \
+        --profile dalg/profiles/optical-flow-maze020.json &
+```
+
+The argument is `role[:selector]`, and both halves catch people out:
+
+- **The role is the one the module registers on the bus with**, not its
+  program name. `dalg` registers as `algorithm`, so `--wait-for dalg` never
+  matches and the run aborts with `readiness timeout waiting for dalg`.
+- **The selector is the profile's `name` field**, not the path passed to
+  `--profile`. For the profile above that is `optical-flow-maze020`; the
+  algorithm name `optical_flow_triangulation` and the module's process id also
+  match. A path never matches.
+
+Omitting the selector (`--wait-for algorithm`) accepts any one algorithm
+module, and aborts with `ambiguous exclusive participant` if two answer.
+Naming the profile is what pins a run to the module you meant.
+
+Launch order does not matter: the preparation snapshot is repeated once a
+second, so a module that starts after `dway` still joins the same run. What
+does matter is that the participant agrees with the tour -- a `dalg` profile
+naming a different tour rejects the run outright, and `dway` aborts
+immediately with the reason rather than waiting out the timeout.
+
+Without `--wait-for`, `dway` flies as soon as it is ready and other modules
+observe opportunistically. That usually works, because `--start-delay-s`
+leaves them time to attach; the barrier is what turns "usually" into a run
+that either starts together or fails loudly.
+
+`--wait-for` has no effect under `--wait-for-start`, where the flight begins
+from the Start button instead.
 
 ### Follower window
 
@@ -1306,6 +1368,15 @@ Every command carries a `request_id`, and its outcome is published in
 `command.result.request_id` / `.accepted` / `.reason`. Queue admission is not
 acceptance -- streamed setpoints wait for their result too.
 
+Those three keys hold one latest value, and a whole command queue is drained
+per frame against a single status publication: when two clients command in the
+same frame, only the last outcome would survive there. `command.results`
+carries the last 16 outcomes as `request_id accepted reason` lines (the reason
+truncated to 96 characters), so a client can still find its own. A client
+correlates against the slot first, for the untruncated reason, and falls back
+to the history; a vehicle that publishes no history -- `dfgb` -- still works
+for the single client commanding it.
+
 `--setpoint-timeout` (default `2` seconds; `0` disables it) is the guided-mode
 failsafe: an armed vehicle in `GUIDED` that stops receiving position or
 velocity targets clears them, enters `HOLD`, and publishes
@@ -1407,6 +1478,7 @@ Vehicle contract keys, which a client negotiates with rather than assumes:
 | `setpoint.age_s` | Seconds since the last position or velocity target |
 | `failsafe.reason` | `setpoint_timeout`, `control_lease_expired`, `geofence`, `battery_low`, or empty |
 | `command.result.request_id`, `.accepted`, `.reason` | Outcome of the most recent command |
+| `command.results` | The last 16 outcomes, newest last, as `request_id accepted reason` lines |
 
 Capabilities are static interfaces and configured limits. Freshness, ownership
 and failsafe state are live vehicle state, and the two are deliberately kept

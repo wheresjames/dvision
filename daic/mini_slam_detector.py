@@ -33,15 +33,14 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
 
 import cv2
 import numpy as np
 
 from daic.orb_slam3_detector import (
     ObstacleSectors, _NULL_SECTORS,
-    _S_SYSTEM_NOT_READY, _S_NOT_INITIALIZED, _S_OK, _S_RECENTLY_LOST, _S_LOST,
-    _decay, _blend, _f,
+    _S_SYSTEM_NOT_READY, _S_NOT_INITIALIZED, _S_OK, _S_RECENTLY_LOST,
+    _decay, _f,
     SLAM_FAR_UNITS, SLAM_CLOSE_UNITS, SLAM_MIN_POINTS,
     _INNER_DEG, _OUTER_DEG, _MAX_BELOW_DEG, RISK_DECAY,
 )

@@ -1,0 +1,7 @@
+{
+  "name": "exact-range-maze020",
+  "algorithm": "exact_range",
+  "tour": "assets/tours/maze_020.default.v1.json",
+  "sensors": ["rgb"],
+  "settings": {}
+}

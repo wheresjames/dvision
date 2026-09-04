@@ -7,6 +7,7 @@ the suite is flown exactly one way.
 """
 
 import json
+import uuid
 
 import pytest
 
@@ -142,6 +143,33 @@ def test_pause_stops_the_vehicle_and_resume_restreams(monkeypatch, tmp_path) -> 
     assert rig.fly() is MissionState.COMPLETE, rig.mission.reason
 
 
+def test_paused_time_is_excluded_from_every_reported_timestamp(
+        monkeypatch, tmp_path) -> None:
+    """The summary's clock is the one the mission reports elsewhere.
+
+    ``duration_s`` and the ``arrived`` event both come from ``elapsed()``,
+    which stops while the tour is held. The waypoint timestamps were built
+    from the raw clock instead, so a paused flight reported arrivals later
+    than the flight it belonged to had lasted.
+    """
+    rig = Rig(monkeypatch, tmp_path)
+    rig.fly(until=lambda m: m.state is MissionState.FLYING)
+    rig.fly(limit_s=1.0, until=lambda m: False)
+    assert rig.mission.pause()
+    for _ in range(60):        # three seconds of held clock
+        rig.step()
+    assert rig.mission.resume()
+    assert rig.fly() is MissionState.COMPLETE, rig.mission.reason
+
+    summary = rig.summary()
+    arrivals = [entry["arrival_s"] for entry in summary["waypoints"]]
+    assert all(value is not None for value in arrivals)
+    # Every waypoint timestamp lies inside the mission's own duration; before
+    # the fix the pause pushed them past it.
+    assert max(arrivals) <= summary["duration_s"] + 1e-6
+    assert sorted(arrivals) == arrivals
+
+
 # ---------------------------------------------------------------------------
 # Safe outcomes
 # ---------------------------------------------------------------------------
@@ -247,3 +275,69 @@ def test_a_too_slow_setpoint_stream_is_refused_at_preflight(
     assert rig.fly(limit_s=5.0) is MissionState.FAILED
     assert "too slow" in rig.mission.reason
     assert rig.sim.state.control_owner == ""
+
+
+# ---------------------------------------------------------------------------
+# Sharing the vehicle with another commanding client
+# ---------------------------------------------------------------------------
+
+def _also_commanded_by(rig, monkeypatch, *, source: str = "dctl-other"):
+    """Have a second client command the vehicle in the same tick as dway.
+
+    dsim drains its whole command queue before publishing status once, so a
+    second client -- a dctl holding the lease, or one with an input off centre
+    -- lands its command between dway's write and the next publication. That is
+    the real shape of the collision, not an artificial one.
+    """
+    original = rig.transport.write
+
+    def write(payload: str) -> bool:
+        accepted = original(payload)
+        rig.sim.apply_command({"type": "velocity", "source_id": source,
+                               "lease_id": "no-lease", "forward_mps": 0.0,
+                               "request_id": uuid.uuid4().hex})
+        return accepted
+
+    monkeypatch.setattr(rig.transport, "write", write)
+
+
+def test_another_client_commanding_does_not_swallow_an_acknowledgement(
+        monkeypatch, tmp_path) -> None:
+    """The command was accepted, so the client must be told so.
+
+    Before the published result history, the second client's result replaced
+    dway's in the single latest-value slot and dway failed the mission with
+    "control not acquired: acknowledgement timeout" while actually holding the
+    lease -- an armed vehicle under the control of a client that had given up.
+    """
+    rig = Rig(monkeypatch, tmp_path, autostart=False)
+    _also_commanded_by(rig, monkeypatch)
+
+    result = rig.link.acquire_control()
+
+    assert result.accepted, result.reason
+    assert rig.link.owns_control()
+    # The correlation came from the history: the slot had already moved on.
+    assert rig.sim.status_fields()["command.result.request_id"] != result.request_id
+
+
+def test_a_tour_flies_while_another_client_commands(monkeypatch, tmp_path) -> None:
+    rig = Rig(monkeypatch, tmp_path)
+    _also_commanded_by(rig, monkeypatch)
+
+    assert rig.fly() is MissionState.COMPLETE, rig.mission.reason
+    assert rig.summary()["waypoints_reached"] == 2
+
+
+def test_a_refusal_still_reports_why_when_another_client_commands(
+        monkeypatch, tmp_path) -> None:
+    """The history carries the reason, not just the verdict."""
+    rig = Rig(monkeypatch, tmp_path, autostart=False)
+    rig.sim.apply_command({"type": "acquire_control", "source_id": "someone-else",
+                           "lease_id": "their-lease", "request_id": "theirs"})
+    _also_commanded_by(rig, monkeypatch)
+
+    result = rig.link.acquire_control()
+
+    assert not result.accepted
+    assert result.reason == "controlled by someone-else"

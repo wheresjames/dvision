@@ -1,0 +1,8 @@
+{
+  "name": "plane-sweep-default",
+  "algorithm": "plane_sweep",
+  "tour": "assets/tours/maze_012.forward.v1.json",
+  "sensors": ["rgb"],
+  "settings": {"depth_steps": 16, "match_scale": 0.5, "stride": 4,
+               "preview_batch": 2, "preview_interval_s": 0.75}
+}
