@@ -40,12 +40,35 @@ def disable_input_method() -> None:
     os.environ["XMODIFIERS"] = "@im=none"
 
 
-def _read_store() -> dict:
+def _store_path(store):
+    if store == 'window_pos': return _STORE
+    if not re.fullmatch(r'[a-zA-Z0-9_-]+', store): raise ValueError('invalid state store')
+    return _STORE.with_name(store + '.json')
+
+
+def _read_store(store='window_pos') -> dict:
     try:
-        value = json.loads(_STORE.read_text(encoding="utf-8"))
+        value = json.loads(_store_path(store).read_text(encoding='utf-8'))
         return value if isinstance(value, dict) else {}
-    except Exception:
+    except (OSError, ValueError):
         return {}
+
+
+def load_state(store, key):
+    return _read_store(store).get(key)
+
+
+def save_state(store, key, value):
+    """Locked read-modify-write; atomic replacement keeps unlocked readers safe."""
+    path = _store_path(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _LOCK if store == 'window_pos' else path.with_suffix('.lock')
+    with lock_path.open('a+', encoding='utf-8') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        data = _read_store(store); data[key] = value
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(data, indent=2, allow_nan=False), encoding='utf-8')
+        temporary.replace(path)
 
 
 def _valid_geometry(root: Any, geometry: str) -> bool:
@@ -74,12 +97,7 @@ def save_window_geometry(root: Any, key: str) -> None:
         geometry = str(root.wm_geometry())
         if _GEOMETRY_RE.fullmatch(geometry) is None:
             return
-        _STORE.parent.mkdir(parents=True, exist_ok=True)
-        with _LOCK.open("a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            data = _read_store()
-            data[key] = {"geometry": geometry}
-            _STORE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        save_state('window_pos', key, {'geometry': geometry})
     except Exception:
         pass
 
@@ -87,7 +105,7 @@ def save_window_geometry(root: Any, key: str) -> None:
 def restore_window_geometry(root: Any, key: str) -> None:
     """Restore geometry, including compatibility with legacy x/y entries."""
     try:
-        value = _read_store().get(key)
+        value = load_state('window_pos', key)
         if not isinstance(value, dict):
             return
         geometry = value.get("geometry")

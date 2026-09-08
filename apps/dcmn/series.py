@@ -80,9 +80,9 @@ class EnvelopeSeries:
         self._max.append(y)
         self.samples += 1
         if len(self._count) >= self.capacity:
-            self._compress()
+            self.compress()
 
-    def _compress(self) -> None:
+    def compress(self) -> None:
         """Merge adjacent buckets pairwise, halving the series.
 
         Sums and counts are carried rather than means, so a mean taken after

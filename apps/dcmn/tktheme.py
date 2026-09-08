@@ -44,6 +44,10 @@ def apply_theme(root) -> ttk.Style:
                     font=("TkDefaultFont", 11, "bold"))
     style.configure("HeaderDim.TLabel", background=theme.PANEL,
                     foreground=theme.DIM)
+    # Body text sitting directly on a raised panel: same ink as TLabel, but
+    # the panel's ground, so a device pane reads as one surface instead of a
+    # window-coloured strip pasted onto a panel-coloured frame.
+    style.configure("Panel.TLabel", background=theme.PANEL, foreground=theme.TEXT)
 
     style.configure("TButton", background=theme.BUTTON, foreground=theme.TEXT,
                     bordercolor=theme.GRID, lightcolor=theme.GRID,

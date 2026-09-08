@@ -16,7 +16,6 @@ from tkinter import ttk
 _MODULE_STARTED = time.perf_counter()
 
 import numpy as np
-from PIL import Image, ImageTk
 
 # The repository root, two levels up now that the applications live under
 # ``apps/``. ``apps`` itself is a source root rather than a package -- like a
@@ -36,7 +35,9 @@ from dcmn.pacing import PeriodicDeadline, Paced, TEXT_HZ, VIDEO_HZ
 from dcmn.tktheme import apply_theme
 from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
-from dcmn.sensors import open_camera
+from dcmn.sensors import SensorSession
+from dcmn.device_view import (DevicesView, ImageRenderer, device_entries,
+                              open_device, resolve_renderer, stream_stats)
 
 from dvision2_common import (
     controlled_command, load_pymembus, new_control_identity,
@@ -227,6 +228,8 @@ class DroneController:
         self.names = shared_names(args.id)
         self.control_source, self.control_lease = new_control_identity(f"dctl-{args.id}")
         self.video = None
+        self.session = None
+        self.devices_view = None
         self.command = None
         self.status = None
         self.status_epoch = 0
@@ -318,7 +321,10 @@ class DroneController:
         self.video_label = ttk.Label(
             frame, text="waiting for dsim video", anchor="center",
             style="Video.TLabel")
-        self.video_label.pack(fill="both", expand=True)
+        self.video_label.pack(fill="x")
+        self.flight_renderer = ImageRenderer(frame, {})
+        self._startup_renderer = self.flight_renderer
+        self.flight_renderer.cap = (self.args.width or 960, self.args.height or 720)
         ttk.Button(frame, text="Load controls now",
                    command=self._schedule_dashboard).pack(anchor="e", pady=(8, 0))
 
@@ -342,6 +348,10 @@ class DroneController:
     def _finish_window(self) -> None:
         if not self.running:
             return
+        # The dashboard is built exactly once: update_video() schedules this
+        # while the first frame is still up, and a second build would orphan
+        # the first dashboard's widgets behind a live second copy of the UI.
+        self._dashboard_scheduled = True
         stage_started = time.perf_counter()
         width = max(1, self.root.winfo_width())
         height = max(1, self.root.winfo_height())
@@ -352,8 +362,8 @@ class DroneController:
         dashboard.place(x=-width * 2, y=0, width=width, height=height)
         self.build_ui(dashboard)
         dashboard.update_idletasks()
-        if self.photo is not None:
-            self.video_label.configure(image=self.photo, text="")
+        self.last_video_seq = -1
+        self.update_video()
         dashboard.place_configure(x=0, y=0, relwidth=1, relheight=1,
                                   width=0, height=0)
         dashboard.lower(self._startup_frame)
@@ -368,6 +378,7 @@ class DroneController:
         if not self.running:
             return
         self._dashboard_host.lift()
+        self._startup_renderer.destroy()
         self._startup_frame.destroy()
         self._ui_ready = True
         self._trace(
@@ -469,6 +480,12 @@ class DroneController:
         body = ttk.Frame(self.notebook, padding=(12, 12, 12, 12))
         self.flight_page = body
         self.notebook.add(body, text='Flight')
+        if self.session is not None:
+            self.devices_view = DevicesView(self.notebook, self.session,
+                self.args.devices.split(',') if self.args.devices else (),
+                layout_name=getattr(self.args, 'layout', None),
+                status_values=self.status_values)
+            self.notebook.add(self.devices_view.page, text='Devices')
         self.event_viewer = EventViewer(self.notebook, self.args.id)
         self.notebook.add(self.event_viewer.page, text='Events')
         self.notebook.bind('<<NotebookTabChanged>>', lambda _e: self.held.clear())
@@ -482,10 +499,17 @@ class DroneController:
         video_area.columnconfigure(0, weight=1)
         video_area.rowconfigure(0, weight=1)
 
-        self.video_label = ttk.Label(
-            video_area, text="waiting for video", anchor="center",
-            style="Video.TLabel")
-        self.video_label.grid(row=0, column=0, sticky="nsew")
+        image_area = ttk.Frame(video_area)
+        image_area.grid(row=0, column=0, sticky='nsew')
+        self.camera_choice = tk.StringVar(value=self.args.camera or '')
+        self.camera_selector = ttk.Combobox(image_area, textvariable=self.camera_choice, state='readonly')
+        self.camera_selector.pack(fill='x')
+        self.camera_selector.bind('<<ComboboxSelected>>', self._select_camera)
+        self.video_label = ttk.Label(image_area, text='waiting for video', anchor='center', style='Video.TLabel')
+        self.video_label.pack(fill='x')
+        self.flight_renderer = ImageRenderer(image_area, {})
+        self.flight_renderer.cap = (self.args.width or 960, self.args.height or 720)
+        self.last_video_seq = -1
 
         side = ttk.Frame(body, padding=(12, 0, 0, 0))
         side.grid(row=0, column=1, sticky="ns")
@@ -759,11 +783,46 @@ class DroneController:
         if now - self._last_open_attempt < 0.5:
             return
         self._last_open_attempt = now
-        if self.video is None:
-            vid = open_camera(self.args.id)
-            if vid is not None:
-                self.video = vid
+        if not self.args.no_sensors:
+            if self.session is None:
+                self.session = SensorSession(self.args.id,
+                    cache_bytes=int(self.args.sensor_cache_mb * 1048576))
+                self.sensor_intake = self.session.intake
+            self.session.connect()
+            primary = self.session.manifest.get('primary_camera')
+            required = getattr(self, '_primary_video', None)
+            if required is not None and required.selected != primary:
+                required.required = False
+                self.session.release(required.selected); self._primary_video = None
+            if getattr(self, '_primary_video', None) is None and primary in self.session.devices:
+                self._primary_video = self.session.open(primary, required=True)
+            selected = self.args.camera or primary
+            sources = device_entries(self.session)
+            if hasattr(self, 'camera_selector'):
+                self.camera_selector['values'] = [sid for sid, entry in sources.items() if entry['transport'] == 'video']
+                self.camera_choice.set(selected or '')
+            if self.video is not None:
+                # A profile Apply can remove the selected camera or change a
+                # stereo group's membership: the stream it left behind is dead
+                # even though the selection itself did not change.
+                members = tuple(sources[selected].get('members', ())) if selected in sources else ()
+                if (self.video.selected != selected or selected not in sources
+                        or sources[selected]['transport'] != 'video'
+                        or tuple(getattr(self.video, 'members', ())) != members):
+                    self.video.close()
+                    self.video = None
+            if (self.video is None and selected in sources
+                    and sources[selected]['transport'] == 'video'):
+                self.video = open_device(self.session, selected, required=selected == primary,
+                    accounting='from_generation' if selected == primary else 'from_attach')
+                self.last_video_seq = -1
                 self.log("video connected")
+            if self.devices_view is None and hasattr(self, 'notebook'):
+                self.devices_view = DevicesView(self.notebook, self.session,
+                    self.args.devices.split(',') if self.args.devices else (),
+                    layout_name=getattr(self.args, 'layout', None),
+                    status_values=self.status_values)
+                self.notebook.insert(1, self.devices_view.page, text='Devices')
         if self.command is None:
             cmd = pm.memcmd()
             if cmd.open(self.names["command"], self.args.cmd_size):
@@ -798,6 +857,8 @@ class DroneController:
         # capped -- send_held_velocity() shares this timer, and throttling it
         # would throttle manual flight.
         self._maintain_control()
+        if self.session is not None:
+            self.session.poll()
         if self._paint_video.due():
             self.update_video()
         if self._paint_text.due():
@@ -808,14 +869,18 @@ class DroneController:
             self._handle_joy_buttons()
             self._update_joy_legend()
             self.send_held_velocity()
+        if self.devices_view is not None:
+            self.devices_view.update(self.notebook.select() == str(self.devices_view.page))
         current = time.monotonic()
         self._tick_cadence.advance(current)
         self.root.after(self._tick_cadence.delay_ms(current), self.tick)
 
+    def status_values(self) -> dict:
+        return {} if self.status is None else self.status.getAll()
+
     def _sim_time(self) -> float:
         try:
-            return float(({} if self.status is None else self.status.getAll()).get(
-                "sim.time_s", 0.0))
+            return float(self.status_values().get("sim.time_s", 0.0))
         except (TypeError, ValueError):
             return 0.0
 
@@ -1015,23 +1080,60 @@ class DroneController:
             parts.append("status=stale")
         self.conn_var.set("  ".join(parts))
 
+    def _select_camera(self, event=None):
+        self.args.camera = self.camera_choice.get()
+        self._last_open_attempt = -1e9
+        self.open_missing()
+        self.last_video_seq = -1
+        self.update_video()
+
+    def _flight_renderer(self, entry) -> ImageRenderer:
+        """Flight runs the bench renderers; a stereo source needs its own."""
+        wanted = resolve_renderer(entry.get('type', 'camera.rgb'))
+        if type(self.flight_renderer) is not wanted:
+            previous = self.flight_renderer
+            renderer = wanted(previous.widget.master, entry)
+            renderer.cap = previous.cap
+            renderer.set_options({k: v for k, v in previous.options.items() if k in renderer.options})
+            previous.destroy()
+            self.flight_renderer = renderer
+            if getattr(self, '_startup_renderer', None) is previous:
+                self._startup_renderer = renderer
+        return self.flight_renderer
+
     def update_video(self) -> None:
         if self.video is None:
+            message = 'sensors disabled' if self.args.no_sensors else 'waiting for camera'
+            if self.session is not None and self.session.manifest:
+                message = 'selected camera unavailable' if self.args.camera else 'no primary camera'
+            self.photo = None
+            if hasattr(self, 'flight_renderer'): self.flight_renderer.clear()
+            self.video_label.configure(image='', text=message)
+            if self.args.no_sensors or (self.session is not None and self.session.manifest):
+                self._schedule_dashboard()
+            return
+        if hasattr(self, 'notebook') and self._ui_ready and self.notebook.select() != str(self.flight_page):
             return
         seq = self.video.getSeq()
         self.intake.note_sequence(seq)
-        self.sensor_intake.track(self.video)
-        if seq == self.last_video_seq or seq <= 0:
+        if seq <= 0:
+            self.photo = None
+            self.flight_renderer.clear()
+            self.video_label.configure(image='', text='waiting for matched camera frame')
+            return
+        if seq == self.last_video_seq:
             return
         self.last_video_seq = seq
-        slot  = self.video.getPtr(-1)
-        frame = _client_rgb_frame(np.array(self.video[slot], copy=False))
-        image = Image.fromarray(frame, "RGB")
-        max_w = self.args.width or self.video.getWidth()
-        max_h = self.args.height or self.video.getHeight()
-        image.thumbnail((max_w, max_h))
-        self.photo = ImageTk.PhotoImage(image)
-        self.video_label.configure(image=self.photo, text="")
+        sample = self.video.latest
+        renderer = self._flight_renderer(self.video.entry)
+        renderer.draw(sample)
+        self.photo = renderer.photo
+        stat = stream_stats(self.session.report(), self.video)
+        rate = '?' if stat['achieved_hz'] is None else f"{stat['achieved_hz']:.1f}"
+        frame = sample.image if sample.image is not None else next(iter(sample.fields.values()), None)
+        text = (f"{self.video.selected} · {frame.shape[1]}×{frame.shape[0]} · {rate}/{self.video.getFps():g} Hz (sim)"
+                if frame is not None else 'waiting for matched camera frame')
+        self.video_label.configure(image='', text=text)
         if not self._ui_ready:
             # Preserve the first frame long enough to be visibly presented;
             # only then realize the larger controls/telemetry dashboard.
@@ -1142,11 +1244,18 @@ class DroneController:
             self.joy.close()
             if getattr(self, 'event_viewer', None) is not None:
                 self.event_viewer.close()
+            if self.devices_view is not None:
+                # Shutdown must complete even if the stored record is not
+                # writable: report it and keep closing everything else.
+                try: self.devices_view.save()
+                except (OSError, ValueError, TypeError) as exc: self.log(f'could not save device layout: {exc}')
             self.module_bus.close()
-            for handle in (self.status, self.command, self.video):
+            for handle in (self.status, self.command, self.session):
                 if handle is not None:
                     handle.close()
             save_window_pos(self.root, f"dctl.{self.args.id}")
+            if hasattr(self, 'flight_renderer'): self.flight_renderer.destroy()
+            if hasattr(self, '_startup_renderer'): self._startup_renderer.destroy()
             self.root.destroy()
 
 
@@ -1245,9 +1354,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--vertical-speed", type=float, default=1.0)
     parser.add_argument("--no-joystick",  action="store_true",
                         help="disable joystick/gamepad support")
+    parser.add_argument("--layout", help="named device layout (default: profile name)")
+    parser.add_argument("--camera", help="Flight camera id (default: manifest primary)")
+    parser.add_argument("--devices", default="", help="comma-separated device ids to open")
+    parser.add_argument("--no-sensors", action="store_true", help="disable sensor discovery and video")
+    parser.add_argument("--sensor-cache-mb", type=float, default=64., help="sensor cache ceiling in MiB")
     parser.add_argument("--verbose",      action="store_true")
     args = parser.parse_args(argv)
     validate_id(args.id)
+    if not np.isfinite(args.sensor_cache_mb) or args.sensor_cache_mb <= 0:
+        parser.error("--sensor-cache-mb must be positive and finite")
     return args
 
 

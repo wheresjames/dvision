@@ -28,7 +28,10 @@ def test_no_window_module_spells_a_colour_out_by_hand(module: str) -> None:
 
 
 def test_every_palette_entry_is_a_colour() -> None:
-    names = [name for name in dir(theme) if name.isupper()]
+    # A ``*_LUT`` is a 256-colour table (DV-DCTL §6), not a palette entry;
+    # its own test covers its shape and range.
+    names = [name for name in dir(theme)
+             if name.isupper() and not name.endswith("_LUT")]
     assert len(names) > 20
     for name in names:
         value = getattr(theme, name)

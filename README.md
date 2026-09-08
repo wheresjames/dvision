@@ -6,21 +6,29 @@ contains:
 - `dsim`: a Python/Panda3D drone simulator, with a simulated environment --
   GPS quality, estimator validity, wind, telemetry latency, sensor noise,
   battery and geofence -- that can be changed while it flies
-- `dctl`: a manual keyboard/gamepad controller
+- `dctl`: a manual keyboard/gamepad controller, and the device browser that
+  shows what the vehicle's sensors are actually producing
 - `daic`: a vision-driven autonomy controller
 - `dway`: the autopilot client, which flies a waypoint tour and reports on it
-- `dcmn`: what the windows share -- one palette, one drawing of a map
+- `dalg`: the algorithm demonstrator, which scores a mapping algorithm's
+  occupancy grid against ground truth over a repeatable tour
+- `dfgb`: a FlightGear bridge that stands in for `dsim` behind the same
+  buffers -- a work in progress
+- `dcmn`: what the windows share -- one palette, one drawing of a map, one
+  device browser
 
 The processes communicate through shared-memory video, command, and status
 buffers. The current autonomy work is intentionally centered on what a real
 camera client would have: the live video stream and the status/telemetry
-buffer. `daic` must not use simulator map data for navigation decisions.
+buffer.
 
 The project is meant for fast local iteration. The simulator is small enough
 to read, the command protocol is JSON over `pymembus` shaped so every message
 maps onto a MAVLink one, and the autonomy stack is split into detector,
 planner, avoidance, local mapping, and control layers so each piece can be
 tested or replaced independently.
+
+![dctl device layout](images/dctl-002.png)
 
 ## Contents
 
@@ -33,6 +41,7 @@ tested or replaced independently.
 - [AI Controller: daic](#ai-controller-daic)
 - [Waypoint Navigation: dway](#waypoint-navigation-dway)
 - [Vision Navigation](#vision-navigation)
+- [Algorithm Demonstrator: dalg](#algorithm-demonstrator-dalg)
 - [Automated Testing and Diagnostics](#automated-testing-and-diagnostics)
 - [Maps](#maps)
 - [Shared Memory Protocol](#shared-memory-protocol)
@@ -40,30 +49,48 @@ tested or replaced independently.
 - [Rendering and Assets](#rendering-and-assets)
 - [Development Notes](#development-notes)
 - [Known Limitations](#known-limitations)
+- [Comparison to Similar Projects](#comparison-to-similar-projects)
 
 ## Project Layout
 
 ```text
 dvision2_common.py          Shared protocol, map loading, ids, status keys
-OVERVIEW.md                 Architecture and API reference
+compare.py                  Offline comparison of dalg summaries across runs
 docs/
   clock.md                  Simulated vs wall time, module sync, and the failure modes
   modcom.md                 Module communication: the four shared-memory planes
+  membus.md                 The shared-memory buffer inventory and payloads
   reports.md                Report layout: who owns what, and the rules
+  recovery.md               How a module recovers from a reset, restart or profile change
   sensors-protocols.md      Sensor configuration and the protocols behind it
+  dctl-devices.md           The dctl device browser: intake, layout, renderers
   sensor/                   One document per simulated sensor type, plus the
                             rules they share
   mavlink-slam-nav.md       The reference architecture the vehicle seam borrows from
 
-apps/                       The seven applications. A source root rather than
-                            a package, like src/: they import each other as
-                            `dsim.dsim` and `dcmn.window`, never `apps.dsim`
+scripts/
+  build_sensor_pymembus.py  Build the byte-safe pymembus binding locally
+  install_dalg_depth_model.py  Download, export and install dalg's depth ONNX model
+
+apps/                       The six applications and the view layer they share.
+                            A source root rather than a package, like src/:
+                            they import each other as `dsim.dsim` and
+                            `dcmn.window`, never `apps.dsim`
   dcmn/
     theme.py                  The one dvision2 colour palette
     tktheme.py                That palette applied to ttk, shared by every window
     mapview.py                Top-down map and vehicle drawing, shared by every view
     pacing.py                 Repaint caps, so a window never paces control
+    window.py                 Window geometry persistence and the input-method opt-out
     sensors.py                Sensor discovery, record wire format, camera intake
+    device_view.py            The Devices tab: tree, pane grid, and every renderer
+    device_export.py          Pane snapshot PNG and JSON/CSV sample dumps
+    layout.py                 The pane grid: placement, spans, repair, persistence
+    series.py                 Min/max envelope series, so a 100 Hz sensor plots cheaply
+    module_bus.py             Module presence and run coordination over pymembus
+    event_viewer.py           The Events tab: passive, bounded event-bus inspection
+    health.py                 The one health vocabulary: wanted against achieved, graded
+    report_html.py            The page a report is written on, whatever it is about
 
   dsim/
     dsim.py                   Simulator: physics, rendering, IPC server, UI
@@ -77,9 +104,12 @@ apps/                       The seven applications. A source root rather than
     scroll.py                 Scrollable form viewport and popup, shared by the tabs
     range.py                  Shared ray geometry and the exact range oracle
     depth_probe.py            Measured selection of the exact-range backend
+    state_sensors.py          GNSS, IMU, barometer, magnetometer, thermometer models
     realism.py                GPS, estimators, wind, latency, noise, battery, geofence
     realism_panel.py          The Realism tab: those settings, changeable in flight
+    health.py                 Whether simulated time and every attached module keep up
     scene.py                  Renderer appearance presets
+    range_backend.v1.json     The measured exact-range backend choice, committed
 
   dctl/
     dctl.py                   Manual controller UI
@@ -111,6 +141,7 @@ apps/                       The seven applications. A source root rather than
     dalg.py                   Algorithm demonstrator: window, profiles, headless
     run.py                    Observer lifecycle and the run-coordination barrier
     profiles.py               Profile load/save; the set lives in assets/profiles/
+    model.py                  Pose, Frame and Result: what an algorithm sees and returns
     algo/                     One module per algorithm, plus the two controls
     grid.py                   Occupancy and log-odds grids
     truth.py                  Ground truth rasterised from the map
@@ -121,6 +152,7 @@ apps/                       The seven applications. A source root rather than
 
   dfgb/
     dfgb.py                   FlightGear bridge, a work in progress
+    protocols/                The FlightGear property-tree protocol XML it installs
 
 assets/                       Shared fixture data (not owned by one consumer)
   maps/                       Text map files
@@ -128,6 +160,7 @@ assets/                       Shared fixture data (not owned by one consumer)
   models/trees/               CC0 tree GLB models
   tours/                      Committed benchmark tours and their diagnostics
   profiles/                   Committed dalg algorithm profiles
+  drone_profiles/             Committed vehicle hardware profiles, sensors and all
   planner_queries/            Committed planner start/goal sidecars
 
 dtest/
@@ -142,6 +175,7 @@ dtest/
   assertions.py             High-level assertions with failure artifacts
   artifacts.py              Failure bundles (frames, timeline, path plot)
   backend.py                Normalized vehicle-backend protocol
+  tkfixture.py              Withdrawn Tk roots, and the opt-in for mapped ones
   preflight.py              Dependency preflight for the test groups
 
 tests/
@@ -156,6 +190,14 @@ tests/
   test_dsim_realism_controls.py  Changing the environment while the sim runs
   test_dcmn_mapview.py      Shared map geometry, both drawing backends
   test_dcmn_theme.py        One palette, and no module keeping its own copy
+  test_dcmn_device_view.py  Renderers, pane grid, freeze, export, pop-out
+  test_dcmn_layout.py       Grid placement, spans and record repair
+  test_dcmn_session.py      Sensor intake, caching and accounting
+  test_dctl_devices.py      The Devices tab inside a real dctl window
+  test_sensor_*.py          Sensor contract, geometry, state, stereo, health, release
+  test_dalg_*.py            Algorithm core, scoring, profile editor, real-process run
+  test_module_bus.py        Module presence, run coordination and shutdown
+  test_event_viewer.py      Bounded event history, filters and eviction
   test_dvision_wall_clock_independence.py  Nothing depends on how busy the machine is
   test_dvision_sim_speed_conformance.py  The same tour flown at two speeds, and the same report
   test_dtest_harness.py     The suite's own invariants, including staying off screen
@@ -413,7 +455,7 @@ Options:
 |---|---|
 | `--id` | Required instance id |
 | `--map` | Map file to load |
-| `--drone-profile` | Built-in profile name or JSON path; omitted resolves the built-in default. The profile is the vehicle's simulated hardware: every sensor with its model, rate and mount pose, the mount/PTZ tree they hang from, and the 300 Hz physics cadence. `stereo-nav-and-proximity` is the committed reference with a PTZ-mounted stereo pair, both LiDAR outputs and three rangefinders. See [DV-SENSORS.md](DV-SENSORS.md) |
+| `--drone-profile` | Built-in profile name or JSON path; omitted resolves the built-in default. The profile is the vehicle's simulated hardware: every sensor with its model, rate and mount pose, the mount/PTZ tree they hang from, and the 300 Hz physics cadence. `stereo-nav-and-proximity` is the committed reference with a PTZ-mounted stereo pair, both LiDAR outputs and three rangefinders. See [docs/sensor/README.md](docs/sensor/README.md) |
 | `--sim-speed` | Advance simulated time at this multiple of real time, or `max` for no pacing. Omitted means real time, which is never made to wait. Changeable while running, from the monitor's header |
 | `--cmd-size` | Command buffer size in bytes |
 | `--start-alt` | Override initial altitude; otherwise map `drone-height` or `1.5` |
@@ -689,7 +731,9 @@ module writes, and the rules a new module follows.
 ![dctl showing the camera feed, controls, and keyboard legend](images/dctl-001.png)
 
 `dctl` is the manual pilot. It displays the camera feed and sends velocity,
-arm, takeoff, land and zero commands.
+arm, takeoff, land and zero commands. It has three tabs: **Flight** is the
+pilot, **Devices** browses every sensor the vehicle publishes, and **Events**
+watches the module bus.
 
 ```sh
 python3 apps/dctl/dctl.py --id area1 \
@@ -703,12 +747,17 @@ Options:
 | Option | Description |
 |---|---|
 | `--id` | Required instance id |
-| `--width`, `--height` | Maximum displayed video size |
+| `--width`, `--height` | Maximum displayed Flight video size |
 | `--fps` | Control tick rate. Painting is capped separately: 30 Hz video, 4 Hz text |
 | `--cmd-size` | Command buffer size |
 | `--speed` | Horizontal speed sent to dsim in m/s |
 | `--vertical-speed` | Vertical speed sent to dsim |
 | `--no-joystick` | Disable gamepad polling |
+| `--camera` | Flight video device; the manifest's primary by default |
+| `--devices` | Comma-separated device ids to open in the Devices tab at start |
+| `--layout` | Named device layout to restore; the profile name by default |
+| `--sensor-cache-mb` | Sensor cache ceiling in MiB, default 64 |
+| `--no-sensors` | Disable sensor discovery, video and the Devices tab |
 | `--verbose` | Log commands to stdout |
 
 Keyboard controls:
@@ -763,6 +812,99 @@ sending velocity -- all keys released, no stick input -- lets the vehicle fall
 into `HOLD` after `--setpoint-timeout` seconds. That is the intended behaviour:
 a heartbeat deliberately keeps the lease alive without keeping a stale setpoint
 alive. `dctl` holds its last velocity only while an input is actually held.
+
+### Devices tab
+
+The reference vehicle publishes twelve devices of eleven types through one
+discovery registry, and the Flight tab looks at one of them. The **Devices**
+tab is the window that answers "what is this vehicle actually seeing right
+now" (pictured at the top of this file). It is driven entirely by the
+published `sensors.manifest`, so a sensor type added to `dsim` appears here
+without `dctl` being edited.
+
+The tree on the left mirrors the profile's mount/PTZ component tree, with a
+health dot per device. Drag a row onto a grid cell to open a pane in exactly
+that cell, replacing whatever pane stood there; the check mark is an
+indicator, not a control. Panes tile, span and resize: drag a pane's title
+onto another to swap them, drag its bottom-right handle to extend its row and
+column span, drag the sashes to change proportions, or tick **Arrange** to
+edit the grid skeleton itself with **+ Row** / **+ Col** and their removals.
+
+Each pane's header carries three small discs, sized and packed so a pane
+squeezed narrow clips its own name rather than losing its controls:
+
+| Disc | Action |
+|---|---|
+| **i** | Swap the graphic for the pane's text readout, and back |
+| **❄** | Freeze this pane alone; intake keeps draining behind it |
+| **×** | Close the pane, which unchecks the device |
+
+The readout replaces the graphic rather than sharing the cell with it: a
+health dot, achieved against configured rate in simulated Hz, sample time,
+capture id, the sequence the pane attached at, gaps, association and late
+drops, plus whatever the renderer has to say about the sample. The choice
+persists with the pane.
+
+What each device class draws:
+
+- **Cameras** -- the frame, fit to `contain`, `cover` or `native` pixels, with
+  resolution, calibrated fields of view and capture pose in the readout.
+- **Stereo pairs** -- a `sync_group` of exactly two cameras appears as one
+  `stereo:<group>` device, composed only from frames sharing a `capture_id`,
+  as `side-by-side`, `anaglyph` or `difference`.
+- **Scanning LiDAR** -- calibrated rays and range rings coloured by
+  confidence, forward-up or north-up, automatic or manual range scale.
+- **Range images** -- a fixed viridis ramp over the sensor's configured metre
+  range, or the diverging confidence ramp; invalid cells grey, nearest-neighbour
+  resizing, and hover reporting the original cell's range.
+- **Rangefinders** -- metres, a gauge, and a 10/30/60-second strip chart;
+  invalid samples say **no return** and disable the gauge.
+- **IMU** -- angular rate and specific force as three-axis envelope charts
+  sharing one time axis, so a 100 Hz sensor stays affordable at a 4 Hz paint.
+- **GNSS** -- the fix state as one of three distinct failures, quality,
+  position, NED velocities, and a north/east error scatter: a blue dot per
+  envelope bucket at its mean error with a grey box over that bucket's
+  observed min/max, so drift has a visible shape.
+- **Barometer and thermometer** -- value, units and strip chart.
+  **Magnetometer** -- a full compass rose, since a heading that wraps makes a
+  line plot noise.
+
+**Freeze all** holds every visible pane at one shared `capture_id` so they
+show the same simulated instant; untick **Sync captures** to hold each pane at
+its own newest record instead. Right-click a pane to pop it out into its own
+window, or to export: **Snapshot PNG** rasterizes the displayed graphic with
+its readout, **Dump JSON**/**Dump CSV** write the samples behind it into the
+run's report directory. The bench -- cells, spans, sash weights and each
+renderer's options -- persists per profile name in
+`~/.config/dvision2/device_layouts.json`, and a popped-out window's geometry
+in `window_pos.json` beside it.
+
+Painting is budgeted, never gating: image panes share 30 Hz between them, text
+panes repaint at 4 Hz, and a pane showing its text body drops out of the video
+budget entirely. [`docs/dctl-devices.md`](docs/dctl-devices.md) is the full
+contract -- intake and accounting, the renderer contract, stereo pairing,
+freeze invalidation and the measured speed ceiling.
+
+### Events tab
+
+The **Events** tab is a passive reader of the instance's module bus
+(`/dvision2.<id>.events`). It registers as an observer and never publishes, so
+watching a run cannot change it.
+
+Rows arrive in order with their local arrival time, source, event type, run id
+and a payload summary; selecting one shows the decoded envelope and payload
+beneath. The three entry fields filter by substring on source, type and run
+id. **Hide heartbeats** and **Hide sensor health** are on by default, because
+otherwise the once-a-second traffic buries everything else. **Pause display**
+freezes painting while collection continues. **Auto-follow** sticks to the
+newest row and switches itself off the moment you scroll or arrow away, so the
+next paint does not snap the view back.
+
+History is bounded -- 1000 rows or 4 MiB, whichever comes first, oldest
+evicted -- and the status line reports exactly where the losses were: shown
+against retained, total received, reader overruns on the bus, and rows
+discarded locally. [`docs/membus.md`](docs/membus.md) and
+[`docs/modcom.md`](docs/modcom.md) describe what the events themselves mean.
 
 ## AI Controller: daic
 
@@ -1204,12 +1346,88 @@ It does not inject lateral movement or yaw. It only trims forward speed when
 front-sector risk is high. That keeps steering under the route planner while
 still reducing forward motion into detected obstacles.
 
+## Algorithm Demonstrator: dalg
+
+`dalg` answers a narrow question: given the same flight, how well does a
+mapping algorithm reconstruct the world? It attaches to a running `dsim`,
+observes the sensors its profile asks for while `dway` flies a tour, builds an
+occupancy grid, and scores that grid against ground truth rasterised from the
+map.
+
+```sh
+python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_020.txt &
+python3 apps/dalg/dalg.py --id area1 \
+        --profile assets/profiles/optical-flow-maze020.json &
+python3 apps/dway/dway.py --id area1 --no-ui --exit-on-finish \
+        --tour assets/tours/maze_020.default.v1.json \
+        --wait-for algorithm:optical-flow-maze020
+```
+
+Options:
+
+| Option | Description |
+|---|---|
+| `--id` | Instance id of the simulator to observe |
+| `--profile` | Committed profile name or JSON path |
+| `--no-ui` | Run headless; the report is still written |
+| `--timeout` | Seconds to wait for the run before giving up, default 180 |
+| `--edit` | Open the profile editor instead of running |
+
+A **profile** is one flat, diffable JSON object: the algorithm to run, the
+tour it expects, the sensors it wants, and the algorithm's own settings. It
+carries a digest, so a report names the exact configuration it was produced
+by. The committed set lives in `assets/profiles/` beside the maps and tours,
+because that is what a profile is -- fixture data, owned by no consumer.
+
+`dalg` registers on the module bus as `algorithm`, which is the role
+`dway --wait-for` names; see
+[Waiting for other modules](#waiting-for-other-modules) for why the barrier
+matters and why `--wait-for dalg` never matches. A profile naming a different
+tour than the one being flown rejects the run outright rather than quietly
+measuring the wrong flight.
+
+The algorithms live one to a module under `apps/dalg/algo/`:
+`sgbm` and `plane_sweep` from a stereo pair, `feature_triangulation` and
+`optical_flow_triangulation` from a moving monocular camera, `ground_plane`
+from camera geometry, and `monocular_depth` from an ONNX metric-depth model
+(installed by `scripts/install_dalg_depth_model.py`). Two of them are not
+algorithms but controls: `constant` predicts one probability everywhere and is
+the floor any real result must clear, and `exact_range` is an oracle built
+from the truth grid -- the ceiling, not a simulated sensor. A result that
+cannot beat `constant` has measured nothing.
+
+Scoring covers only the cells the flight *could* have seen. `dalg.visibility`
+builds a deliberately generous mask -- ever within the camera's horizontal
+field of view, in range, and not behind a wall -- because charging an
+algorithm for rooms the vehicle never flew past flatters the controls and
+buries the difference between the real algorithms. Within that mask,
+`summary.json` reports occupied and free IoU with occupied precision and
+recall, coverage (how much of the region the algorithm committed to at all),
+a Brier score over the probabilities, and a hallucination rate: free truth
+cells predicted occupied.
+
+The run writes into the shared report tree at `reports/<id>/<run>/dalg/` --
+`summary.json`, per-algorithm overlay and raw prediction images, the scored
+region, `events.jsonl` and an HTML report. `compare.py` reads those summaries
+offline to put several runs beside each other. An aborted run still writes its
+report, marked `partial` with the reason.
+
 ## Automated Testing and Diagnostics
 
 Run all tests:
 
 ```sh
 pytest -q
+```
+
+`pytest -q` never opens a window on your desktop: widget tests run on a
+withdrawn root, and the few device-browser tests that genuinely need a
+*mapped* toplevel — freeze, pop-out and keyboard-focus delivery — take their
+headless halves instead. Set `DVISION2_GUI_TESTS=1` to exercise those widget
+halves on a real display:
+
+```sh
+DVISION2_GUI_TESTS=1 pytest -q tests/test_dcmn_device_view.py tests/test_dctl_devices.py
 ```
 
 Install and verify the pinned vision-test environment:
@@ -1740,47 +1958,234 @@ python3 tests/flight_test.py --map assets/maps/maze_002.txt --duration 20 --fps 
 python3 tests/vision_debug_report.py /tmp/maze002.jsonl
 ```
 
-## Known Limitations
+## Comparison to Similar Projects
 
-- DAIC navigation is still experimental. It can build a local map from vision,
-  but route quality in mazes is still being tuned.
-- Monocular optical-flow range is approximate. It depends on forward motion,
-  texture, camera geometry, and filtering. It is useful for local planning but
-  should not be treated as metric depth with sensor-grade accuracy.
-- Mini-SLAM and optical flow can produce intermittent obstacle detections on
-  low-texture surfaces or during rapid yaw.
-- ORB_SLAM3 support is optional and depends on external native bindings and a
-  vocabulary file.
-- The command protocol is project JSON over `pymembus`, not MAVLink. It is
-  shaped so that every message maps one-for-one onto a MAVLink one
-  ([MAVLink mapping](#mavlink-mapping)), but nothing here has been tested
-  against a real autopilot, and passing against `dsim` says nothing about
-  passing against ArduPilot. The seam that would make that testable is
-  `VehicleLink`; the bridge that would earn the claim does not exist yet.
-- `dsim` does not store missions or fly `AUTO`. `dway` sequences waypoints off
-  the vehicle, which is what works across a simulator and a real vehicle alike,
-  and the mission-upload handshake is deliberately not implemented.
-- Physics and collision are simplified. Wind is an environment, not
-  aerodynamics -- see [Development Notes](#development-notes).
-- A time-scaled run is repeatable, not deterministic. `--sim-speed` fixes the
-  timestep, which removes the load-dependent jitter real time has, but without
-  a tick barrier the interleaving of client commands against simulator ticks
-  still varies between runs. Consumers also sample less of a fast run than a
-  slow one, because each polls on its own wall clock -- see
-  [Running faster than real time](#running-faster-than-real-time).
-- `dsim` accepts position and velocity setpoints but not attitude ones; nothing
-  in the project needs that rung of the ladder.
-- One vehicle per instance. Buffer names are per-`--id`, so two vehicles means
-  two `dsim` processes.
-- Obstacle avoidance lives in `daic` and nowhere else. `dway` flies the tour it
-  was given: preflight refuses a leg that passes through map geometry, and
-  nothing dodges anything in the air.
-- The simulator world is a local test scene, not a photorealistic environment.
-- Asset licensing depends on files under `assets`; keep `SOURCE.md` notes
-  beside imported assets.
-- The committed tours under `assets/tours/` are retained for waypoint work.
-  The `strafe` and `yaw_only` fixtures are human-curated; `forward`, `orbit`,
-  `boustrophedon` and `stop_and_stare` are generated, clearance-checked, and
-  carry committed geometry diagnostics in `assets/tours/diagnostics.v1.json`,
-  but have not been reviewed by a human.
+Several projects overlap with parts of `dvision2`, and none overlaps with all
+of it: `dsim` is a simulator, `dctl` is an operator window, `dway` is an
+autopilot client and `dalg` is a scoring harness, and the honest comparison is
+different for each. The short version is that `dvision2` is not competing with
+the flight-stack simulators. It is a fast, legible stand-in for a vehicle,
+built for developing the *client* -- the perception or navigation code that
+consumes video and telemetry -- and it gives up real flight dynamics and real
+MAVLink to be that.
 
+### PX4 and ArduPilot SITL
+
+[PX4](https://github.com/PX4/PX4-Autopilot) and
+[ArduPilot](https://github.com/ArduPilot/ardupilot) compile the actual
+autopilot firmware for the host and fly a simulated airframe under it, paired
+with Gazebo, jMAVSim or ArduPilot's own built-in physics, and driven by
+QGroundControl or Mission Planner. This is the production stack: the same
+firmware runs on the real vehicle.
+
+**Key differences:**
+
+- The autopilot is real. `dsim` is not one -- it accepts position and velocity
+  setpoints and integrates them, with no attitude controller, no mixer and no
+  estimator underneath. Anything you learn about control-law behaviour in
+  `dsim` says nothing about the real thing.
+- MAVLink is the protocol, and the entire ground-station, companion-computer
+  and log ecosystem speaks it. `dvision2` speaks JSON over `pymembus`, shaped
+  so every message maps onto a MAVLink one, but nothing here has been tested
+  against a real autopilot.
+- SITL has hardware-in-the-loop, mission upload and `AUTO`, failsafe suites,
+  parameter systems, log analysis and a very large community. `dvision2` has
+  none of that ecosystem.
+- PX4's lockstep SITL steps the simulator and the autopilot together.
+  `dvision2` reaches a similar place from the other direction: simulated time
+  is the vehicle's clock everywhere, and a conformance test flies one tour at
+  two speeds and compares the two reports.
+- A SITL toolchain plus Gazebo is a substantially larger thing to install and
+  keep working than five pip packages.
+
+**Choose PX4 or ArduPilot SITL if** anything you are building will eventually
+fly on a real vehicle, if you need MAVLink compatibility, or if the control
+stack itself is what you are working on.
+
+**Choose dvision2 if** you are developing a client rather than a vehicle, and
+you want the vehicle to be a cheap, readable stand-in whose GPS quality,
+estimator validity, wind, telemetry latency and sensor noise you can change
+while it is flying.
+
+### AirSim and Colosseum
+
+[AirSim](https://github.com/microsoft/AirSim) was the sensor-rich,
+Unreal-rendered drone and car simulator with an RPC client API. Microsoft
+archived it in 2022; [Colosseum](https://github.com/CodexLabsLLC/Colosseum) is
+the community fork that carried it to Unreal Engine 5.
+
+**Key differences:**
+
+- Photorealistic Unreal rendering against a deliberately plain Panda3D test
+  scene. If an algorithm's performance depends on image realism, this is the
+  difference that matters, and `dvision2` will mislead you.
+- Full multirotor dynamics, with an optional PX4 hardware- or
+  software-in-the-loop link.
+- Sensors are reached through an RPC API rather than shared memory, and there
+  is no live multi-pane device window -- inspection is whatever you write
+  against the API yourself.
+- Unreal and a capable GPU, against a laptop and `pip install`.
+- Upstream is archived. Colosseum is active, but with a smaller community than
+  AirSim had.
+
+**Choose AirSim or Colosseum if** you need photorealistic imagery, a real
+multirotor model, or environments authored in Unreal.
+
+**Choose dvision2 if** iteration speed and legibility matter more than image
+realism, and you want the whole vehicle to be Python you can read in an
+afternoon.
+
+### Flightmare
+
+[Flightmare](https://github.com/uzh-rpg/flightmare) (UZH Robotics and
+Perception Group) separates Unity rendering from a configurable dynamics layer
+specifically so that vision and reinforcement-learning experiments can run far
+faster than real time.
+
+**Key differences:**
+
+- Flightmare and `dvision2` start from the same observation: rendering
+  dominates the cost of a tick, so it has to be separable from the physics.
+  Flightmare makes rendering optional per experiment; `dvision2` drops the
+  camera profile rate while the physics rate stays fixed, which is the
+  difference between roughly 12x and 2.9x under `--sim-speed max`.
+- Flightmare has real quadrotor dynamics and a PX4 path. `dvision2` has
+  neither.
+- Flightmare targets RL, with parallel environments and gym interfaces.
+  `dvision2` has no RL surface at all.
+- Unity and a catkin-style build, against pip.
+- Development has been quiet for a while; check current activity before
+  adopting it.
+
+**Choose Flightmare if** you are doing RL or agile-flight research and need
+speed together with dynamics you can trust.
+
+**Choose dvision2 if** you want the same speed argument without Unity, and you
+care more about a repeatable operator-facing scenario than about a training
+loop.
+
+### gym-pybullet-drones
+
+[gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones) (UTIAS
+Dynamic Systems Lab) is a small, pure-Python multi-quadrotor simulator on
+PyBullet, with Gymnasium interfaces and control baselines.
+
+**Key differences:**
+
+- This is the closest match anywhere to `dvision2`'s "small enough to read"
+  premise, and it is the better-founded of the two: real quadrotor dynamics
+  down to individual motor speeds, where `dvision2` has a first-order velocity
+  lag and nothing underneath it.
+- Its camera is a PyBullet viewport, not a sensor pipeline. There is no
+  discovery registry, no per-sensor rings, and no LiDAR, rangefinder or GNSS
+  models carrying their own rates, mounts and noise.
+- No operator window, no environment realism knobs, no ground-truth scoring
+  harness.
+- Gymnasium interfaces out of the box, which `dvision2` does not have.
+
+**Choose gym-pybullet-drones if** you are studying control or training a
+policy, and the dynamics are the thing that has to be right.
+
+**Choose dvision2 if** you are developing perception or navigation against a
+many-sensor vehicle, and the controller is explicitly not what you are
+studying.
+
+### Webots
+
+[Webots](https://github.com/cyberbotics/webots) (Cyberbotics, Apache 2.0) is a
+batteries-included robot simulator with drone models, a large device API, a
+scene editor and ROS/ROS 2 bridges.
+
+**Key differences:**
+
+- Webots' device API is the closest mainstream analogue to `dvision2`'s sensor
+  manifest: a robot description declares its devices and code enumerates them.
+  Webots is a general robot simulator first, though, and its drone and
+  autopilot story is thinner than PX4's.
+- A real physics engine, a scene editor and a large model library, none of
+  which `dvision2` has or wants.
+- Device inspection in Webots is per device, in the IDE. `dvision2`'s Devices
+  tab is a tiled bench you arrange, freeze across every pane at one shared
+  capture id, and export from.
+- Much larger to install, and much more to learn.
+
+**Choose Webots if** you want a general robot simulator with real physics, a
+scene editor and ROS integration.
+
+**Choose dvision2 if** you want a drone-shaped scenario with environment
+realism knobs and no simulator to learn.
+
+### Isaac Sim and the Pegasus Simulator
+
+[Pegasus Simulator](https://github.com/PegasusSimulator/PegasusSimulator) is an
+open-source extension adding multirotor vehicles and PX4 integration to
+NVIDIA's Isaac Sim, with Isaac Lab covering reinforcement learning.
+
+**Key differences:**
+
+- Best-in-class rendering and sensor simulation -- ray-traced cameras, RTX
+  LiDAR -- and massively parallel environments for training.
+- Full PX4 integration, so it belongs with the flight-stack simulators above
+  rather than beside `dvision2`.
+- Requires an RTX GPU and a large NVIDIA runtime. Pegasus itself is open
+  source; Isaac Sim's own licensing has changed over its life, so check the
+  current terms.
+- The setup-cost gap on this page is widest here.
+
+**Choose Isaac Sim and Pegasus if** you have the hardware and need
+photorealism, RTX sensor models, or parallel RL at scale.
+
+**Choose dvision2 if** you want something that starts on any laptop, in a
+terminal, in seconds.
+
+### Rerun, PlotJuggler and Foxglove
+
+[Rerun](https://github.com/rerun-io/rerun),
+[PlotJuggler](https://github.com/facontidavide/PlotJuggler) and
+[Foxglove](https://foxglove.dev/) are the inspection layer. They compare to
+`dctl`'s Devices and Events tabs rather than to `dsim`, and they are
+complements rather than alternatives -- you would use one *with* PX4 and
+Gazebo.
+
+**Key differences:**
+
+- Rerun is the closest thing anywhere to the Devices tab: multi-pane
+  per-stream viewers, images and scalars together on one timeline. It is also
+  far better at time travel than `dvision2`'s freeze, which holds a capture
+  rather than scrubbing a recording.
+- All three are general viewers you log *into*. `dvision2`'s Devices tab is
+  the inverse: it discovers what the vehicle publishes and picks a renderer
+  per sensor type, with no logging calls anywhere in the producer.
+- None of them is a simulator, and none will fly the vehicle in the same
+  window.
+- PlotJuggler is the strongest pure time-series plotter of the three. Foxglove
+  is open core, and its desktop application's licence has changed over time --
+  check the current terms before depending on it.
+
+**Choose one of these if** you already have a stack producing data and want to
+look at it properly, or you need recording and scrubbing rather than a live
+hold.
+
+**Choose dvision2's Devices tab if** you want zero-instrumentation inspection
+of whatever a vehicle publishes, in the same window that flies it.
+
+### Summary
+
+| | dvision2 | PX4/ArduPilot SITL | AirSim/Colosseum | Flightmare | gym-pybullet-drones | Webots | Isaac + Pegasus |
+|---|---|---|---|---|---|---|---|
+| Flight dynamics | First-order velocity lag | Real autopilot | Full multirotor | Full quadrotor | Full quadrotor | Physics engine | Full multirotor |
+| Rendering | Panda3D test scene | Via Gazebo | Unreal | Unity | PyBullet viewport | Built in | Omniverse RTX |
+| MAVLink / real autopilot | No | Yes | Yes (PX4) | Yes (PX4) | No | Via PX4 bridge | Yes (PX4) |
+| ROS / ROS 2 | No | Yes | Yes | Yes | Optional | Yes | Yes |
+| Simulated time as the vehicle's clock | Enforced by tests | Lockstep available | Partial | Yes | Yes | Yes | Yes |
+| Live multi-sensor operator window | Yes, manifest-driven | MAVLink inspector only | No | No | No | Per device, in the IDE | Viewport and sensor views |
+| Ground-truth scoring harness | Yes (`dalg`) | No | No | No | RL rewards | No | Isaac Lab (RL) |
+| Environment realism, changeable in flight | Yes | Partly, via parameters | Some | Limited | No | Some | Some |
+| Install footprint | pip, no ROS | Toolchain + Gazebo | Unreal Engine | Unity + build | pip | One package | RTX GPU + Omniverse |
+| Community | Small | Very large | Large, upstream archived | Small | Moderate | Large | Growing |
+
+If the goal is a vehicle that will fly, start with PX4 or ArduPilot SITL and
+treat this project as a curiosity. `dvision2` is worth a look when the vehicle
+is not the subject: when you want a sensor-rich, scriptable stand-in that
+starts instantly, whose environment you can degrade on purpose while it flies,
+and whose entire surface you can read.
