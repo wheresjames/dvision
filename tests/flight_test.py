@@ -39,6 +39,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from dvision2_common import load_pymembus
+from dsim.profiles import DroneProfile, default_profile
 from daic.flight_log import analyze_log, diagnose_log, print_diagnosis, print_report
 from daic.run_reporter import _generate_html_report
 
@@ -87,12 +89,16 @@ def run_test(map_file: str, duration_s: int, log_path: Path | None,
              report_dir: Path | None = None,
              instance_id: str = "flighttest") -> dict:
     frames = duration_s * fps
+    import tempfile
+    profile_file = tempfile.NamedTemporaryFile(suffix='.json', mode='w', delete=False)
+    profile_file.close()
+    DroneProfile.parse(default_profile(rate_hz=fps)).save(profile_file.name)
     dsim_cmd = [
         sys.executable, str(ROOT / "apps/dsim" / "dsim.py"),
         "--id",    instance_id,
         "--map",   map_file,
         "--no-ui",
-        "--fps",   str(fps),
+        "--drone-profile", profile_file.name,
         "--frames", str(frames),
     ]
     if report_dir is not None:

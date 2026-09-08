@@ -37,6 +37,7 @@ from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
 from dsim.realism import GEOFENCE_ACTIONS, GPS_MODES, REALISM_DEFAULTS, Realism, SENSOR_NOISE_PROFILES
 from dsim.realism_panel import RealismPanel
+from dsim import health as sensor_health
 from dsim.health import SimulationHealth
 from dsim.scene import SCENE_PRESETS
 from dvision2_common import (
@@ -64,6 +65,28 @@ from dvision2_common import (
 # ---------------------------------------------------------------------------
 # Panda3D renderer
 # ---------------------------------------------------------------------------
+
+from dsim import profiles
+from dsim.profiles import DroneProfile
+
+
+@dataclass
+class _RenderView:
+    """One camera's offscreen buffer, readback texture, camera node and size.
+
+    ``pipeline`` is the shading pipeline bound to this buffer, and
+    ``pipeline_task`` the recurring task it registered, or both ``None`` for a
+    preset that renders without one.
+    """
+
+    buffer: object
+    texture: object
+    camera: object
+    width: int
+    height: int
+    pipeline: object = None
+    pipeline_task: object = None
+
 
 class Panda3DRenderer:
     """Offscreen drone-camera renderer using Panda3D.
@@ -140,6 +163,10 @@ class Panda3DRenderer:
         self._height = height
         self._ground_node = None
         self.scene_preset = scene_preset
+        #: One offscreen buffer, lens and camera per profile camera id. The
+        #: host window is not resizeable, and a synchronized pair needs two
+        #: live targets at once, so cameras never share one.
+        self._views: dict[str, _RenderView] = {}
 
         self._base = ShowBase()
         self._base.disableMouse()
@@ -204,11 +231,12 @@ class Panda3DRenderer:
         )
 
         self._build_scene(sim_map)
-        self._pbr = None
+        self._pbr = self._pbr_task = None
         if scene_preset == "representative":
-            self._pbr = self._enable_pbr_shadows()
+            self._pbr, self._pbr_task = self._enable_pbr_shadows(
+                self._base.win, self._base.cam)
 
-    def _enable_pbr_shadows(self):
+    def _enable_pbr_shadows(self, window, camera_node):
         """Turn on the shading pipeline that actually renders cast shadows.
 
         Panda's fixed-function path ignores a light's shadow map, and its
@@ -225,17 +253,22 @@ class Panda3DRenderer:
         import simplepbr
 
         pipeline = simplepbr.init(render_node=self._base.render,
-                                  window=self._base.win,
-                                  camera_node=self._base.cam,
+                                  window=window,
+                                  camera_node=camera_node,
                                   use_normal_maps=False,
                                   enable_shadows=True,
                                   msaa_samples=0)
+        # The pipeline registers a recurring task holding its camera node. It
+        # has to be removed with the pipeline: the task manager outlives a
+        # destroyed ShowBase, and a stale task reading a removed camera aborts
+        # the next renderer that steps it.
+        task = self._base.taskMgr.getTasksNamed('simplepbr update')[-1]
         # simplepbr finishes compiling its shader inside a task, and this
         # ShowBase never runs a task loop of its own; without one step the very
         # first readback raises "Shader input camera_world_position is not
         # present" instead of returning a frame.
         self._base.taskMgr.step()
-        return pipeline
+        return pipeline, task
 
     # ------------------------------------------------------------------
     # Scene helpers
@@ -481,17 +514,134 @@ class Panda3DRenderer:
     # Per-frame render
     # ------------------------------------------------------------------
 
-    def render(self, state: DroneState, out_frame: np.ndarray) -> None:
-        self._position_camera(state)
-        self._base.graphicsEngine.renderFrame()
+    @staticmethod
+    def _lens_from(lens, model):
+        """A pinhole model as a Panda lens: focal length 1, film size in metres."""
+        lens.setFocalLength(1.)
+        lens.setFilmSize(model['width_px'] / model['fx_px'],
+                         model['height_px'] / model['fy_px'])
+        lens.setFilmOffset((model['cx_px'] - model['width_px'] / 2) / model['fx_px'],
+                           (model['cy_px'] - model['height_px'] / 2) / model['fy_px'])
+        lens.setNearFar(model['near_m'], model['far_m'])
 
-        if self._tex.hasRamImage():
-            data = self._tex.getRamImageAs("RGB")
-            arr  = np.frombuffer(bytes(data), dtype=np.uint8)
+    def view(self, camera_id: str, model) -> "_RenderView":
+        """The offscreen buffer for one camera, created or resized as needed.
+
+        Buffers are per camera because the host window cannot be resized and a
+        profile may hold several resolutions. They all draw through the one
+        scene camera: the shading pipeline is bound to it, so a second camera
+        node would render the representative preset without its shader.
+        """
+        view = self._views.get(camera_id)
+        size = (model['width_px'], model['height_px'])
+        if view is not None and (view.width, view.height) != size:
+            self.drop_views([camera_id])
+            view = None
+        if view is None:
+            from panda3d.core import LColor
+            buffer = self._base.win.makeTextureBuffer(
+                f'sensor.{camera_id}', size[0], size[1], None, True)
+            if buffer is None:
+                raise RuntimeError(f'{camera_id}: the renderer refused a {size[0]}x{size[1]} buffer')
+            # setBackgroundColor reaches only the host window, and a buffer
+            # left to clear itself renders a grey sky. It must also be set
+            # before the shading pipeline, which copies it.
+            buffer.setClearColor(LColor(0.42, 0.62, 0.80, 1))
+            buffer.setClearColorActive(True)
+            camera = self._base.makeCamera(buffer)
+            camera.reparentTo(self._base.render)
+            pipeline = task = None
+            try:
+                if self.scene_preset == "representative":
+                    # Each camera needs the same tone mapping as its scene.
+                    pipeline, task = self._enable_pbr_shadows(buffer, camera)
+            except Exception:
+                camera.removeNode()
+                self._base.graphicsEngine.removeWindow(buffer)
+                raise
+            view = _RenderView(buffer, buffer.getTexture(), camera, *size,
+                               pipeline=pipeline, pipeline_task=task)
+            self._views[camera_id] = view
+            # The host window is a render target of its own and would draw an
+            # unwanted frame every pass; only the depth probe still needs it.
+            self._base.win.setActive(False)
+        self._lens_from(view.camera.node().getLens(), model)
+        return view
+
+    def drop_views(self, camera_ids) -> None:
+        """Release the buffers of cameras a new generation no longer contains."""
+        for camera_id in list(camera_ids):
+            view = self._views.pop(camera_id, None)
+            if view is None:
+                continue
+            if view.pipeline_task is not None:
+                self._base.taskMgr.remove(view.pipeline_task)
+            view.camera.removeNode()
+            self._base.graphicsEngine.removeWindow(view.buffer)
+
+    def prepare_profile(self, profile):
+        """Allocate camera resources without replacing the active views."""
+        active, self._views = self._views, {}
+        try:
+            for sensor in profile.data['sensors']:
+                if sensor['enabled'] and sensor['type'] == 'camera.rgb':
+                    self.view(sensor['id'], sensor['model']).buffer.setActive(False)
+            return self._views
+        except Exception:
+            self.drop_views(list(self._views))
+            raise
+        finally:
+            self._views = active
+
+    def finish_profile(self, prepared, *, commit):
+        """Keep either the prepared buffers or the previous generation."""
+        active = self._views
+        self._views = active if commit else prepared
+        self.drop_views(list(self._views))
+        self._views = prepared if commit else active
+
+    @staticmethod
+    def _panda_matrix(pose_world):
+        """A public forward/right/up pose as a Panda camera matrix.
+
+        Panda local X is the opposite of delivered image right, because the
+        mirrored scene described in the class docstring is preserved.
+        """
+        t = np.eye(4)
+        t[0, :3] = -pose_world[:3, 1]
+        t[1, :3] = pose_world[:3, 0]
+        t[2, :3] = pose_world[:3, 2]
+        t[3, :3] = pose_world[:3, 3]
+        return t
+
+    def render_views(self, requests) -> None:
+        """Render several cameras from one caller-frozen state.
+
+        ``requests`` is an iterable of ``(camera_id, model, pose_world,
+        out_frame)``. The cameras are drawn one after another because each owns
+        a shading pipeline over its own buffer, but nothing between them
+        advances the world, so a synchronized pair still observes one state.
+        """
+        from panda3d.core import Mat4
+        prepared = [(self.view(camera_id, model), pose_world, out_frame)
+                    for camera_id, model, pose_world, out_frame in requests]
+        if not prepared:
+            return
+        for view, pose_world, out_frame in prepared:
+            for other in self._views.values():
+                other.buffer.setActive(other is view)
+            view.camera.setMat(Mat4(*self._panda_matrix(pose_world).flatten().tolist()))
+            self._base.graphicsEngine.renderFrame()
+            if not view.texture.hasRamImage():
+                raise RuntimeError('renderer produced no RGB readback')
+            arr = np.frombuffer(bytes(view.texture.getRamImageAs('RGB')), dtype=np.uint8)
             # Row reversal turns Panda's bottom-up framebuffer into the
             # top-left-origin DVision image; the column reversal undoes the
             # mirrored scene described in the class docstring.
-            out_frame[:] = arr.reshape((self._height, self._width, 3))[::-1, ::-1]
+            out_frame[:] = arr.reshape((view.height, view.width, 3))[::-1, ::-1]
+
+    def render_camera(self, camera_id, model, pose_world, out_frame) -> None:
+        self.render_views([(camera_id, model, pose_world, out_frame)])
 
     def _position_camera(self, state: DroneState) -> None:
         panda_h = (90.0 - state.yaw_deg) % 360.0
@@ -504,9 +654,17 @@ class Panda3DRenderer:
         cam.setHpr(panda_h, self.CAM_PITCH + state.pitch_deg, -state.roll_deg)
 
     def render_range(self, state: DroneState) -> np.ndarray:
-        """Return Euclidean first-surface range in metres, NaN at the far plane."""
+        """Return Euclidean first-surface range in metres, NaN at the far plane.
+
+        The depth probe is the only caller and it reads the host window, which
+        camera views otherwise leave switched off.
+        """
         self._position_camera(state)
-        self._base.graphicsEngine.renderFrame()
+        self._base.win.setActive(True)
+        try:
+            self._base.graphicsEngine.renderFrame()
+        finally:
+            self._base.win.setActive(not self._views)
         if not self._depth_tex.hasRamImage():
             raise RuntimeError("depth buffer readback is unavailable")
         raw = np.frombuffer(bytes(self._depth_tex.getRamImage()), dtype=np.float32)
@@ -528,6 +686,17 @@ class Panda3DRenderer:
         return ranges.astype(np.float32)
 
     def close(self) -> None:
+        # Separate attempts: a failure releasing one view must not leave the
+        # ShowBase alive, because a second one cannot then be created.
+        try:
+            self.drop_views(list(self._views))
+        except Exception:
+            pass
+        try:
+            if self._pbr_task is not None:
+                self._base.taskMgr.remove(self._pbr_task)
+        except Exception:
+            pass
         try:
             self._base.destroy()
         except Exception:
@@ -673,6 +842,8 @@ class DroneSimulator:
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        self.profile = args.profile
+        self.sensors = None
         self.pymembus = load_pymembus()
         self.names = shared_names(args.id)
         # Remove a previous crashed session before renderer/UI construction.
@@ -697,7 +868,6 @@ class DroneSimulator:
         self.running = True
         self.started = time.monotonic()
         self.sim_time_s = 0.0
-        self.video = None
         self.command = None
         self.status = None
         self.module_bus = None
@@ -782,14 +952,12 @@ class DroneSimulator:
         pm = self.pymembus
         self._remove_ipc_names()
 
-        self.video = pm.memvid()
-        fmt = getattr(pm.video_format, "rgb24", 24)
-        if not self.video.open(self.names["video"], True, self.args.width,
-                               self.args.height, fmt, self.args.fps, self.args.bufs):
-            raise RuntimeError(
-                f"failed to create video buffer {self.names['video']}: "
-                f"{pm.last_error_message()}"
-            )
+        from dsim.sensor_manager import SensorManager
+        self.sensors = SensorManager(
+            self.args.id, self.profile, self.map, self.p3d, vehicle=self,
+            seed=int(getattr(self.args, "realism_seed", 0) or 0))
+        self._fit_sensors()
+        self._write_sensor_profile()
 
         self.command = pm.memcmd()
         if not self.command.open(self.names["command"], self.args.cmd_size, True, True):
@@ -862,15 +1030,64 @@ class DroneSimulator:
         return 1.0 if speed is None else float(speed)
 
     def _video_tick_divisor(self) -> int:
-        """Physics ticks per published frame; 1 unless ``--video-hz`` lowers it."""
-        video_hz = getattr(self.args, "video_hz", None)
-        if not video_hz:
-            return 1
-        return max(1, int(round(self.args.fps / float(video_hz))))
+        return round(self.profile.data['physics_hz'] / self.profile.primary['rate_hz'])
+
+    @property
+    def origin_alt_m(self) -> float:
+        """Ground elevation above mean sea level, for pressure altitude."""
+        return float(getattr(self.args, "origin_alt", BERLIN_CENTER_ALT_M))
+
+    def _fit_sensors(self) -> None:
+        """Tell the environment what hardware the profile actually carries.
+
+        Installation is the profile's decision and quality is the
+        environment's, so a vehicle with no ``position.gnss`` sensor reports no
+        fix and no valid global estimate -- which is a different failure from a
+        fitted receiver that cannot see the sky, and clients have to tell them
+        apart.
+        """
+        self.realism.set_gnss_installed(any(
+            sensor["type"] == "position.gnss" and sensor["enabled"]
+            for sensor in self.profile.data["sensors"]))
+
+    def _write_sensor_profile(self):
+        """Record the hardware a run actually flew, beside its manifest.
+
+        Three files rather than one: the resolved profile is what to re-run,
+        the manifest is what clients discovered, and the plan is the memory it
+        was allowed to take. A summary that could not say which of the three
+        disagreed would not settle an argument about a run.
+        """
+        self.profile.save(self.dsim_report_dir / 'drone-profile.json')
+        (self.dsim_report_dir / 'sensor-manifest.json').write_text(
+            json.dumps(self.sensors.manifest, indent=2) + '\n')
+        (self.dsim_report_dir / 'sensor-plan.json').write_text(json.dumps(dict(
+            profile_digest=self.profile.digest, generation=self.sensors.generation,
+            limits=dict(max_memory_bytes=self.profile.memory_limit_bytes,
+                        max_components=profiles.MAX_COMPONENTS,
+                        max_id_bytes=profiles.MAX_ID_BYTES,
+                        max_profile_bytes=profiles.MAX_PROFILE_BYTES,
+                        max_record_bytes=profiles.RECORD_SIZE),
+            plan=self.profile.plan), indent=2) + '\n')
+
+    def apply_profile(self, profile):
+        """Swap the hardware profile transactionally, as one new generation.
+
+        A failure anywhere in construction leaves the running generation and
+        its channels exactly as they were.
+        """
+        if self.state.armed:
+            raise ValueError('Disarm before applying a sensor profile')
+        self.sensors.apply(profile)
+        self.profile = self.args.profile = profile
+        self._fit_sensors()
+        self.args.width = profile.primary['model']['width_px']
+        self.args.height = profile.primary['model']['height_px']
+        self.args.fps = profile.data['physics_hz']
+        self._write_sensor_profile()
 
     def _remove_ipc_names(self) -> None:
         pm = self.pymembus
-        pm.memvid.remove(self.names["video"])
         pm.memcmd.remove(self.names["command"])
         pm.memkv.remove(self.names["status"])
         pm.memmsg.remove(self.names["events"])
@@ -887,8 +1104,13 @@ class DroneSimulator:
                 "duration_s": round(elapsed, 3),
                 "sim_time_s": round(self.sim_time_s, 3),
                 "sim_speed": self._published_speed(),
-                "video_hz": (float(self.args.fps) if not getattr(
-                    self.args, "video_hz", None) else float(self.args.video_hz)),
+                "video_hz": self.profile.primary["rate_hz"],
+                "sensor_profile_digest": self.profile.digest,
+                "sensor_samples": self.sensors.sequence if self.sensors else 0,
+                "sensors": (self.sensors.production() if self.sensors else {}),
+                "sensor_cost_s": (self.sensors.costs() if self.sensors else {}),
+                "sensor_plan": self.profile.plan,
+                "sensor_generation": (self.sensors.generation if self.sensors else 0),
                 "crashed": bool(self.state.crashed),
                 "mode": self.state.mode,
                 "status_message": self.state.status_message,
@@ -917,7 +1139,9 @@ class DroneSimulator:
         if getattr(self, "module_bus", None) is not None:
             self.module_bus.publish("module.goodbye", payload={"state": "stopped"})
             self.module_bus.close()
-        for handle in (self.status, self.command, self.video):
+        if self.sensors is not None:
+            self.sensors.close()
+        for handle in (self.status, self.command):
             if handle is not None:
                 handle.close()
 
@@ -943,19 +1167,21 @@ class DroneSimulator:
         if self.args.verbose:
             print(f"dsim {self.args.id}: map={self.map.path} "
                   f"size={self.map.width}x{self.map.height}")
-            print(f"dsim {self.args.id}: video={self.names['video']} "
+            print(f"dsim {self.args.id}: sensors={len(self.sensors.manifest['sensors'])} "
                   f"command={self.names['command']} status={self.names['status']}")
 
         frame_period = 1.0 / max(1, self.args.fps)
-        # How many physics ticks pass between published frames. Rendering is
-        # the whole cost of a tick -- physics is microseconds and a frame is
-        # milliseconds -- so publishing at the rate consumers actually sample
-        # is what makes a scaled run fast. The simulated interval between
-        # frames is unchanged, so no consumer can tell the difference.
+        # Rendering is the whole cost of a tick -- physics is microseconds and
+        # a frame is milliseconds -- so the sensor manager renders only on the
+        # ticks a camera is actually due, which is what makes a scaled run
+        # fast. The simulated interval between frames is unchanged, so no
+        # consumer can tell the difference.
         video_every = self._video_tick_divisor()
         last = time.monotonic()
         frames_left = self.args.frames
         tick = 0
+        next_wall = last
+        pacing_key = None
         try:
             while self.running:
                 bus_events = [] if self.module_bus is None else self.module_bus.receive()
@@ -969,21 +1195,14 @@ class DroneSimulator:
                 # change the speed while the simulation is running.
                 speed = getattr(self.args, "sim_speed", None)
                 real_time = speed is None
-                # Real time measures the step it actually took: if the host
-                # stalls, the vehicle is owed the truth about how long that
-                # was. A scaled clock is not a measurement of the room, so
-                # measuring it would be meaningless -- and a fixed step is
-                # what makes a scaled run repeatable.
-                dt = clamp(now - last, 0.001, 0.1) if real_time else frame_period
+                frame_period = 1.0 / self.profile.data['physics_hz']
+                video_every = self._video_tick_divisor()
+                dt = frame_period
                 last = now
                 self.step(dt, drain_commands=True)
                 self.flight_positions.append(
                     (self.state.x, self.state.y, self.sim_time_s))
-                render_s = None
-                if tick % video_every == 0:
-                    render_started = time.monotonic()
-                    self.publish_frame(now)
-                    render_s = time.monotonic() - render_started
+                render_s = self.publish_frame(now)
                 self.publish_status()
                 if self.health is not None:
                     self.health.note_tick(render_s)
@@ -993,23 +1212,28 @@ class DroneSimulator:
                         wall_now=time.monotonic(), sim_now=self.sim_time_s,
                         requested=self._published_speed(),
                         members=self.pipeline.members(include_expired=True),
+                        production=(None if self.sensors is None
+                                    else self.sensors.production()),
                         member_expiry_s=self.pipeline.expiry_s)
                 if self.ui is not None:
                     self.ui.update()
                     if self.ui.closed:
                         self.running = False
                 tick += 1
-                if frames_left is not None:
+                # --frames counts published primary-camera frames, which is
+                # the cadence a smoke test is actually waiting on.
+                if frames_left is not None and tick % video_every == 0:
                     frames_left -= 1
                     if frames_left <= 0:
                         break
-                elapsed = time.monotonic() - now
-                if real_time:
-                    time.sleep(max(0.0, frame_period - elapsed))
-                elif speed > UNPACED:
-                    time.sleep(max(0.0, frame_period / speed - elapsed))
-                # UNPACED sleeps not at all, and runs at whatever the render
-                # and publish path sustains.
+                pace = 1.0 if real_time else speed
+                key = (pace, frame_period)
+                if key != pacing_key:
+                    next_wall = now
+                    pacing_key = key
+                if pace > UNPACED:
+                    next_wall += frame_period / pace
+                    time.sleep(max(0.0, next_wall - time.monotonic()))
         finally:
             self.close()
 
@@ -1334,6 +1558,8 @@ class DroneSimulator:
         self.zero_motion()
 
     def reset_drone(self) -> None:
+        if getattr(self, "sensors", None) is not None:
+            self.sensors.reset()
         owner = self.state.control_owner
         lease_id = self.state.control_lease_id
         acquired = self.state.lease_acquired_monotonic
@@ -1708,12 +1934,6 @@ class DroneSimulator:
         speed    = math.sqrt(vx ** 2 + vy ** 2 + vz ** 2)
         last_cmd = (-1.0 if st.last_command_monotonic is None
                     else self.clock() - st.last_command_monotonic)
-        cam_fov_h = Panda3DRenderer.CAM_FOV_H
-        cam_w     = self.args.width
-        cam_h     = self.args.height
-        _half_tan = math.tan(math.radians(cam_fov_h / 2.0))
-        cam_fx    = cam_w / (2.0 * _half_tan)
-        cam_fov_v = math.degrees(2.0 * math.atan(_half_tan * cam_h / cam_w))
         values = {
             "sim.id":                self.args.id,
             "sim.map":               str(self.map.path),
@@ -1787,22 +2007,7 @@ class DroneSimulator:
             "link.command_count":    str(st.command_count),
             "link.last_command_type": st.last_command_type,
             "status.message":        st.status_message,
-            "camera.fov_h_deg":      f"{cam_fov_h:.4f}",
-            "camera.fov_v_deg":      f"{cam_fov_v:.4f}",
-            "camera.tx_m":           "0.0000",
-            "camera.ty_m":           "0.0000",
-            "camera.tz_m":           f"{Panda3DRenderer.CAM_Z_OFFSET:.4f}",
-            "camera.roll_deg":       f"{st.roll_deg:.4f}",
-            "camera.pitch_deg":      f"{Panda3DRenderer.CAM_PITCH + st.pitch_deg:.4f}",
-            "camera.yaw_deg":        "0.0000",
-            "camera.fx_px":          f"{cam_fx:.4f}",
-            "camera.fy_px":          f"{cam_fx:.4f}",
-            "camera.cx_px":          f"{cam_w / 2.0:.4f}",
-            "camera.cy_px":          f"{cam_h / 2.0:.4f}",
-            "camera.width_px":       str(cam_w),
-            "camera.height_px":      str(cam_h),
-            "camera.fps":            str(self.args.fps),
-            "range.config":          getattr(self.args, "range_sensor", "none"),
+
         }
         values.update(self.realism.status_fields())
         if st.home_x is not None:
@@ -1812,18 +2017,11 @@ class DroneSimulator:
             values["home.alt_m"] = f"{halt:.3f}"
         return values
 
-    def publish_frame(self, now: float) -> None:
-        if self.video is None:
-            return
-        slot  = self.video.getPtr(0)
-        frame = np.array(self.video[slot], copy=False)
-        if self.p3d is None:
-            raise RuntimeError("Panda3D renderer is not initialized")
-        self.p3d.render(self.state, frame)
-        pts = int(now * 1_000_000)
-        self.video.setVpts(slot, pts)
-        self.video.setApts(slot, pts)
-        self.video.next(1)
+    def publish_frame(self, now: float) -> float | None:
+        """Advance the sensor schedule one physics tick; returns render seconds."""
+        if self.sensors is None:
+            return None
+        return self.sensors.tick(self.state, self.clock())
 
     def save_snapshot(self) -> None:
         ts = datetime.datetime.now().strftime("%H%M%S")
@@ -2014,26 +2212,33 @@ class TopDownUi:
         # and scrolls, so the notebook stays the size the monitor wants.
         self.realism_panel = RealismPanel(notebook, sim, height=canvas_h)
         notebook.add(self.realism_panel.page, text="Realism")
+        from dsim.sensors_panel import SensorsPanel
+        self.sensors_panel = SensorsPanel(notebook, sim)
+        notebook.add(self.sensors_panel.page, text="Sensors")
 
         pipeline = ttk.Frame(notebook, padding=10)
         notebook.add(pipeline, text="Pipeline")
-        columns = ("role", "implementation", "version", "state", "ready", "run",
+        columns = ("implementation", "version", "state", "ready", "run",
                    "age", "rate", "skipped")
-        self.pipeline_tree = ttk.Treeview(pipeline, columns=columns, show="headings",
-                                          height=12)
-        # Widths per column rather than one figure for all of them: nine
-        # uniform columns overflow the window the map sizes, and the two that
-        # matter -- what a module wanted against what it got -- were the ones
-        # pushed off the edge.
-        widths = {"role": 92, "implementation": 108, "version": 58,
+        # A tree rather than a flat list: a module with four cameras and a
+        # LiDAR has five answers to "is it keeping up", and one row per module
+        # is exactly the shape that hides the one that is not. The first
+        # column is the tree, so each module's inputs hang under it and dsim's
+        # own production hangs under a root of its own.
+        self.pipeline_tree = ttk.Treeview(pipeline, columns=columns,
+                                          show="tree headings", height=12)
+        widths = {"implementation": 150, "version": 58,
                   "state": 88, "ready": 56, "run": 96, "age": 56,
-                  "rate": 108, "skipped": 66}
+                  "rate": 118, "skipped": 66}
+        self.pipeline_tree.heading("#0", text="role / sensor")
+        self.pipeline_tree.column("#0", width=190, anchor="w", stretch=True)
         for column in columns:
             self.pipeline_tree.heading(column, text=column)
             self.pipeline_tree.column(column, width=widths.get(column, 96),
                                       anchor="w", stretch=True)
         for grade, colour in ((health.OK, theme.OK), (health.WARN, theme.WARN),
                               (health.BAD, theme.DANGER),
+                              (health.STARTING, theme.DIM),
                               (health.UNKNOWN, theme.DIM)):
             self.pipeline_tree.tag_configure(grade, foreground=colour)
         self.pipeline_tree.grid(row=0, column=0, sticky="nsew")
@@ -2111,29 +2316,83 @@ class TopDownUi:
         self._sync_speed_box()
         self._refresh_health()
         self.realism_panel.refresh()
+        self.sensors_panel.refresh()
         self._refresh_pipeline()
         self.root.update_idletasks()
         self.root.update()
 
+    @staticmethod
+    def _rate_text(achieved, wanted, suffix: str = "") -> str:
+        """"4.4/5.0 Hz" reads as a shortfall at a glance; a percentage does not.
+
+        It also names the target the reporter set for itself rather than one
+        this window invented for it.
+        """
+        if not wanted or achieved is None:
+            return "-"
+        return f"{achieved:.1f}/{wanted:.1f} Hz{suffix}"
+
     def _refresh_pipeline(self) -> None:
+        opened = {item for item in self.pipeline_tree.get_children()
+                  if self.pipeline_tree.item(item, "open")}
         self.pipeline_tree.delete(*self.pipeline_tree.get_children())
+        self._insert_production("production" in opened)
         for member, age in self.sim.pipeline.members(include_expired=True):
             expired = age > self.sim.pipeline.expiry_s
             intake = health.describe(member.intake)
-            wanted, achieved = intake["wanted_hz"], intake["achieved_hz"]
-            # "4.4/5.0 Hz" reads as a shortfall at a glance in a way a bare
-            # percentage does not, and it names the target the module set
-            # itself rather than one this window invented for it.
-            rate = ("-" if not wanted or achieved is None
-                    else f"{achieved:.1f}/{wanted:.1f} Hz"
-                    + (" wall" if intake["basis"] == "wall" else ""))
-            grade = health.BAD if expired else intake["grade"]
-            self.pipeline_tree.insert("", "end", tags=(grade,), values=(
-                member.role, member.implementation, member.protocol_version,
-                "expired" if expired else member.state,
-                "yes" if member.ready and not expired else "no",
-                member.run_id[:10], f"{age:.1f}s", rate,
-                intake["skipped"] or ""))
+            rate = self._rate_text(intake["achieved_hz"], intake["wanted_hz"],
+                                   " wall" if intake["basis"] == "wall" else "")
+            sensors = member.sensors or {}
+            grade = health.BAD if expired else health.worst(
+                [intake["grade"], sensor_health.required_sensor_grade(sensors)])
+            node = self.pipeline_tree.insert(
+                "", "end", iid=member.process_id, text=member.role, tags=(grade,),
+                open=member.process_id in opened, values=(
+                    member.implementation, member.protocol_version,
+                    "expired" if expired else member.state,
+                    "yes" if member.ready and not expired else "no",
+                    member.run_id[:10], f"{age:.1f}s", rate,
+                    intake["skipped"] or ""))
+            for sensor_id, record in sorted(sensors.items()):
+                if not isinstance(record, dict):
+                    continue
+                age_s = record.get("age_s")
+                self.pipeline_tree.insert(
+                    node, "end", text=f"  {sensor_id}",
+                    tags=(record.get("state", health.UNKNOWN),), values=(
+                        "required" if record.get("required", True) else "optional",
+                        record.get("generation", ""), record.get("state", ""),
+                        record.get("sync", ""), record.get("last_sequence", ""),
+                        "-" if age_s is None else f"{age_s:.2f}s",
+                        self._rate_text(record.get("observed_hz"),
+                                        record.get("expected_hz")),
+                        record.get("skipped") or ""))
+
+    def _insert_production(self, opened: bool) -> None:
+        """What dsim itself generated, per configured sensor.
+
+        Kept as its own root beside the consumers rather than folded into
+        them: production and intake are separate measurements, and the whole
+        point of showing both is being able to see them disagree.
+        """
+        production = {} if self.sim.sensors is None else self.sim.sensors.production()
+        if not production:
+            return
+        grade = health.worst(record["state"] for record in production.values())
+        node = self.pipeline_tree.insert(
+            "", "end", iid="production", text="simulator", tags=(grade,), open=opened,
+            values=("dsim production", "", grade, "-", "",
+                    "", "", sum(r["drops"] for r in production.values()) or ""))
+        for sensor_id, record in production.items():
+            last = record["last_sim_time_s"]
+            self.pipeline_tree.insert(
+                node, "end", text=f"  {sensor_id}", tags=(record["state"],), values=(
+                    record["type"], "", record["state"],
+                    "invalid" if record["invalid"] else "",
+                    record["last_sequence"] or "",
+                    "-" if last is None else f"{last:.1f}s",
+                    self._rate_text(record["observed_hz"], record["configured_hz"]),
+                    record["drops"] or ""))
 
     def _refresh_health(self) -> None:
         """The header pair: achieved pace, and the worst grade on the bus."""
@@ -2272,21 +2531,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="dvision2 drone simulator")
     parser.add_argument("--id",       required=True)
     parser.add_argument("--map",      default="assets/maps/maze_001.txt")
-    parser.add_argument("--width",    type=int,   default=640)
-    parser.add_argument("--height",   type=int,   default=480)
-    parser.add_argument("--fps",      type=int,   default=30)
-    parser.add_argument("--bufs",     type=int,   default=4)
+    parser.add_argument("--drone-profile", default=None, help="built-in profile name or JSON path")
     parser.add_argument("--sim-speed", type=_sim_speed, default=None,
                         metavar="MULTIPLIER",
                         help="advance simulated time at this multiple of real "
                              "time, or 'max' for no pacing at all. Omitted "
                              "means real time, which is never made to wait")
-    parser.add_argument("--video-hz", type=float, default=None,
-                        help="publish video at this rate instead of --fps; the "
-                             "physics tick rate is unchanged")
-    parser.add_argument("--range-sensor", choices=("none", "exact",
-                        "lidar_flash_short", "lidar_tof_wide"), default="none",
-                        help="range configuration advertised to observers")
     parser.add_argument(
         "--scene-preset",
         choices=tuple(SCENE_PRESETS),
@@ -2338,6 +2588,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     realism.add_argument("--sensor-noise", choices=tuple(SENSOR_NOISE_PROFILES),
                          default=argparse.SUPPRESS,
                          help="published heading/altitude/velocity noise profile")
+    realism.add_argument("--ambient-temp-c", type=float, default=argparse.SUPPRESS,
+                         help="ground-level air temperature in Celsius")
     realism.add_argument("--battery-failsafe-pct", type=float,
                          default=argparse.SUPPRESS,
                          help="battery percentage that triggers RTL then LAND")
@@ -2361,10 +2613,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     validate_id(args.id)
     _resolve_realism(args)
-    if args.width <= 0 or args.height <= 0 or args.fps <= 0 or args.bufs <= 0:
-        raise SystemExit("width, height, fps, and bufs must be positive")
-    if args.video_hz is not None and not 0.0 < args.video_hz <= args.fps:
-        raise SystemExit("video-hz must be positive and no greater than fps")
+    try:
+        args.profile = DroneProfile.load(args.drone_profile)
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
+    args.width = args.profile.primary['model']['width_px']
+    args.height = args.profile.primary['model']['height_px']
+    args.fps = args.profile.data['physics_hz']
     if args.setpoint_timeout < 0:
         raise SystemExit("setpoint timeout must be non-negative")
     if min(args.control_lease_timeout, args.max_speed_mps,

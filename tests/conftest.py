@@ -8,6 +8,11 @@ gate a merge.
 """
 
 import importlib
+from dvision2_common import load_pymembus
+try:
+    load_pymembus()
+except SystemExit:
+    pass
 
 # Test module stem -> the modules it cannot run without.
 _MODULE_REQUIREMENTS = {
@@ -17,6 +22,7 @@ _MODULE_REQUIREMENTS = {
     "test_dway_process": ("panda3d", "pymembus"),
     "test_dalg_process": ("panda3d", "pymembus", "cv2"),
     "test_dvision_perception_chain": ("panda3d", "cv2"),
+    "test_sensor_stereo": ("panda3d",),
 }
 
 

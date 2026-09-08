@@ -89,7 +89,8 @@ def test_real_dsim_ipc_preserves_control_heading_and_video_contract(tmp_path) ->
     video = pm.memvid()
     command = pm.memcmd()
     status = pm.memkv()
-    assert not video.open_existing(names["video"])
+    registry = pm.memkv()
+    assert not registry.open(names["sensors"])
     assert not command.open(names["command"], 65536)
     assert not status.open(names["status"])
 
@@ -334,7 +335,7 @@ def test_process_failure_writes_a_locatable_artifact_bundle(tmp_path) -> None:
 
     bundle = json.loads((artifact_dir / "result.json").read_text(encoding="utf-8"))
     assert bundle["details"]["instance_id"] == harness.id
-    assert bundle["fixture"]["camera"]["camera.width_px"] == "640"
+    assert bundle["fixture"]["camera"]["width_px"] == 640
     assert bundle["telemetry"]["drone.heading_deg"]
     for name in ("initial_frame.png", "final_frame.png", "path.png",
                  "commands.jsonl", "timeline.jsonl"):

@@ -20,53 +20,76 @@ def test_manual_yaw_rate_clamps_normalized_input() -> None:
     assert _manual_yaw_rate(-2.0) == -_MANUAL_YAW_RATE_DPS
 
 
-def test_controller_starts_as_observer_when_vehicle_is_unowned() -> None:
+def _controller(owner: str, *, released: bool = False,
+                lease_age: str = "", lease_timeout: str = "3.000",
+                sent: list) -> DroneController:
     controller = DroneController.__new__(DroneController)
     controller.command = object()
     controller.status = type("Status", (), {"getAll": lambda self: {
-        "control.owner": ""
+        "control.owner": owner,
+        "control.lease_age_s": lease_age,
+        "control.lease_timeout_s": lease_timeout,
     }})()
     controller.control_source = "dctl-test"
     controller._last_heartbeat = 0.0
-    sent = []
+    controller._control_released = released
     controller.send_command = lambda typ, **fields: sent.append(typ)
+    return controller
 
-    controller._maintain_control()
+
+def test_controller_claims_an_unowned_vehicle() -> None:
+    # Only `land` flies without a lease, so a dctl that never acquires one has
+    # every other control refused.
+    sent: list[str] = []
+    _controller("", sent=sent)._maintain_control()
+
+    assert sent == ["acquire_control"]
+
+
+def test_controller_does_not_reclaim_after_release() -> None:
+    sent: list[str] = []
+    _controller("", released=True, sent=sent)._maintain_control()
 
     assert sent == []
 
 
 def test_controller_does_not_contend_with_another_owner() -> None:
-    controller = DroneController.__new__(DroneController)
-    controller.command = object()
-    controller.status = type("Status", (), {"getAll": lambda self: {
-        "control.owner": "dway-test"
-    }})()
-    controller.control_source = "dctl-test"
-    controller._last_heartbeat = 0.0
-    sent = []
-    controller.send_command = lambda typ, **fields: sent.append(typ)
-
-    controller._maintain_control()
+    sent: list[str] = []
+    _controller("dway-test", sent=sent)._maintain_control()
 
     assert sent == []
 
 
 def test_controller_heartbeats_only_its_own_lease(monkeypatch) -> None:
-    controller = DroneController.__new__(DroneController)
-    controller.command = object()
-    controller.status = type("Status", (), {"getAll": lambda self: {
-        "control.owner": "dctl-test"
-    }})()
-    controller.control_source = "dctl-test"
-    controller._last_heartbeat = 0.0
-    sent = []
-    controller.send_command = lambda typ, **fields: sent.append(typ)
+    sent: list[str] = []
+    controller = _controller("dctl-test", sent=sent)
     monkeypatch.setattr("dctl.dctl.time.monotonic", lambda: 2.0)
 
     controller._maintain_control()
 
     assert sent == ["heartbeat"]
+
+
+def test_controller_renews_early_when_the_lease_is_burning_fast(monkeypatch) -> None:
+    # Accelerated simulation: the vehicle has already spent a third of a
+    # three-second lease although well under a wall-clock second has passed.
+    sent: list[str] = []
+    controller = _controller("dctl-test", lease_age="1.200", sent=sent)
+    monkeypatch.setattr("dctl.dctl.time.monotonic", lambda: 0.4)
+
+    controller._maintain_control()
+
+    assert sent == ["heartbeat"]
+
+
+def test_controller_does_not_heartbeat_every_tick(monkeypatch) -> None:
+    sent: list[str] = []
+    controller = _controller("dctl-test", lease_age="2.900", sent=sent)
+    monkeypatch.setattr("dctl.dctl.time.monotonic", lambda: 0.05)
+
+    controller._maintain_control()
+
+    assert sent == []
 
 
 def test_right_stick_x_reports_human_facing_yaw_right() -> None:

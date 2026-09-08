@@ -75,7 +75,9 @@ def horizon_row(frame_rgb: np.ndarray, column: int) -> int:
     """
     r = frame_rgb[:, column, 0].astype(np.int16)
     b = frame_rgb[:, column, 2].astype(np.int16)
-    sky = (b > r + 25) & (b > 120)
+    # Exclude saturated blue calibration panels; they are landmarks, not sky.
+    g = frame_rgb[:, column, 1].astype(np.int16)
+    sky = (b > r + 25) & (b > 120) & (r > 80) & (g > 100)
     rows = np.nonzero(sky)[0]
     if len(rows) == 0:
         raise AssertionError(f"no sky pixels in column {column}")

@@ -49,6 +49,10 @@ class SimulationHealth:
         #: not be folded into one jagged, misleading line.
         self.modules: dict[str, EnvelopeSeries] = {}
         self.module_facts: dict[str, dict[str, Any]] = {}
+        #: What dsim itself generated, per configured sensor. The provider's
+        #: half of the health contract, kept beside the consumers' half rather
+        #: than merged into it.
+        self.production: dict[str, dict[str, Any]] = {}
         self.grade = SteadyGrade(runs=3)
         self.samples = 0
         self.achieved: float | None = None
@@ -83,11 +87,13 @@ class SimulationHealth:
         return wall_now - self._next_sample_wall >= SAMPLE_PERIOD_S
 
     def sample(self, *, wall_now: float, sim_now: float,
-               requested: float, members=(),
+               requested: float, members=(), production=None,
                member_expiry_s: float = 3.0) -> dict[str, Any] | None:
         """Close a window and record it. Returns the sample, or None if early."""
         if not self.due(wall_now):
             return None
+        if production is not None:
+            self.production = production
         self._next_sample_wall = wall_now
         if self._started_wall is None:
             self._started_wall = wall_now
@@ -114,7 +120,9 @@ class SimulationHealth:
         self._render_count = 0
 
         modules = self._read_modules(sim_now, members, member_expiry_s)
-        observed = worst([self._speed_grade(), *(m["grade"] for m in modules)])
+        observed = worst([self._speed_grade(),
+                          *(sensor.get("state") for sensor in self.production.values()),
+                          *(m["grade"] for m in modules)])
         overall = self.grade.update(observed)
         self.samples += 1
 
@@ -128,6 +136,7 @@ class SimulationHealth:
             "render_ms": self.render_ms.latest(),
             "tick_hz": self.tick_hz.latest(),
             "modules": modules,
+            "sensors": self.production,
             "grade": overall,
         }
         self._write(record)
@@ -153,6 +162,7 @@ class SimulationHealth:
         for member, age in members:
             key = member.process_id
             intake = describe(getattr(member, "intake", None))
+            sensors = getattr(member, "sensors", None) or {}
             expired = age > expiry_s
             record = {
                 "role": member.role,
@@ -161,7 +171,15 @@ class SimulationHealth:
                 "state": member.state,
                 "age_s": round(age, 3),
                 **intake,
+                "sensor_inputs": sensors,
+                "sensor_grade": required_sensor_grade(sensors),
             }
+            # One grade for the overview, derived rather than asked for: the
+            # worst required sensor input, the module's own processing, and
+            # whether it is still alive at all. An optional input a module
+            # opened but does not need cannot pull this down, and neither can
+            # a healthy stream hide a failed one.
+            record["grade"] = worst([record["grade"], record["sensor_grade"]])
             if expired:
                 record["state"] = "expired"
                 record["grade"] = BAD
@@ -213,6 +231,7 @@ class SimulationHealth:
             },
             "grade": self.grade.value,
             "modules": modules,
+            "sensors": self.production,
         }
 
     def close(self) -> None:
@@ -261,6 +280,43 @@ class SimulationHealth:
         blocks.append(report_html.section("Modules", report_html.table(
             ("Role", "Implementation", "State", "Achieved / wanted",
              "Skipped", "Overruns"), module_rows, numeric=(4, 5))))
+        sensor_rows = [(
+            report_html.esc(sensor_id), report_html.esc(record["type"]),
+            report_html.graded(record["state"], record["state"]),
+            report_html.esc("%.2f / %.2f Hz" % (record["observed_hz"],
+                                                record["configured_hz"])),
+            report_html.esc(record["published"]),
+            report_html.esc(record["invalid"]),
+            report_html.esc(record["drops"]),
+            report_html.esc("%.3f" % record.get("work_s", 0.0)),
+        ) for sensor_id, record in summary["sensors"].items()]
+        if sensor_rows:
+            blocks.append(report_html.section("Sensors produced", report_html.table(
+                ("Sensor", "Type", "State", "Observed / configured",
+                 "Published", "Invalid", "Drops", "Work s"), sensor_rows,
+                numeric=(4, 5, 6, 7))))
+        input_rows = []
+        for module in summary["modules"]:
+            for sensor_id, record in sorted((module.get("sensor_inputs") or {}).items()):
+                if not isinstance(record, dict):
+                    continue
+                age = record.get("age_s")
+                input_rows.append((
+                    report_html.esc(f'{module["role"]}:{module["implementation"]}'),
+                    report_html.esc(sensor_id),
+                    report_html.esc("required" if record.get("required", True)
+                                    else "optional"),
+                    report_html.graded(record.get("state", ""), record.get("state", "")),
+                    report_html.esc("-" if not record.get("expected_hz") else
+                                    "%.2f / %.2f Hz" % (record.get("observed_hz") or 0.0,
+                                                        record["expected_hz"])),
+                    report_html.esc("-" if age is None else f"{age:.3f}s"),
+                    report_html.esc(record.get("skipped", 0)),
+                ))
+        if input_rows:
+            blocks.append(report_html.section("Sensors consumed", report_html.table(
+                ("Module", "Sensor", "Need", "State", "Observed / expected",
+                 "Age", "Skipped"), input_rows, numeric=(4, 5, 6))))
         output = report_dir / "report.html"
         output.write_text(report_html.document(
             "Simulation health", subtitle="Keeping-up diagnostics; reporting never gates the run.",
@@ -308,6 +364,20 @@ class SimulationHealth:
         maximum = [value / divisor for value in maximum]
         line, = axes.plot(x, mean, linewidth=1.5, label=label)
         axes.fill_between(x, minimum, maximum, color=line.get_color(), alpha=.16)
+
+
+def required_sensor_grade(sensor_inputs) -> str:
+    """The worst state among the inputs a module says it requires.
+
+    Optional inputs are ignored on purpose: a module that opened a camera it
+    can work without should not be reported as degraded when that camera
+    stops. ``starting`` is not a grade and does not aggregate, so a module
+    that has just connected is not painted as failing for its first second.
+    """
+    if not isinstance(sensor_inputs, dict):
+        return UNKNOWN
+    return worst(record.get("state") for record in sensor_inputs.values()
+                 if isinstance(record, dict) and record.get("required", True))
 
 
 def _series_mean(series: EnvelopeSeries) -> float | None:

@@ -1,0 +1,129 @@
+{
+  "mounts": [],
+  "name": "default",
+  "physics_hz": 300.0,
+  "primary_camera": "front",
+  "schema": "dvision2.drone-profile.v1",
+  "sensors": [
+    {
+      "enabled": true,
+      "id": "front",
+      "model": {
+        "cx_px": 320.0,
+        "cy_px": 240.0,
+        "far_m": 150.0,
+        "fx_px": 457.0073621574767,
+        "fy_px": 457.0073621574767,
+        "height_px": 480,
+        "near_m": 0.15,
+        "width_px": 640
+      },
+      "parent": "body",
+      "pose_parent": {
+        "pitch_deg": -5.0,
+        "roll_deg": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "z_m": 0.1
+      },
+      "rate_hz": 30.0,
+      "type": "camera.rgb"
+    },
+    {
+      "enabled": true,
+      "id": "gnss",
+      "model": {},
+      "parent": "body",
+      "pose_parent": {
+        "pitch_deg": 0.0,
+        "roll_deg": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "z_m": 0.0
+      },
+      "rate_hz": 10.0,
+      "type": "position.gnss"
+    },
+    {
+      "enabled": true,
+      "id": "imu",
+      "model": {
+        "accel_bias_mps2": 0.0,
+        "accel_noise_std_mps2": 0.05,
+        "gyro_bias_dps": 0.0,
+        "gyro_noise_std_dps": 0.05
+      },
+      "parent": "body",
+      "pose_parent": {
+        "pitch_deg": 0.0,
+        "roll_deg": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "z_m": 0.0
+      },
+      "rate_hz": 100.0,
+      "type": "motion.imu"
+    },
+    {
+      "enabled": true,
+      "id": "baro",
+      "model": {
+        "noise_std_m": 0.0,
+        "quantization_m": 0.0,
+        "sea_level_pressure_pa": 101325.0
+      },
+      "parent": "body",
+      "pose_parent": {
+        "pitch_deg": 0.0,
+        "roll_deg": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "z_m": 0.0
+      },
+      "rate_hz": 25.0,
+      "type": "altimeter.barometric"
+    },
+    {
+      "enabled": true,
+      "id": "compass",
+      "model": {
+        "noise_std_deg": 0.0
+      },
+      "parent": "body",
+      "pose_parent": {
+        "pitch_deg": 0.0,
+        "roll_deg": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "z_m": 0.0
+      },
+      "rate_hz": 25.0,
+      "type": "heading.magnetometer"
+    },
+    {
+      "enabled": true,
+      "id": "ambient",
+      "model": {
+        "lapse_rate_c_per_m": 0.0065,
+        "noise_std_c": 0.1,
+        "quantization_c": 0.01
+      },
+      "parent": "body",
+      "pose_parent": {
+        "pitch_deg": 0.0,
+        "roll_deg": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "yaw_deg": 0.0,
+        "z_m": 0.0
+      },
+      "rate_hz": 1.0,
+      "type": "environment.temperature"
+    }
+  ]
+}

@@ -92,22 +92,7 @@ STATUS_KEYS = [
     "link.command_count",
     "link.last_command_type",
     "status.message",
-    "camera.fov_h_deg",
-    "camera.fov_v_deg",
-    "camera.tx_m",
-    "camera.ty_m",
-    "camera.tz_m",
-    "camera.roll_deg",
-    "camera.pitch_deg",
-    "camera.yaw_deg",
-    "camera.fx_px",
-    "camera.fy_px",
-    "camera.cx_px",
-    "camera.cy_px",
-    "camera.width_px",
-    "camera.height_px",
-    "camera.fps",
-    "range.config",
+
 ]
 
 def memkv_aligned_name_len(min_name_len: int, max_value_len: int) -> int:
@@ -130,6 +115,9 @@ BERLIN_CENTER_ALT_M = 34.0
 
 
 def load_pymembus():
+    local_records = Path(__file__).resolve().parent / '.cache/sensor-pymembus'
+    if local_records.is_dir() and str(local_records) not in sys.path:
+        sys.path.insert(0, str(local_records))
     try:
         import pymembus as module
     except (ModuleNotFoundError, ImportError) as exc:
@@ -204,7 +192,7 @@ def shared_names(instance_id: str) -> dict[str, str]:
     validate_id(instance_id)
     base = f"/dvision2.{instance_id}"
     return {
-        "video": f"{base}.video",
+        "sensors": f"{base}.sensors",
         "command": f"{base}.control",
         "status": f"{base}.status",
         "events": f"{base}.events",

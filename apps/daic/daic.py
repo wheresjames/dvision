@@ -29,12 +29,15 @@ for _path in (str(ROOT), str(APPS)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+from dcmn.sensors import open_camera
+
 from dvision2_common import (
     controlled_command, load_pymembus, new_control_identity,
     shared_names, validate_id,
 )
-from dcmn.health import IntakeMeter
-from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.health import IntakeMeter, SensorIntake
+from dcmn.module_bus import (SENSOR_HEALTH_EVENT, PymembusModuleBus,
+                             requests_shutdown)
 from dcmn.pacing import (MAP_HZ, Paced, TEXT_HZ, VIDEO_HZ,
                          PeriodicDeadline, simulated_poll_delay)
 from dcmn.window import (disable_input_method, restore_window_pos,
@@ -542,6 +545,10 @@ class DaicController:
         self.health   = Health()
         self._vehicle_time_s: float | None = None
         self.intake = IntakeMeter(float(args.fps))
+        #: What this module takes in from each sensor it opened, reported
+        #: apart from its own loop rate so a stalled camera cannot hide behind
+        #: a planner that is still ticking.
+        self.sensor_intake = SensorIntake()
         self._ticks_since_heartbeat = 0
         self._last_module_heartbeat = -1e9
         self._hello_sent = False
@@ -797,8 +804,8 @@ class DaicController:
     def open_missing(self) -> None:
         pm = self.pymembus
         if self.video is None:
-            vid = pm.memvid()
-            if vid.open_existing(self.names["video"]):
+            vid = open_camera(self.args.id)
+            if vid is not None:
                 self.video = vid
                 self.health.ok("video", "connected")
             else:
@@ -903,6 +910,7 @@ class DaicController:
             return
         seq = self.video.getSeq()
         self.intake.note_sequence(seq)
+        self.sensor_intake.track(self.video)
         if seq == self.last_video_seq or seq <= 0:
             return
         self.last_video_seq = seq
@@ -927,7 +935,7 @@ class DaicController:
         slam_sectors = self._last_slam_sectors
         if sd._available:
             try:
-                slam_sectors = sd.detect_obstacles(rgb)
+                slam_sectors = sd.detect_obstacles(rgb, timestamp_s=self.video.getVpts(0)/1e6)
                 self._last_slam_sectors = slam_sectors
                 ts = sd.tracking_state
                 n  = sd.n_map_points
@@ -946,7 +954,7 @@ class DaicController:
 
         try:
             if self.status is not None:
-                self.flow_detector.set_motion_from_status(self.status.getAll())
+                self.flow_detector.set_motion_from_status(self.video.capture_status(self.status.getAll()))
             self._last_flow_sectors = self.flow_detector.detect_obstacles(rgb)
             self._last_sectors = fuse_obstacle_sectors(
                 slam_sectors, self._last_flow_sectors,
@@ -1031,6 +1039,9 @@ class DaicController:
             self._hello_sent = True
             self.module_bus.publish("module.hello", payload=payload)
         self.module_bus.publish("module.heartbeat", payload=payload)
+        self.module_bus.publish(SENSOR_HEALTH_EVENT, payload={
+            "state": payload["state"],
+            "sensor_inputs": self.sensor_intake.report(self._vehicle_clock())})
 
     def _note_vehicle_clock(self, status: dict) -> None:
         """Take the vehicle's clock from the snapshot the planner will see.
@@ -1201,11 +1212,11 @@ class DaicController:
 
     def _try_start_slam(self) -> None:
         """Start the SLAM detector once the dsim status buffer is available."""
-        if self._slam_started or self.slam_detector is None or self.status is None:
+        if self._slam_started or self.slam_detector is None or self.status is None or self.video is None:
             return
         self._slam_started = True
         status_snap = self.status.getAll()
-        ok = self.slam_detector.start(status_snap)
+        ok = self.slam_detector.start(self.video.capture_status(status_snap))
         if ok:
             self.health.ok("slam", "initialising")
         else:
@@ -1593,6 +1604,10 @@ class HeadlessAgent:
         self.last_detection  = Detection(False, 0, 0, 0, 0)
         self._vehicle_time_s: float | None = None
         self.intake = IntakeMeter(float(args.fps))
+        #: What this module takes in from each sensor it opened, reported
+        #: apart from its own loop rate so a stalled camera cannot hide behind
+        #: a planner that is still ticking.
+        self.sensor_intake = SensorIntake()
         self._ticks_since_heartbeat = 0
         self._last_module_heartbeat = -1e9
         self._hello_sent = False
@@ -1630,8 +1645,8 @@ class HeadlessAgent:
     def open_missing(self) -> None:
         pm = self.pymembus
         if self.video is None:
-            vid = pm.memvid()
-            if vid.open_existing(self.names["video"]):
+            vid = open_camera(self.args.id)
+            if vid is not None:
                 self.video = vid
         if self.command is None:
             cmd = pm.memcmd()
@@ -1717,6 +1732,9 @@ class HeadlessAgent:
             self._hello_sent = True
             self.module_bus.publish("module.hello", payload=payload)
         self.module_bus.publish("module.heartbeat", payload=payload)
+        self.module_bus.publish(SENSOR_HEALTH_EVENT, payload={
+            "state": payload["state"],
+            "sensor_inputs": self.sensor_intake.report(self._vehicle_clock())})
 
     def _note_vehicle_clock(self, status: dict) -> None:
         """Take the vehicle's clock from the snapshot the planner will see.
@@ -1762,6 +1780,7 @@ class HeadlessAgent:
         if self.video is not None:
             seq = self.video.getSeq()
             self.intake.note_sequence(seq)
+            self.sensor_intake.track(self.video)
             if seq != self.last_video_seq and seq > 0:
                 self.last_video_seq = seq
                 slot  = self.video.getPtr(-1)
@@ -1774,12 +1793,12 @@ class HeadlessAgent:
                 if self.slam_detector is not None and self.slam_detector._available:
                     try:
                         self._last_slam_sectors = self.slam_detector.detect_obstacles(
-                            rgb, timestamp_s=self._vehicle_time_s)
+                            rgb, timestamp_s=self.video.getVpts(0)/1e6)
                     except Exception:
                         pass
                 try:
                     if self.status is not None:
-                        self.flow_detector.set_motion_from_status(self.status.getAll())
+                        self.flow_detector.set_motion_from_status(self.video.capture_status(self.status.getAll()))
                     self._last_flow_sectors = self.flow_detector.detect_obstacles(rgb)
                     self._last_sectors = fuse_obstacle_sectors(
                         self._last_slam_sectors, self._last_flow_sectors,
@@ -1790,10 +1809,10 @@ class HeadlessAgent:
         # Start SLAM once the status buffer is available.
         if (not self._slam_started
                 and self.slam_detector is not None
-                and self.status is not None):
+                and self.status is not None and self.video is not None):
             self._slam_started = True
             status_snap = self.status.getAll()
-            self.slam_detector.start(status_snap)
+            self.slam_detector.start(self.video.capture_status(status_snap))
             if self.args.verbose:
                 print(f"daic: SLAM start: {self.slam_detector.status_text}",
                       file=sys.stderr)

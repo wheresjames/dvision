@@ -603,9 +603,15 @@ def test_a_finished_run_keeps_publishing_presence():
     run.step()
 
     assert run.bus.types().count("module.heartbeat") == 2
-    for _, _, payload in run.bus.published:
+    # Sensor health rides beside the heartbeat rather than inside it, so a
+    # finished run keeps reporting both.
+    assert run.bus.types().count("module.sensor_health") == 2
+    for kind, _, payload in run.bus.published:
         assert payload["state"] == "COMPLETE"
-        assert payload["ready"] is False
+        if kind == "module.heartbeat":
+            assert payload["ready"] is False
+        else:
+            assert payload["sensor_inputs"] == {}
 
 
 def test_late_lifecycle_traffic_cannot_reopen_a_finished_run():

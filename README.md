@@ -51,6 +51,8 @@ docs/
   modcom.md                 Module communication: the four shared-memory planes
   reports.md                Report layout: who owns what, and the rules
   sensors-protocols.md      Sensor configuration and the protocols behind it
+  sensor/                   One document per simulated sensor type, plus the
+                            rules they share
   mavlink-slam-nav.md       The reference architecture the vehicle seam borrows from
 
 apps/                       The seven applications. A source root rather than
@@ -61,11 +63,19 @@ apps/                       The seven applications. A source root rather than
     tktheme.py                That palette applied to ttk, shared by every window
     mapview.py                Top-down map and vehicle drawing, shared by every view
     pacing.py                 Repaint caps, so a window never paces control
+    sensors.py                Sensor discovery, record wire format, camera intake
 
   dsim/
     dsim.py                   Simulator: physics, rendering, IPC server, UI
     headless.py               Fixed-timestep in-process driver with set_pose()
-    range.py                  Exact renderer-aligned range core
+    profiles.py               Drone hardware profiles: load, validate, resolve
+    transforms.py             The parent-linked body/mount/sensor transform graph
+    sensor_manager.py         Simulated-time sensor schedule and publication
+    sensor_models.py          Range/LiDAR measurement models and capture noise
+    sensors_panel.py          The Sensors tab: load, inspect, edit, apply
+    add_menu.py               The Add dropdown: described items, drawn to the palette
+    scroll.py                 Scrollable form viewport and popup, shared by the tabs
+    range.py                  Shared ray geometry and the exact range oracle
     depth_probe.py            Measured selection of the exact-range backend
     realism.py                GPS, estimators, wind, latency, noise, battery, geofence
     realism_panel.py          The Realism tab: those settings, changeable in flight
@@ -204,10 +214,32 @@ All processes share an instance id such as `area1`. Buffer names are derived
 from that id:
 
 ```text
-/dvision2.area1.video     RGB24 video   dsim -> clients
+/dvision2.area1.sensors   Sensor registry dsim -> clients
 /dvision2.area1.control   JSON commands clients -> dsim
 /dvision2.area1.status    Telemetry k/v dsim -> clients
+/dvision2.area1.events    Module bus    every module
 ```
+
+The camera image is no longer a single `.video` area: `dsim` publishes a
+sensor registry from which clients discover every enabled sensor, including
+the primary camera's generation-qualified video ring and per-frame metadata.
+A profile may also contain further RGB cameras (a synchronized stereo pair is
+two of them), 2D and range-image LiDAR on their own array rings, infrared,
+ultrasonic and laser rangefinders, and the state sensors a real airframe
+carries -- GNSS, IMU, barometer, magnetometer and an ambient thermometer -- on
+the shared sample ring. The default profile fits the state sensors and one
+camera; `stereo-nav-and-proximity` is the reference vehicle with all twelve.
+No client in this repository is required to consume the range, LiDAR or state
+streams. See [docs/membus.md](docs/membus.md) for the complete shared-memory
+buffer inventory, payloads and module communication guide,
+[docs/modcom.md](docs/modcom.md) for the contract and
+[docs/sensor/README.md](docs/sensor/README.md) for the per-sensor docs,
+limitations and the measured reference budget.
+
+Whether a receiver is *fitted* is the profile's decision, and it is not the
+same as whether it has a fix: a profile with no `position.gnss` sensor reports
+`gps.fix_type` 0 and an invalid global estimate, which is a different failure
+from `--gps off` on a vehicle that carries one.
 
 Multiple independent simulator/controller pairs can run at the same time with
 different ids.
@@ -372,9 +404,7 @@ and publishes telemetry after every tick.
 ```sh
 python3 apps/dsim/dsim.py --id area1 \
   --map assets/maps/maze_001.txt \
-  --width 640 \
-  --height 480 \
-  --fps 30
+  --drone-profile assets/drone_profiles/default.json
 ```
 
 Options:
@@ -383,11 +413,8 @@ Options:
 |---|---|
 | `--id` | Required instance id |
 | `--map` | Map file to load |
-| `--width`, `--height` | Rendered video frame size |
-| `--fps` | Physics tick and video update rate |
-| `--bufs` | Video ring-buffer slot count |
+| `--drone-profile` | Built-in profile name or JSON path; omitted resolves the built-in default. The profile is the vehicle's simulated hardware: every sensor with its model, rate and mount pose, the mount/PTZ tree they hang from, and the 300 Hz physics cadence. `stereo-nav-and-proximity` is the committed reference with a PTZ-mounted stereo pair, both LiDAR outputs and three rangefinders. See [DV-SENSORS.md](DV-SENSORS.md) |
 | `--sim-speed` | Advance simulated time at this multiple of real time, or `max` for no pacing. Omitted means real time, which is never made to wait. Changeable while running, from the monitor's header |
-| `--video-hz` | Publish video at this rate instead of `--fps`; the physics tick rate is unchanged |
 | `--cmd-size` | Command buffer size in bytes |
 | `--start-alt` | Override initial altitude; otherwise map `drone-height` or `1.5` |
 | `--origin-lat/lon/alt` | GPS coordinate for the map center |
@@ -417,13 +444,13 @@ reports. Speed can also be changed mid-flight from the monitor's header.
 
 The cost of a tick is almost entirely rendering: the physics is microseconds
 and a frame is about 12 ms, so publishing video at the rate consumers actually
-sample is what makes a scaled run fast. `--video-hz` does that without changing
-the physics rate or the *simulated* interval between frames.
+sample is what makes a scaled run fast. The camera profile rate does that
+without changing the physics rate or the *simulated* interval between frames.
 
 ```sh
 # An unattended measurement sweep, as fast as this machine manages.
 python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_020.txt \
-        --no-ui --sim-speed max --video-hz 5 &
+        --no-ui --sim-speed max --drone-profile fast-sweep &
 simulator=$!
 python3 apps/dalg/dalg.py --id area1 --no-ui \
         --profile assets/profiles/optical-flow-maze020.json &
@@ -440,10 +467,11 @@ kill $simulator
 ```
 
 That block is measured, not illustrative: it completes a 131-second flight in
-about 11 seconds of wall time, roughly 12x, and exits on its own. Dropping
-`--video-hz` costs almost all of it -- a scaled run with every physics tick
-still rendering tops out near 2.9x, because a `representative` frame is about
-12 ms and thirty of them a second is already most of a second.
+about 11 seconds of wall time, roughly 12x, and exits on its own. Swapping
+`fast-sweep` for the default 30 Hz camera profile costs almost all of it -- a
+scaled run with every physics tick still rendering tops out near 2.9x, because
+a `representative` frame is about 12 ms and thirty of them a second is already
+most of a second.
 
 One caveat worth knowing before trusting a fast run: a consumer polls on its
 own wall-clock loop, so the same frames arriving in a shorter wall interval
@@ -472,6 +500,7 @@ command line to have been remembered. `apps/dsim/realism.py` owns the model.
 | `--wind-gust-mps` | Gust magnitude, applied as a correlated process on top of the steady wind |
 | `--telemetry-latency-ms`, `--telemetry-jitter-ms` | Delay published status through a ring, so clients see the pose late |
 | `--sensor-noise none\|light\|heavy` | Compass, barometer (noise plus slow drift) and velocity noise on published state |
+| `--ambient-temp-c` | Ground-level air temperature; the temperature sensor cools with height from it |
 | `--battery-failsafe-pct` | Battery percentage that triggers RTL, then LAND |
 | `--battery-drain-pct-s` | Drain rate while armed |
 | `--geofence x0,y0,x1,y1[,max_alt_m]` | Boundary box in map metres, with an optional ceiling |
@@ -553,7 +582,7 @@ sensor and the physics agree. A crash puts the drone in `CRASHED` until reset.
 
 ### Monitor window
 
-Two tabs. The status line, Save Snapshot and Reset drone sit outside them,
+Four tabs. The status line, Save Snapshot and Reset drone sit outside them,
 because they are about the vehicle whichever page you are reading. So does the
 **speed** menu in the header: it is not a property of the environment the way
 the Realism settings are, it changes how fast the whole simulation runs, and
@@ -586,6 +615,43 @@ realism tab would set the height of the whole window and push the monitor down
 the screen. The wheel scrolls the page even over a combobox, which ttk would
 otherwise spin -- a scroll aimed at the page must not silently edit a setting.
 
+**Sensors** also edits the profile name, physics cadence, transport retention
+and memory ceiling, camera FOV, and PTZ axis limits. Drag a component onto a
+mount or body to reparent it. Edits remain a draft until a disarmed Apply; camera
+buffers and channels are prepared before the new generation is advertised.
+
+**Sensors** is the vehicle's hardware: the drone profile, edited as the tree
+its parent links imply. Add, duplicate, remove, reparent, enable and rename
+components; edit the six-axis mount pose and the type-specific model fields;
+make a camera primary, or drop in a synchronized stereo pair. Add opens the
+full type list as a drawn popup: each item is a name with a one-line
+description beneath it, highlighted as one thing, scrolling when the list
+outgrows the screen. The readout
+resolves what the draft actually means -- intrinsics and field of view, the
+transform from the body, a pair's baseline, its disparity at 10 m and the
+rotation between its two cameras, per channel and total shared memory -- and
+a validation error appears beside the field that caused it. The settings
+scroll when they outgrow the window, with the resolved readout pinned below,
+and the wheel over a field scrolls the form rather than spinning a combobox.
+
+Editing here changes nothing. **Apply** hands the simulator one complete,
+validated, immutable profile, which it constructs as a new generation and
+swaps in whole: a draft that does not resolve, or a generation whose channels
+cannot be allocated, leaves the vehicle flying on exactly the profile it
+already had. Apply is disabled while armed. Resetting the drone restarts
+sample cadence and the noise streams but keeps the selected profile.
+
+**Pipeline** is who is attached and whether anything is falling behind, as a
+tree rather than a list. Each module is a row with its own loop rate, and its
+sensor inputs hang under it: generation, observed against expected rate, age,
+skipped sequences, overruns and sync state, one row per input. `dsim`'s own
+production hangs under a **simulator** root beside them, one row per configured
+sensor. The two are separate measurements on purpose -- a producer publishing
+perfectly is exactly what a stalled reader looks like from the other side --
+and the module's single grade is derived from the worst of its *required*
+inputs plus its own processing and liveness, so a healthy stream can never
+hide a failed one.
+
 ### Report Layout
 
 `dsim` owns the report directory for a run and publishes it as the
@@ -595,7 +661,9 @@ agree a name with any other:
 
 ```text
 reports/<id>/<timestamp>-<random>/
-  dsim/     simulator flight path, snapshots, summary.json
+  dsim/     simulator flight path, snapshots, summary.json,
+            drone-profile.json, sensor-manifest.json, sensor-plan.json,
+            health.jsonl and health report.html
   daic/     controller occupancy snapshots, route log, frames, summary.json
   dway/     flight summary.json, flight.jsonl, track.png
   dalg/     occupancy overlays, prediction grids, scores, summary.json, report.html
@@ -677,11 +745,18 @@ Manual yaw is intentionally normalized so joystick and keyboard yaw directions
 match the UI labels and simulator heading behavior.
 
 **Control ownership.** The vehicle takes commands from one client at a time, so
-`dctl` claims the lease on connect and renews it once a second while it is
-running. The Controls panel has **Take Control** and **Release Control** for
-the case that matters: handing the vehicle to `dway` for a tour and taking it
-back afterwards. The telemetry panel shows who currently holds it, and a failed
-acquire names the holder rather than failing silently.
+`dctl` claims the lease on connect -- but only if the vehicle is unowned; it
+never contends with a `dway` tour or a flying `daic` -- and renews it about
+once a second while it is running. Renewal is paced against the lease age the
+vehicle publishes, so an accelerated `--sim-speed`, which retires a lease
+sooner in wall time, does not cost the operator control mid-flight. The
+Controls panel has **Take Control** and **Release Control** for the case that
+matters: handing the vehicle to `dway` for a tour and taking it back
+afterwards. A release is deliberate and latches -- `dctl` will not reclaim the
+vehicle until you press **Take Control** again. The telemetry panel shows who
+currently holds it, and a failed acquire names the holder rather than failing
+silently. Without the lease only `land` is accepted: a `dctl` that shows an
+empty `control.owner` has every other button refused.
 
 Because the guided setpoint failsafe is on by default, a `dctl` that stops
 sending velocity -- all keys released, no stick input -- lets the vehicle fall
@@ -1393,7 +1468,10 @@ All buffers are provided by `pymembus` and named as:
 
 | Buffer | Channel | Direction | Type |
 |---|---|---|---|
-| Video | `.video` | dsim -> clients | `memvid` RGB24 ring buffer |
+| Sensor registry | `.sensors` | dsim -> clients | `memkv` discovery manifest |
+| Camera video | `...sensor.<id>.video` (generation-qualified) | dsim -> clients | `memvid` RGB24 ring buffer |
+| Sensor samples | `...sensor.samples` (generation-qualified) | dsim -> clients | shared record ring: camera and LiDAR metadata, scalar range samples |
+| LiDAR arrays | `...sensor.<id>.array` (generation-qualified) | dsim -> clients | dedicated record ring, one per array sensor |
 | Command | `.control` | clients -> dsim | `memcmd` text queue |
 | Status | `.status` | dsim -> clients | `memkv` key-value store |
 
@@ -1509,13 +1587,11 @@ Common status keys:
 | `sim.speed` | How simulated seconds map onto real ones: `1` in real time, the configured multiple under `--sim-speed`, `0` when unpaced |
 | `sim.report_dir` | This run's report root; every module writes into its own subdirectory of it |
 | `sim.camera_in_geometry` | `"1"` when the camera is inside a wall or tree, so a vision test can discard the frame |
-| `camera.width_px`, `camera.height_px` | Video dimensions |
-| `camera.fx_px`, `camera.fy_px` | Focal length in pixels |
-| `camera.cx_px`, `camera.cy_px` | Principal point |
-| `camera.fov_h_deg`, `camera.fov_v_deg` | Camera FOV |
-| `camera.tx_m`, `camera.ty_m`, `camera.tz_m` | Camera offset from the vehicle body origin |
-| `camera.roll_deg`, `camera.pitch_deg`, `camera.yaw_deg` | Camera mounting angles |
-| `camera.fps` | Camera FPS |
+
+Camera model, mount pose, and per-capture pose are no longer status keys. They
+live in the sensor registry and the per-frame `camera.frame` record; see
+[docs/modcom.md](docs/modcom.md) and
+[docs/sensor/camera-rgb.md](docs/sensor/camera-rgb.md).
 | `drone.armed` | `"1"` or `"0"` |
 | `drone.mode` | `DISARMED`, `GUIDED`, `TAKEOFF`, `LAND`, `RTL`, `HOLD`, `CRASHED` |
 | `drone.x_m`, `drone.y_m`, `drone.z_m` | Local position |
@@ -1627,13 +1703,12 @@ frame capture rate in `dalg`. A failsafe that fires because the machine was
 busy rather than because the vehicle flew for two seconds is measuring the
 wrong thing.
 
-In real time `dt` comes from the wall clock, so the two track each other and
-nothing changes. The live loop clamps `dt` to 100 ms, so a process stalled
-longer than that advances simulated time by less than the wall clock -- the
-honest answer, because the physics did not run. Under `--sim-speed` the step is
-fixed at `1/fps` instead: a scaled clock is not a measurement of the room, so
-measuring it would be meaningless, and a fixed step is what makes a scaled run
-repeatable.
+`dt` is fixed at `1/physics_hz` (300 Hz in the default drone profile) in
+every mode. Real time paces those fixed steps against the wall clock and
+never enlarges a step to catch up: a process that stalls falls behind and
+reports the shortfall through `sim.speed_achieved`, because the physics did
+not run. A scaled run paces the identical steps at `step / multiplier`, which
+is what makes a scaled run repeatable.
 
 Only two things may read the wall clock: liveness between processes
 (heartbeats, expiry, acknowledgement deadlines) and how often a window

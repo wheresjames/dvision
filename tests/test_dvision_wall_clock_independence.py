@@ -13,6 +13,7 @@ between two frames rather than the distance the camera actually travelled.
 
 from __future__ import annotations
 
+import itertools
 import pathlib
 
 import numpy as np
@@ -222,11 +223,22 @@ def _speed_sim(monkeypatch, ticker, *extra_args, work_s: float = 0.0):
     monkeypatch.setattr(sim, "_init_renderer", lambda: None)
     monkeypatch.setattr(sim, "open_ipc", lambda: None)
     monkeypatch.setattr(sim, "close", lambda: None)
-    published: list[float] = []
-    monkeypatch.setattr(sim, "publish_frame",
-                        lambda now: (published.append(sim.sim_time_s),
-                                     ticker.work(work_s)))
     monkeypatch.setattr(sim, "publish_status", lambda **k: None)
+    # The loop drives the sensor schedule every physics tick and the manager
+    # decides what is due; this stands in for the manager with the profile's
+    # real camera cadence and no channels behind it.
+    published: list[float] = []
+    divisor = sim._video_tick_divisor()
+    ticks = itertools.count(1)
+
+    def publish_frame(now):
+        if next(ticks) % divisor:
+            return None
+        published.append(sim.sim_time_s)
+        ticker.work(work_s)
+        return work_s
+
+    monkeypatch.setattr(sim, "publish_frame", publish_frame)
     return sim, published
 
 
@@ -234,6 +246,7 @@ def make_sim(monkeypatch, argv):
     from dsim.dsim import DroneSimulator, DroneState, parse_args
     sim = DroneSimulator.__new__(DroneSimulator)
     sim.args = parse_args(["--id", "speed-test", *argv])
+    sim.profile = sim.args.profile
     sim.map = load_map(ROOT / "assets/maps/maze_001.txt")
     sim.start_x, sim.start_y, sim.start_alt = sim.map.start_x, sim.map.start_y, 1.5
     sim.start_yaw = 270.0
@@ -241,7 +254,8 @@ def make_sim(monkeypatch, argv):
     sim.started = 0.0
     sim.report_root = "/tmp/speed-test"
     sim.crash_pos = None
-    sim.status = sim.command = sim.video = sim.module_bus = sim.ui = None
+    sim.status = sim.command = sim.module_bus = sim.ui = None
+    sim.sensors = None
     sim.p3d = None
     sim.running = True
     sim.sim_time_s = 0.0
@@ -250,24 +264,14 @@ def make_sim(monkeypatch, argv):
     return sim
 
 
-def test_real_time_keeps_the_measured_timestep(monkeypatch):
-    """Absent the option, the loop is exactly what it always was.
-
-    Real time must track reality: when the host stalls, the vehicle is owed
-    the truth about how long the step actually took. Ten ticks costing 50 ms
-    each therefore advance about half a second of flight, not the third of a
-    second a fixed 30 Hz step would have given.
-    """
+def test_real_time_keeps_fixed_steps_under_load(monkeypatch):
+    """A slow renderer reduces achieved speed without changing physics steps."""
     ticker = _Ticker()
     start = ticker.now
-    sim, _ = _speed_sim(monkeypatch, ticker, work_s=0.05)   # 50 ms of work
+    sim, _ = _speed_sim(monkeypatch, ticker, work_s=0.05)
     sim.run()
-
-    assert sim.args.sim_speed is None
-    # Simulated time tracked wall time, which is what real time means.
-    assert sim.sim_time_s == pytest.approx(ticker.now - start, abs=0.06)
-    # And it is emphatically not the fixed-step figure.
-    assert sim.sim_time_s > 0.4
+    assert sim.sim_time_s == pytest.approx(10 / 30)
+    assert ticker.now - start >= .5
 
 
 def test_a_scaled_run_uses_a_fixed_timestep(monkeypatch):
@@ -287,8 +291,8 @@ def test_simulated_time_advances_at_the_configured_multiple(monkeypatch, speed):
     sim, _ = _speed_sim(monkeypatch, ticker, "--sim-speed", str(speed))
     sim.run()
 
-    frame_period = 1.0 / 30.0
-    assert sim.sim_time_s == pytest.approx(10 * frame_period, abs=1e-9)
+    frame_period = 1.0 / 300.0
+    assert sim.sim_time_s == pytest.approx(10 / 30, abs=1e-9)
     assert ticker.slept, "a paced run has to wait"
     for waited in ticker.slept:
         assert waited == pytest.approx(frame_period / speed, abs=1e-9)
@@ -303,25 +307,27 @@ def test_max_does_not_sleep_at_all(monkeypatch):
     assert sim.sim_time_s == pytest.approx(10.0 / 30.0, abs=1e-6)
 
 
-def test_video_hz_preserves_the_simulated_interval_between_frames(monkeypatch):
+def test_profile_rate_preserves_the_simulated_interval_between_frames(monkeypatch, tmp_path):
     """Publishing less often must not change what a consumer sees, only when."""
     ticker = _Ticker()
+    from dsim.profiles import DroneProfile, default_profile
+    path = tmp_path / 'camera.json'
+    DroneProfile.parse(default_profile(rate_hz=6)).save(path)
     every, published = _speed_sim(monkeypatch, ticker, "--sim-speed", "max",
-                                  "--video-hz", "6")
+                                  "--drone-profile", str(path))
     every.run()
 
-    # 30 Hz physics, 6 Hz video: one frame every fifth tick, so the simulated
-    # gap between frames is 1/6 s -- exactly what --video-hz asked for.
-    assert every._video_tick_divisor() == 5
-    assert len(published) == 2
+    # 300 Hz physics, 6 Hz video: one frame every 50 ticks.
+    assert every._video_tick_divisor() == 50
+    assert len(published) == 10
     gaps = [b - a for a, b in zip(published, published[1:])]
     assert all(g == pytest.approx(1.0 / 6.0, abs=1e-6) for g in gaps)
 
 
-def test_video_hz_is_rejected_above_the_physics_rate():
-    from dsim.dsim import parse_args
-    with pytest.raises(SystemExit):
-        parse_args(["--id", "x", "--fps", "30", "--video-hz", "60"])
+def test_sensor_rate_is_rejected_above_the_physics_rate():
+    from dsim.profiles import DroneProfile, default_profile
+    with pytest.raises(ValueError, match='rate_hz'):
+        DroneProfile.parse(default_profile(rate_hz=600))
 
 
 def test_sim_speed_parsing():
@@ -353,9 +359,9 @@ def test_the_speed_can_be_changed_while_the_simulation_runs(monkeypatch):
     """
     ticker = _Ticker()
     sim, _ = _speed_sim(monkeypatch, ticker, "--sim-speed", "2")
-    frame_period = 1.0 / 30.0
+    frame_period = 1.0 / 300.0
 
-    # Halfway through, ask for twice the speed.
+    # After four physics ticks through, ask for twice the speed.
     original_step = sim.step
     ticks = {"n": 0}
 
@@ -374,8 +380,8 @@ def test_the_speed_can_be_changed_while_the_simulation_runs(monkeypatch):
     assert sim.status_fields()["sim.speed"] == "4.0000"
 
 
-def test_switching_to_real_time_mid_run_restores_the_measured_step(monkeypatch):
-    """Real time has to measure again the moment it is selected."""
+def test_switching_to_real_time_preserves_fixed_steps(monkeypatch):
+    """Changing pacing cannot change the physics timestep."""
     ticker = _Ticker()
     sim, _ = _speed_sim(monkeypatch, ticker, "--sim-speed", "max", work_s=0.05)
     steps: list[float] = []
@@ -390,8 +396,7 @@ def test_switching_to_real_time_mid_run_restores_the_measured_step(monkeypatch):
     monkeypatch.setattr(sim, "step", recording_step)
     sim.run()
 
-    assert all(d == pytest.approx(1.0 / 30.0) for d in steps[:4])   # fixed
-    assert steps[-1] == pytest.approx(0.05, abs=1e-6)               # measured
+    assert all(d == pytest.approx(1.0 / 300.0) for d in steps)
     assert sim.status_fields()["sim.speed"] == "1.0000"
 
 

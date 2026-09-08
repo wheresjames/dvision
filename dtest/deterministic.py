@@ -16,13 +16,15 @@ class DeterministicSim(HeadlessSimulator):
                  map_path: Path = CALIBRATION_MAP,
                  altitude_m: float = START_ALT_M,
                  armed: bool = True,
-                 scene_preset: str = "legacy") -> None:
+                 scene_preset: str = "legacy",
+                 drone_profile=None) -> None:
         super().__init__(
             heading_deg=heading_deg, map_path=map_path,
             altitude_m=altitude_m, armed=armed,
             width=FRAME_WIDTH, height=FRAME_HEIGHT,
             instance_id="dtest-deterministic",
             scene_preset=scene_preset,
+            drone_profile=drone_profile,
         )
 
     def capabilities(self) -> BackendCapabilities:

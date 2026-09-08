@@ -29,12 +29,15 @@ for _path in (str(ROOT), str(APPS)):
         sys.path.insert(0, _path)
 
 from dcmn import theme
-from dcmn.health import IntakeMeter
-from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.health import IntakeMeter, SensorIntake
+from dcmn.module_bus import (SENSOR_HEALTH_EVENT, PymembusModuleBus,
+                             requests_shutdown)
 from dcmn.pacing import PeriodicDeadline, Paced, TEXT_HZ, VIDEO_HZ
 from dcmn.tktheme import apply_theme
 from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
+from dcmn.sensors import open_camera
+
 from dvision2_common import (
     controlled_command, load_pymembus, new_control_identity,
     shared_names, validate_id,
@@ -58,6 +61,11 @@ _BTN_ACT   = theme.BUTTON_ACTIVE   # button hover
 _VIDEO_BG  = theme.CANVAS      # video viewport background
 
 _MANUAL_YAW_RATE_DPS = 45.0
+
+#: Lease renewal, on the wall clock: the nominal beat, and the fastest
+#: one an accelerated simulation can drive it to.
+_HEARTBEAT_INTERVAL_S = 1.0
+_HEARTBEAT_FLOOR_S = 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +242,9 @@ class DroneController:
         self._joy_legend_shown = None  # None = not yet determined
         self._held_velocity_active = False
         self._last_heartbeat = 0.0
+        # Latched by Release Control: the vehicle was deliberately handed to
+        # another client, so the connect-time acquire must not reclaim it.
+        self._control_released = False
         self._last_module_heartbeat = 0.0
         self._last_open_attempt = 0.0
         # Painting is for the operator and is capped on the wall clock; the
@@ -243,6 +254,9 @@ class DroneController:
         # distinction in the payload prevents accelerated simulation from
         # making a healthy UI look proportionally slower.
         self.intake = IntakeMeter(float(args.fps), basis="wall")
+        #: The viewer paces itself for a person, but the camera it is
+        #: watching does not: its cadence is still simulated time.
+        self.sensor_intake = SensorIntake()
         self._tick_cadence = PeriodicDeadline(float(args.fps))
         self._paint_video = Paced(VIDEO_HZ)
         self._paint_text = Paced(TEXT_HZ)
@@ -449,8 +463,15 @@ class DroneController:
         ttk.Label(top, textvariable=self.conn_var, style="HeaderDim.TLabel").grid(
             row=0, column=1, sticky="w")
 
-        body = ttk.Frame(parent, padding=(12, 12, 12, 12))
-        body.grid(row=1, column=0, sticky="nsew")
+        from dcmn.event_viewer import EventViewer
+        self.notebook = ttk.Notebook(parent)
+        self.notebook.grid(row=1, column=0, sticky='nsew')
+        body = ttk.Frame(self.notebook, padding=(12, 12, 12, 12))
+        self.flight_page = body
+        self.notebook.add(body, text='Flight')
+        self.event_viewer = EventViewer(self.notebook, self.args.id)
+        self.notebook.add(self.event_viewer.page, text='Events')
+        self.notebook.bind('<<NotebookTabChanged>>', lambda _e: self.held.clear())
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
 
@@ -603,10 +624,10 @@ class DroneController:
         ):
             self.root.bind(f"<KeyPress-{key}>",  self.key_down)
             self.root.bind(f"<KeyRelease-{key}>", self.key_up)
-        self.root.bind("<space>",       lambda _e: self.send_command("zero"))
-        self.root.bind("<KeyPress-t>",  lambda _e: self.takeoff())
-        self.root.bind("<KeyPress-l>",  lambda _e: self.send_command("land"))
-        self.root.bind("<KeyPress-m>",  lambda _e: self.toggle_arm())
+        self.root.bind("<space>",       lambda e: self._flight_shortcut(e, lambda: self.send_command("zero")))
+        self.root.bind("<KeyPress-t>",  lambda e: self._flight_shortcut(e, self.takeoff))
+        self.root.bind("<KeyPress-l>",  lambda e: self._flight_shortcut(e, lambda: self.send_command("land")))
+        self.root.bind("<KeyPress-m>",  lambda e: self._flight_shortcut(e, self.toggle_arm))
 
     def _build_joy_legend(self, parent: ttk.Frame) -> None:
         """Build the gamepad legend panel (initially not gridded)."""
@@ -739,8 +760,8 @@ class DroneController:
             return
         self._last_open_attempt = now
         if self.video is None:
-            vid = pm.memvid()
-            if vid.open_existing(self.names["video"]):
+            vid = open_camera(self.args.id)
+            if vid is not None:
                 self.video = vid
                 self.log("video connected")
         if self.command is None:
@@ -770,6 +791,8 @@ class DroneController:
             self.close()
             return
         self._coordinate_measurement(events)
+        if getattr(self, 'event_viewer', None) is not None:
+            self.event_viewer.poll()
         self.intake.record()
         # Control runs every tick. Only the three painting calls below are
         # capped -- send_held_velocity() shares this timer, and throttling it
@@ -851,6 +874,9 @@ class DroneController:
                                              "state": self._measurement_state,
                                              "ready": self.status is not None,
                                              "capabilities": ["manual_flight"]})
+            self.module_bus.publish(SENSOR_HEALTH_EVENT, payload={
+                "state": self._measurement_state,
+                "sensor_inputs": self.sensor_intake.report(self._sim_time())})
             self._last_module_heartbeat = now
         if self._measurement_state == "IDLE": return
         for event in events:
@@ -899,10 +925,44 @@ class DroneController:
         if self.command is None or self.status is None:
             return
         now = time.monotonic()
-        owner = self.status.getAll().get("control.owner", "")
-        if owner == self.control_source and now - self._last_heartbeat >= 1.0:
-            self.send_command("heartbeat", quiet=True)
+        values = self.status.getAll()
+        owner = values.get("control.owner", "")
+        if owner == self.control_source:
+            if self._heartbeat_due(values, now):
+                self.send_command("heartbeat", quiet=True)
+                self._last_heartbeat = now
+        elif not owner and not self._control_released:
+            # Claim an unowned vehicle -- on connect, and again if the lease
+            # ever lapses -- so the operator's first Arm is not refused. Only
+            # `land` flies without a lease, so a dctl that never acquires one
+            # looks like a controller whose every other button is dead. An
+            # existing owner (dway on a tour, daic flying) is still never
+            # contended with, and Release Control latches this off so handing
+            # the vehicle over does not immediately take it back.
+            self.send_command("acquire_control", quiet=True)
             self._last_heartbeat = now
+
+    def _heartbeat_due(self, values: dict, now: float) -> bool:
+        """Renew inside the lease as the *vehicle* measures it.
+
+        The lease deadline is simulated seconds while this loop runs on the
+        wall clock, so an accelerated simulation retires a lease sooner in wall
+        time than a fixed one-second beat assumes. dsim publishes the age of
+        its own lease; beating once it has burned a third of the timeout keeps
+        the renewal ahead of the deadline at any sim speed, and the floor keeps
+        that from turning into a beat every tick.
+        """
+        elapsed = now - self._last_heartbeat
+        if elapsed < _HEARTBEAT_FLOOR_S:
+            return False
+        if elapsed >= _HEARTBEAT_INTERVAL_S:
+            return True
+        try:
+            age = float(values.get("control.lease_age_s", "") or 0.0)
+            timeout = float(values.get("control.lease_timeout_s", "") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return timeout > 0.0 and age >= timeout / 3.0
 
     def take_control(self) -> None:
         """Acquire an unowned vehicle without contending with another client."""
@@ -911,6 +971,7 @@ class DroneController:
         if owner and owner != self.control_source:
             self.log(f"control held by {owner}")
             return
+        self._control_released = False
         self.send_command("acquire_control")
         self._last_heartbeat = time.monotonic()
 
@@ -920,6 +981,7 @@ class DroneController:
         if owner != self.control_source:
             self.log("this dctl does not own control")
             return
+        self._control_released = True
         self.send_command("release_control")
 
     def _handle_joy_buttons(self) -> None:
@@ -958,6 +1020,7 @@ class DroneController:
             return
         seq = self.video.getSeq()
         self.intake.note_sequence(seq)
+        self.sensor_intake.track(self.video)
         if seq == self.last_video_seq or seq <= 0:
             return
         self.last_video_seq = seq
@@ -989,7 +1052,19 @@ class DroneController:
             var.set(format_status_value(key, value))
 
     def key_down(self, event) -> None:
-        self.held.add(_control_key(event.keysym))
+        if self._flight_keys_enabled(event):
+            self.held.add(_control_key(event.keysym))
+
+    def _flight_keys_enabled(self, event) -> bool:
+        if hasattr(self, 'notebook') and self.notebook.select() != str(self.flight_page):
+            return False
+        widget = getattr(event, 'widget', None)
+        return widget is None or widget.winfo_class() not in (
+            'Entry', 'TEntry', 'Text', 'TCombobox', 'Spinbox', 'TSpinbox')
+
+    def _flight_shortcut(self, event, action):
+        if self._flight_keys_enabled(event):
+            action()
 
     def key_up(self, event) -> None:
         self.held.discard(_control_key(event.keysym))
@@ -1065,6 +1140,8 @@ class DroneController:
                 self.send_command("release_control", quiet=True)
         finally:
             self.joy.close()
+            if getattr(self, 'event_viewer', None) is not None:
+                self.event_viewer.close()
             self.module_bus.close()
             for handle in (self.status, self.command, self.video):
                 if handle is not None:

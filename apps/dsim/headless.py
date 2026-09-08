@@ -13,11 +13,15 @@ from dsim.dsim import (
     compass_heading_to_sim_yaw, parse_args, sim_yaw_to_compass_heading,
 )
 from dvision2_common import load_map
+from dsim import sensor_models
+from dsim.profiles import ARRAY_TYPES, DroneProfile, default_profile
+from dsim.range import scene_geometry
+from dsim.transforms import resolve
 
 FIXED_DT = 0.05
 DEFAULT_WIDTH = 640
 DEFAULT_HEIGHT = 480
-_RENDERER: tuple[tuple[str, int, int, str], Panda3DRenderer] | None = None
+_RENDERER: tuple[tuple[str, str], Panda3DRenderer] | None = None
 
 #: Longer than any harness run, so the single acquire at construction holds.
 _NO_LEASE_TIMEOUT_S = 1e9
@@ -27,16 +31,22 @@ def map_content_sha(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def shared_renderer(sim_map, width: int = DEFAULT_WIDTH,
-                    height: int = DEFAULT_HEIGHT, *, scene_preset: str = "legacy") -> Panda3DRenderer:
+def shared_renderer(sim_map, *, scene_preset: str = "legacy") -> Panda3DRenderer:
+    """One renderer per scene, reused across drivers.
+
+    Resolution is no longer part of the identity: each camera owns an
+    offscreen buffer sized from its own model, so a scene is rebuilt only when
+    the map or the appearance preset changes.
+    """
     global _RENDERER
-    key = (map_content_sha(sim_map.path), int(width), int(height), scene_preset)
+    key = (map_content_sha(sim_map.path), scene_preset)
     if _RENDERER is not None:
         if _RENDERER[0] == key:
             return _RENDERER[1]
         _RENDERER[1].close()
         _RENDERER = None
-    renderer = Panda3DRenderer(sim_map, width, height, scene_preset=scene_preset)
+    renderer = Panda3DRenderer(sim_map, DEFAULT_WIDTH, DEFAULT_HEIGHT,
+                               scene_preset=scene_preset)
     _RENDERER = (key, renderer)
     return renderer
 
@@ -48,8 +58,13 @@ class HeadlessSimulator:
                  altitude_m: float = 1.5, armed: bool = True,
                  width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT,
                  instance_id: str = "dsim-headless",
-                 scene_preset: str = "legacy") -> None:
-        self.width, self.height = int(width), int(height)
+                 scene_preset: str = "legacy", drone_profile=None) -> None:
+        # A path, a built-in profile name, an already-parsed profile, or the
+        # default single camera at the requested size.
+        self.profile = (drone_profile if isinstance(drone_profile, DroneProfile)
+                        else DroneProfile.load(drone_profile) if drone_profile
+                        else DroneProfile.parse(default_profile(width, height)))
+        self.width, self.height = (self.profile.primary['model'][k] for k in ('width_px','height_px'))
         self.scene_preset = scene_preset
         sim = DroneSimulator.__new__(DroneSimulator)
         sim.map = load_map(Path(map_path))
@@ -70,11 +85,12 @@ class HeadlessSimulator:
         # leaving them armed here would stop the vehicle mid-measurement and
         # report it as a physics or perception result.
         sim.args = parse_args([
-            "--id", instance_id, "--width", str(self.width),
-            "--height", str(self.height),
+            "--id", instance_id,
             "--setpoint-timeout", "0",
             "--control-lease-timeout", str(_NO_LEASE_TIMEOUT_S),
         ])
+        sim.profile = sim.args.profile = self.profile
+        sim.args.width, sim.args.height = self.width, self.height
         sim.status = None
         sim.report_root = Path("/nonexistent/dsim-headless")
         self._source_id = instance_id
@@ -165,20 +181,65 @@ class HeadlessSimulator:
         x1, y1 = self.position
         return x1 - x0, y1 - y0
 
-    def render(self, out: np.ndarray | None = None) -> np.ndarray:
-        self._renderer = shared_renderer(self.sim.map, self.width, self.height,
-                                         scene_preset=self.scene_preset)
-        frame = out if out is not None else np.zeros(
-            (self.height, self.width, 3), dtype=np.uint8
-        )
-        if frame.shape != (self.height, self.width, 3):
+    def camera(self, camera_id=None) -> dict:
+        """The resolved profile entry of one enabled RGB camera."""
+        camera_id = camera_id or self.profile.data["primary_camera"]
+        sensor = self.profile.sensor(camera_id)
+        if sensor["type"] != "camera.rgb" or not sensor["enabled"]:
+            raise ValueError(f"{camera_id}: not an enabled RGB camera")
+        return sensor
+
+    def render(self, out: np.ndarray | None = None, *, camera_id=None) -> np.ndarray:
+        sensor = self.camera(camera_id)
+        model = sensor["model"]
+        shape = (model["height_px"], model["width_px"], 3)
+        frame = out if out is not None else np.zeros(shape, dtype=np.uint8)
+        if frame.shape != shape:
             raise ValueError("output frame has the wrong shape")
-        self._renderer.render(self.sim.state, frame)
+        self._renderer = shared_renderer(self.sim.map, scene_preset=self.scene_preset)
+        self._renderer.render_camera(
+            sensor["id"], model, resolve(self.profile.data, sensor["id"], self.sim.state), frame)
         return frame
 
+    def render_group(self, sync_group: str) -> dict[str, np.ndarray]:
+        """Every member of a synchronized group, from one frozen vehicle state."""
+        members = self.profile.sync_group(sync_group)
+        if not members:
+            raise ValueError(f"{sync_group}: no enabled members")
+        frames = {m["id"]: np.zeros((m["model"]["height_px"], m["model"]["width_px"], 3),
+                                    dtype=np.uint8) for m in members}
+        self._renderer = shared_renderer(self.sim.map, scene_preset=self.scene_preset)
+        self._renderer.render_views([
+            (m["id"], m["model"], resolve(self.profile.data, m["id"], self.sim.state),
+             frames[m["id"]]) for m in members])
+        return frames
+
+    def sample(self, sensor_id: str, *, index: int = 0, reset_epoch: int = 0,
+               seed: int = 0) -> dict:
+        """One logical capture of a ray sensor, with no IPC and no scheduler.
+
+        Returns the composed pose, the noiseless truth, and the measurement the
+        sensor would publish for that logical capture index, so a test can
+        assert an analytic distance and a repeatable error in one call.
+        """
+        sensor = self.profile.sensor(sensor_id)
+        kind, model = sensor["type"], sensor["model"]
+        if kind == "camera.rgb":
+            raise ValueError(f"{sensor_id}: use render() for an RGB camera")
+        pose_world = resolve(self.profile.data, sensor_id, self.sim.state)
+        truth = sensor_models.cast(scene_geometry(self.sim.map), pose_world, kind, model)
+        ranges, confidence = sensor_models.measure(
+            truth, model, sensor_models.capture_rng(seed, sensor_id, reset_epoch, index))
+        reading = dict(pose_world=pose_world, truth_m=truth, range_m=ranges,
+                       confidence=confidence, type=kind)
+        if kind not in ARRAY_TYPES:
+            value, level, returns = sensor_models.reduce_beam(
+                ranges, confidence, model["reducer"])
+            reading.update(value_m=value, value_confidence=level, returns=returns)
+        return reading
+
     def render_range(self) -> np.ndarray:
-        self._renderer = shared_renderer(self.sim.map, self.width, self.height,
-                                         scene_preset=self.scene_preset)
+        self._renderer = shared_renderer(self.sim.map, scene_preset=self.scene_preset)
         return self._renderer.render_range(self.sim.state)
 
     def close(self) -> None:

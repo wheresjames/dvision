@@ -1,0 +1,234 @@
+{
+  "schema": "dvision2.drone-profile.v1",
+  "name": "stereo-nav-and-proximity",
+  "physics_hz": 300.0,
+  "primary_camera": "nav_left",
+  "mounts": [
+    {
+      "id": "nav_ptz",
+      "type": "mount.ptz",
+      "parent": "body",
+      "pose_parent": {
+        "x_m": 0.08,
+        "y_m": 0.0,
+        "z_m": 0.1,
+        "roll_deg": 0.0,
+        "pitch_deg": 0.0,
+        "yaw_deg": 0.0
+      },
+      "state": {
+        "pan_deg": 0.0,
+        "tilt_deg": -5.0,
+        "roll_deg": 0.0
+      },
+      "limits": {
+        "pan_deg": [
+          -170.0,
+          170.0
+        ],
+        "tilt_deg": [
+          -90.0,
+          30.0
+        ]
+      }
+    }
+  ],
+  "sensors": [
+    {
+      "id": "nav_left",
+      "type": "camera.rgb",
+      "enabled": true,
+      "rate_hz": 30.0,
+      "parent": "nav_ptz",
+      "pose_parent": {
+        "x_m": 0.0,
+        "y_m": -0.06,
+        "z_m": 0.0,
+        "roll_deg": 0.0,
+        "pitch_deg": 0.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "width_px": 640,
+        "height_px": 480,
+        "fov_h_deg": 70.0,
+        "near_m": 0.15,
+        "far_m": 150.0
+      },
+      "sync_group": "nav_stereo"
+    },
+    {
+      "id": "nav_right",
+      "type": "camera.rgb",
+      "enabled": true,
+      "rate_hz": 30.0,
+      "parent": "nav_ptz",
+      "pose_parent": {
+        "x_m": 0.0,
+        "y_m": 0.06,
+        "z_m": 0.0,
+        "roll_deg": 0.0,
+        "pitch_deg": 0.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "width_px": 640,
+        "height_px": 480,
+        "fov_h_deg": 70.0,
+        "near_m": 0.15,
+        "far_m": 150.0
+      },
+      "sync_group": "nav_stereo"
+    },
+    {
+      "id": "scan",
+      "type": "lidar.scan2d",
+      "enabled": true,
+      "rate_hz": 10.0,
+      "parent": "body",
+      "pose_parent": {
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "z_m": 0.05,
+        "roll_deg": 0.0,
+        "pitch_deg": 0.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "fov_deg": 360.0,
+        "samples": 720,
+        "min_range_m": 0.15,
+        "max_range_m": 25.0,
+        "noise_std_m": 0.02,
+        "quantization_m": 0.005,
+        "dropout_probability": 0.01
+      }
+    },
+    {
+      "id": "flash",
+      "type": "lidar.range_image",
+      "enabled": true,
+      "rate_hz": 10.0,
+      "parent": "body",
+      "pose_parent": {
+        "x_m": 0.05,
+        "y_m": 0.0,
+        "z_m": 0.02,
+        "roll_deg": 0.0,
+        "pitch_deg": -5.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "width_px": 64,
+        "height_px": 48,
+        "fov_h_deg": 70.0,
+        "min_range_m": 0.15,
+        "max_range_m": 20.0,
+        "noise_std_m": 0.03,
+        "quantization_m": 0.01,
+        "dropout_probability": 0.02
+      }
+    },
+    {
+      "id": "down_sonar",
+      "type": "range.ultrasonic",
+      "enabled": true,
+      "rate_hz": 20.0,
+      "parent": "body",
+      "pose_parent": {
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "z_m": -0.03,
+        "roll_deg": 0.0,
+        "pitch_deg": -90.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "beam_fov_deg": 25.0,
+        "beam_samples": 9,
+        "min_range_m": 0.2,
+        "max_range_m": 7.0,
+        "noise_std_m": 0.01
+      }
+    },
+    {
+      "id": "front_ir",
+      "type": "range.infrared",
+      "enabled": true,
+      "rate_hz": 20.0,
+      "parent": "body",
+      "pose_parent": {
+        "x_m": 0.12,
+        "y_m": 0.0,
+        "z_m": 0.0,
+        "roll_deg": 0.0,
+        "pitch_deg": 0.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "beam_fov_deg": 8.0,
+        "beam_samples": 5,
+        "max_range_m": 1.5
+      }
+    },
+    {
+      "id": "front_tof",
+      "type": "range.laser",
+      "enabled": true,
+      "rate_hz": 25.0,
+      "parent": "nav_ptz",
+      "pose_parent": {
+        "x_m": 0.02,
+        "y_m": 0.0,
+        "z_m": 0.03,
+        "roll_deg": 0.0,
+        "pitch_deg": 0.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "beam_fov_deg": 1.0,
+        "beam_samples": 3,
+        "max_range_m": 40.0
+      }
+    },
+    {
+      "id": "gnss",
+      "type": "position.gnss",
+      "enabled": true,
+      "rate_hz": 10.0,
+      "parent": "body"
+    },
+    {
+      "id": "imu",
+      "type": "motion.imu",
+      "enabled": true,
+      "rate_hz": 100.0,
+      "parent": "body",
+      "model": {
+        "gyro_noise_std_dps": 0.05,
+        "accel_noise_std_mps2": 0.05
+      }
+    },
+    {
+      "id": "baro",
+      "type": "altimeter.barometric",
+      "enabled": true,
+      "rate_hz": 25.0,
+      "parent": "body"
+    },
+    {
+      "id": "compass",
+      "type": "heading.magnetometer",
+      "enabled": true,
+      "rate_hz": 25.0,
+      "parent": "body"
+    },
+    {
+      "id": "ambient_temp",
+      "type": "environment.temperature",
+      "enabled": true,
+      "rate_hz": 1.0,
+      "parent": "body"
+    }
+  ]
+}

@@ -20,6 +20,7 @@ from dcmn import theme
 from dsim.realism import (
     GEOFENCE_ACTIONS, GPS_MODES, REALISM_DEFAULTS, SENSOR_NOISE_PROFILES,
 )
+from dsim.scroll import Scrollable
 
 #: One row of the form: setting name, label, and how it is edited.
 #: ``choices`` makes a combobox, ``None`` an entry.
@@ -35,6 +36,7 @@ _FIELDS: tuple[tuple[str, str, tuple[str, ...] | None, str], ...] = (
     ("telemetry_jitter_ms", "Telemetry jitter ms", None, "never reorders samples"),
     ("sensor_noise", "Sensor noise", tuple(SENSOR_NOISE_PROFILES),
      "compass, barometer and velocity"),
+    ("ambient_temp_c", "Ambient temp C", None, "at ground level; the lapse rate cools with height"),
     ("battery_failsafe_pct", "Battery failsafe %", None, "0 disables; triggers RTL then LAND"),
     ("battery_drain_pct_s", "Battery drain %/s", None, "while armed"),
     ("geofence", "Geofence", None, "x0,y0,x1,y1[,max_alt_m]; blank for none"),
@@ -45,104 +47,6 @@ _FIELDS: tuple[tuple[str, str, tuple[str, ...] | None, str], ...] = (
 #: Estimators that can be faulted independently of what caused it.
 _ESTIMATORS = ("attitude", "local", "global", "velocity")
 
-#: Never ask for less window than this, however small the map is.
-_MIN_VIEWPORT_PX = 320
-
-#: X11 reports the wheel as buttons 4 and 5; other platforms send a delta.
-_WHEEL_SEQUENCES = ("<Button-4>", "<Button-5>", "<MouseWheel>")
-
-
-class _Scrollable:
-    """A form taller than the window it sits in, and the scrollbar that implies.
-
-    A notebook is as tall as its tallest page, so without this the realism form
-    would set the height of the whole simulator window and push the map monitor
-    down the screen. The viewport instead asks for the map's height and scrolls
-    the rest, which keeps the window the size the map wants it.
-    """
-
-    def __init__(self, parent: tk.Misc, *, height: int) -> None:
-        self.outer = ttk.Frame(parent)
-        self.outer.rowconfigure(0, weight=1)
-        self.outer.columnconfigure(0, weight=1)
-        self._canvas = tk.Canvas(self.outer, height=height, borderwidth=0,
-                                 highlightthickness=0, background=theme.BG)
-        self._canvas.grid(row=0, column=0, sticky="nsew")
-        self._bar = ttk.Scrollbar(self.outer, orient="vertical",
-                                  command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=self._on_scrolled)
-
-        self.inner = ttk.Frame(self._canvas)
-        self._window = self._canvas.create_window((0, 0), window=self.inner,
-                                                  anchor="nw")
-        self.inner.bind("<Configure>", self._on_content_resized)
-        self._canvas.bind("<Configure>", self._on_viewport_resized)
-        # Bound application-wide and filtered by ancestry rather than by
-        # Enter/Leave on the canvas: the form's own widgets are children of the
-        # canvas, so moving the pointer onto one of them fires Leave and would
-        # take the wheel away exactly where it is wanted.
-        for sequence in _WHEEL_SEQUENCES:
-            self._canvas.bind_all(sequence, self._wheel, add="+")
-        self._canvas.bind("<Destroy>", self._release_wheel)
-
-    def _on_content_resized(self, _event) -> None:
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
-
-    def _on_viewport_resized(self, event) -> None:
-        self._canvas.itemconfigure(self._window, width=event.width)
-
-    def _on_scrolled(self, first: str, last: str) -> None:
-        """Show the scrollbar only when there is something to scroll to."""
-        if float(first) <= 0.0 and float(last) >= 1.0:
-            self._bar.grid_remove()
-        else:
-            self._bar.grid(row=0, column=1, sticky="ns")
-        self._bar.set(first, last)
-
-    def claim_wheel(self, widget: tk.Misc) -> None:
-        """Scroll the page over ``widget`` instead of whatever it would do.
-
-        ttk's combobox spins its own value on the wheel. Over a form that is a
-        trap: a scroll aimed at the page silently changes a setting. A binding
-        on the widget itself runs before its class binding and breaks out of
-        it, so the wheel means one thing everywhere on this page.
-        """
-        for sequence in _WHEEL_SEQUENCES:
-            widget.bind(sequence, self._wheel_and_stop)
-
-    def _release_wheel(self, _event) -> None:
-        for sequence in _WHEEL_SEQUENCES:
-            self._canvas.unbind_all(sequence)
-
-    def _wheel_and_stop(self, event) -> str:
-        self._scroll_by(event)
-        return "break"
-
-    def _wheel(self, event) -> None:
-        # bind_all reaches every widget in the application, so only act when the
-        # pointer is over something inside this page.
-        widget = event.widget
-        while widget is not None:
-            if widget is self._canvas:
-                break
-            widget = getattr(widget, "master", None)
-        else:
-            return
-        self._scroll_by(event)
-
-    def _scroll_by(self, event) -> None:
-        # Ask the view, not the scrollbar: whether the wheel should do anything
-        # is a question about the scroll range, and a widget's mapped state
-        # answers a different one.
-        first, last = self._canvas.yview()
-        if first <= 0.0 and last >= 1.0:
-            return
-        # X11 sends buttons 4 and 5; everywhere else sends a signed delta.
-        step = -1 if getattr(event, "num", 0) == 4 else (
-            1 if getattr(event, "num", 0) == 5 else
-            -1 if getattr(event, "delta", 0) > 0 else 1)
-        self._canvas.yview_scroll(step * 3, "units")
-
 
 class RealismPanel:
     """A form over ``sim.realism``, plus a readout of what is actually in effect."""
@@ -151,7 +55,7 @@ class RealismPanel:
         self.sim = sim
         #: The settings the process started with, for Reset.
         self._command_line = dict(sim.realism.settings())
-        self._scroll = _Scrollable(parent, height=max(_MIN_VIEWPORT_PX, height))
+        self._scroll = Scrollable(parent, height=height)
         #: What the notebook adds as the page.
         self.page = self._scroll.outer
         self.frame = ttk.Frame(self._scroll.inner, padding=12)

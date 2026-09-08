@@ -1,0 +1,29 @@
+{
+  "schema": "dvision2.drone-profile.v1",
+  "name": "fast-sweep",
+  "physics_hz": 300.0,
+  "primary_camera": "front",
+  "mounts": [],
+  "sensors": [
+    {
+      "id": "front",
+      "type": "camera.rgb",
+      "enabled": true,
+      "rate_hz": 5.0,
+      "parent": "body",
+      "pose_parent": {
+        "x_m": 0.0,
+        "y_m": 0.0,
+        "z_m": 0.1,
+        "roll_deg": 0.0,
+        "pitch_deg": -5.0,
+        "yaw_deg": 0.0
+      },
+      "model": {
+        "fov_h_deg": 70.0,
+        "width_px": 640,
+        "height_px": 480
+      }
+    }
+  ]
+}

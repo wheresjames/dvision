@@ -8,8 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
-from dcmn.health import IntakeMeter
-from dcmn.module_bus import PymembusModuleBus, requests_shutdown
+from dcmn.sensors import open_camera
+from dcmn.health import IntakeMeter, SensorIntake
+from dcmn.module_bus import (SENSOR_HEALTH_EVENT, PymembusModuleBus,
+                             requests_shutdown)
 from dcmn.pacing import PeriodicDeadline, simulated_poll_delay
 from dvision2_common import load_map, load_pymembus, shared_names
 from dalg.algo import ALGORITHMS, CONFIGS
@@ -100,6 +102,7 @@ class DalgRun:
         self._camera_poses = []
         self._fov_h_deg = 70.0
         self.intake = IntakeMeter()
+        self.sensor_intake = SensorIntake()
         self._tour_value = ({} if profile.tour is None else
                             json.loads(profile.tour.read_text(encoding="utf-8")))
         self._capture_cadence = PeriodicDeadline(float(
@@ -123,8 +126,7 @@ class DalgRun:
 
     def connect(self) -> bool:
         if self.video is None:
-            handle = self.pm.memvid()
-            if handle.open_existing(self.names["video"]): self.video = handle
+            self.video = open_camera(self.id)
         if self.status is None:
             handle = self.pm.memkv()
             if handle.open(self.names["status"]): self.status = handle
@@ -161,6 +163,9 @@ class DalgRun:
             "capabilities": {"algorithms": list(ALGORITHMS),
                              "sensors": list(self.profile.sensors)},
         })
+        self.bus.publish(SENSOR_HEALTH_EVENT, run_id=self.run_id, payload={
+            "state": self.state,
+            "sensor_inputs": self.sensor_intake.report(self.sim_time_s())})
         self._last_heartbeat = now
 
     def _reject(self, run_id: str, reason: str) -> None:
@@ -200,11 +205,11 @@ class DalgRun:
             self._reject(event.run_id, "selected algorithm requires rgb")
             return
         expected_range = self.profile.sensor_config.get("range")
-        actual_range = values.get("range.config", "none")
-        if expected_range and actual_range != expected_range:
-            self._reject(event.run_id, "range sensor mismatch: expected "
-                         f"{expected_range}, got {actual_range}")
-            return
+        if expected_range:
+            from dsim.range import range_config
+            try: range_config(expected_range)
+            except ValueError as exc:
+                self._reject(event.run_id, str(exc)); return
         if not expected_range and "range" in self.profile.sensors:
             self._reject(event.run_id, "range sensor profile requires a configuration")
             return
@@ -212,6 +217,7 @@ class DalgRun:
         self._coordinator_process_id = event.process_id
         self.state = "READY"
         self.provenance.update({
+            "sensor_manifest": self.video.manifest,
             "tour_id": expected_id, "tour_digest": self._tour_digest,
             "map_digest": expected_map,
             "sensor_config": dict(self.profile.sensor_config),
@@ -228,7 +234,7 @@ class DalgRun:
             "configuration_digest": self.profile.digest})
 
     def _initialize(self) -> None:
-        values = self.status.getAll()
+        values = self.video.capture_status(self.status.getAll())
         map_path = Path(values["sim.map"])
         if not map_path.is_absolute(): map_path = self.root / map_path
         self.sim_map = load_map(map_path)
@@ -260,21 +266,8 @@ class DalgRun:
         for algorithm in self.algorithms.values(): algorithm.start()
 
     def _camera_pose(self, values, pose: Pose) -> Pose:
-        """The lens pose the simulator publishes, not the vehicle datum.
-
-        camera.pitch_deg is already absolute -- it folds in the fixed mount
-        tilt and the body's own pitch -- while camera.t*_m is an offset from
-        the datum.
-        """
-        try:
-            return Pose(pose.x_m+float(values["camera.tx_m"]),
-                        pose.y_m+float(values["camera.ty_m"]),
-                        pose.z_m+float(values["camera.tz_m"]),
-                        pose.heading_deg+float(values["camera.yaw_deg"]),
-                        float(values["camera.roll_deg"]),
-                        float(values["camera.pitch_deg"]))
-        except (KeyError, TypeError, ValueError):
-            return pose
+        p = values['sensor.pose']
+        return Pose(*(p[k] for k in ('x_m','y_m','z_m','heading_deg','roll_deg','pitch_deg')))
 
     def _observe_frame(self, now: float) -> None:
         capture_fps = float(self._tour_value.get("capture_fps", 5.0))
@@ -282,11 +275,15 @@ class DalgRun:
         if not self._capture_cadence.due(now): return
         seq = self.video.getSeq()
         self.intake.note_sequence(seq)
-        if seq == self.last_seq: return
+        # Required: without the primary camera this observer has nothing to
+        # score, however healthy its own loop looks.
+        self.sensor_intake.track(self.video)
+        if seq <= 0 or seq == self.last_seq: return
         self.last_seq = seq
         slot = self.video.getPtr(-1)
         rgb = copy_video_frame(self.video[slot])
-        values = self.status.getAll()
+        values = self.video.capture_status(self.status.getAll())
+        now = float(values["sim.time_s"])
         pose = Pose(*[float(values[name]) for name in
             ("drone.x_m", "drone.y_m", "drone.z_m", "drone.heading_deg",
              "drone.roll_deg", "drone.pitch_deg")])
@@ -300,7 +297,8 @@ class DalgRun:
             # it takes the body pose; the camera pose is what inverts it.
             ranges, confidence = raycast_map(
                 self.sim_map, pose, self.intrinsics,
-                config=range_config(range_name), stride=stride)
+                config=range_config(range_name), stride=stride,
+                camera_pose_world=np.asarray(values["sensor.pose_world"]))
         frame = Frame(seq, now, rgb, pose, ranges, confidence, camera)
         self.algorithms[self.profile.algorithm].observe(frame)
         self._capture_cadence.advance(now)

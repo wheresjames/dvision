@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from dvision2_common import load_pymembus, shared_names, validate_id
@@ -89,6 +89,21 @@ class PipelineMember:
     #: The module's own account of whether it is keeping up, straight off the
     #: heartbeat. ``None`` from a module that does not report one.
     intake: Any = None
+    #: Per-sensor intake, one record per input the module says it uses. Kept
+    #: apart from ``intake`` because a module can be running its own loop at
+    #: full rate while one of its cameras has stopped arriving, and folding
+    #: the two together is exactly how that stops being visible. Empty from a
+    #: module that subscribes to nothing or reports nothing.
+    sensors: dict = field(default_factory=dict)
+    #: Wall seconds since that sensor report, or ``None`` if there has been
+    #: none. A stale sensor report is not the same as a stale heartbeat.
+    sensors_age_s: float | None = None
+
+
+#: Modules report their per-sensor intake on their own event rather than
+#: inside the heartbeat: the heartbeat is a liveness message and has to stay
+#: small, while this grows with the number of subscriptions.
+SENSOR_HEALTH_EVENT = "module.sensor_health"
 
 
 class PipelineView:
@@ -96,24 +111,41 @@ class PipelineView:
     def __init__(self, expiry_s: float = 3.0) -> None:
         self.expiry_s = expiry_s
         self._members: dict[str, PipelineMember] = {}
+        #: Sensor reports arrive on their own event and must survive the next
+        #: heartbeat, which replaces the member record wholesale.
+        self._sensors: dict[str, tuple[float, dict]] = {}
 
     def observe(self, event: ModuleEvent, now: float | None = None) -> None:
+        stamp = time.monotonic() if now is None else now
         if event.type == "module.goodbye":
             self._members.pop(event.process_id, None)
+            self._sensors.pop(event.process_id, None)
+            return
+        if event.type == SENSOR_HEALTH_EVENT:
+            inputs = event.payload.get("sensor_inputs")
+            self._sensors[event.process_id] = (stamp, inputs if isinstance(inputs, dict) else {})
             return
         if event.type not in ("module.hello", "module.heartbeat"): return
         p = event.payload
         self._members[event.process_id] = PipelineMember(
             event.role, event.implementation, event.process_id, SCHEMA_VERSION,
             str(p.get("state", "")), bool(p.get("ready", False)), event.run_id,
-            p.get("capabilities", ()), time.monotonic() if now is None else now,
-            p.get("intake"))
+            p.get("capabilities", ()), stamp, p.get("intake"))
 
     def members(self, now: float | None = None, *, include_expired=False):
         current = time.monotonic() if now is None else now
         result = []
         for member in self._members.values():
             age = max(0.0, current-member.seen_monotonic)
+            reported = self._sensors.get(member.process_id)
+            if reported is not None:
+                member.sensors_age_s = max(0.0, current - reported[0])
+                # A stale block is dropped rather than shown: a module that
+                # has stopped reporting is not a module whose cameras are
+                # still healthy, and the last good numbers it sent read
+                # exactly like that if they are left on screen.
+                member.sensors = (reported[1] if member.sensors_age_s <= self.expiry_s
+                                  else {})
             if include_expired or age <= self.expiry_s: result.append((member, age))
         return sorted(result, key=lambda item: (item[0].role, item[0].implementation))
 
@@ -128,7 +160,11 @@ class PymembusModuleBus:
 
     def __init__(self, instance_id: str, role: str, implementation: str, *,
                  create: bool = False, size: int = DEFAULT_SIZE,
+                 read_only: bool = False,
                  sim_time: Callable[[], float] = time.monotonic) -> None:
+        if create and read_only:
+            raise ValueError('a read-only event reader cannot create the bus')
+        self.read_only = read_only
         self.instance_id = validate_id(instance_id)
         self.role = role
         self.implementation = implementation
@@ -149,7 +185,7 @@ class PymembusModuleBus:
             return True
         handle = self._pm.memmsg()
         if not handle.open(shared_names(self.instance_id)["events"], self.size,
-                           True, self.create):
+                           not self.read_only, self.create):
             return False
         self._handle = handle
         self.session_id = int(handle.getSessionId())
@@ -157,6 +193,8 @@ class PymembusModuleBus:
 
     def publish(self, event_type: str, *, run_id: str = "",
                 payload: dict[str, Any] | None = None) -> bool:
+        if self.read_only:
+            raise RuntimeError('read-only event reader')
         if not self.connect():
             return False
         self.sequence += 1
@@ -171,7 +209,7 @@ class PymembusModuleBus:
         return bool(self._handle.write(json.dumps(
             value, sort_keys=True, separators=(",", ":"))))
 
-    def receive(self) -> list[ModuleEvent]:
+    def receive(self, *, limit: int | None = None) -> list[ModuleEvent]:
         if not self.connect():
             return []
         now = time.monotonic()
@@ -179,7 +217,7 @@ class PymembusModuleBus:
             self._last_session_probe = now
             probe = self._pm.memmsg()
             name = shared_names(self.instance_id)["events"]
-            if probe.open(name, self.size, True, False):
+            if probe.open(name, self.size, not self.read_only, False):
                 session = int(probe.getSessionId())
                 if session != self.session_id:
                     self._handle.close()
@@ -189,8 +227,14 @@ class PymembusModuleBus:
                     probe = None
                 if probe is not None:
                     probe.close()
+            elif self.read_only:
+                self.close()
+                self.session_id = None
+                return []
         events: list[ModuleEvent] = []
-        while self._handle.poll():
+        reads = 0
+        while (limit is None or reads < limit) and self._handle.poll():
+            reads += 1
             raw, overrun = self._handle.read_with_overrun(0)
             if overrun:
                 self.overruns += 1

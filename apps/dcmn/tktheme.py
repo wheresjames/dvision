@@ -55,6 +55,17 @@ def apply_theme(root) -> ttk.Style:
               foreground=[("disabled", theme.DIM), ("active", theme.TEXT)],
               bordercolor=[("active", theme.ACCENT)])
 
+    # A Menubutton is the button it looks like, with a menu hanging off it.
+    style.configure("TMenubutton", background=theme.BUTTON, foreground=theme.TEXT,
+                    bordercolor=theme.GRID, lightcolor=theme.GRID,
+                    darkcolor=theme.GRID, focuscolor=theme.ACCENT,
+                    padding=(10, 6), relief="flat")
+    style.map("TMenubutton",
+              background=[("disabled", theme.PANEL), ("pressed", theme.PANEL),
+                          ("active", theme.BUTTON_ACTIVE)],
+              foreground=[("disabled", theme.DIM), ("active", theme.TEXT)],
+              bordercolor=[("active", theme.ACCENT)])
+
     style.configure("TNotebook", background=theme.BG, borderwidth=0)
     style.configure("TNotebook.Tab", background=theme.PANEL, foreground=theme.DIM,
                     bordercolor=theme.GRID, lightcolor=theme.PANEL,
@@ -105,6 +116,16 @@ def apply_theme(root) -> ttk.Style:
     root.option_add("*TCombobox*Listbox.foreground", theme.TEXT)
     root.option_add("*TCombobox*Listbox.selectBackground", theme.ACCENT)
     root.option_add("*TCombobox*Listbox.selectForeground", theme.TEXT)
+    # A Menubutton's dropdown is also a classic Tk widget rather than a ttk
+    # one, so it is reached through the option database the same way. The
+    # highlighted entry is an accent fill, and the near-white TEXT over
+    # ACCENT reads around 2:1 -- so it takes the emphasis text colour the
+    # accent buttons use, not the window's.
+    root.option_add("*Menu.background", theme.PANEL)
+    root.option_add("*Menu.foreground", theme.TEXT)
+    root.option_add("*Menu.activeBackground", theme.ACCENT)
+    root.option_add("*Menu.activeForeground", theme.ON_EMPHASIS)
+    root.option_add("*Menu.disabledForeground", theme.DIM)
 
     # A Treeview keeps its own body colours: clam draws the rows and the empty
     # area below them from its own near-white defaults rather than from the "."

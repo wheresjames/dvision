@@ -26,6 +26,8 @@ def _sim() -> DroneSimulator:
         height=480,
         fps=30,
     )
+    from dsim.profiles import DroneProfile
+    sim.profile = DroneProfile.load()
     sim.map = SimpleNamespace(
         path="test.map",
         width=5,
@@ -231,3 +233,80 @@ def test_collision_height_matches_what_the_range_sensor_casts_against():
 
     assert not np.isfinite(ranges).any()
     assert not sim.is_blocked(2.5, 1.5, above)
+
+
+# ---------------------------------------------------------------------------
+# Sensor profile application
+# ---------------------------------------------------------------------------
+
+class _FakeSensors:
+    """A sensor manager with no channels: only what Apply is expected to do."""
+
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.generation = 1
+        self.tick_index = 17
+        self.manifest = {"schema": "dvision2.sensor-manifest.v1"}
+
+    def apply(self, profile):
+        if self.fail:
+            raise RuntimeError("staged channel construction failed")
+        self.generation += 1
+        self.tick_index = 0
+
+
+def _alternate_profile():
+    from dsim.profiles import DroneProfile, default_profile
+    return DroneProfile.parse(default_profile(width=320, height=240))
+
+
+def _applyable_sim(tmp_path) -> DroneSimulator:
+    sim = _sim()
+    sim.report_root = tmp_path
+    sim.dsim_report_dir = tmp_path / "dsim"
+    sim.dsim_report_dir.mkdir()
+    sim.p3d = None
+    sim.sensors = _FakeSensors()
+    return sim
+
+
+def test_apply_profile_is_rejected_while_armed(tmp_path):
+    sim = _applyable_sim(tmp_path)
+    original = sim.profile
+    sim.state.armed = True
+
+    with pytest.raises(ValueError, match="Disarm"):
+        sim.apply_profile(_alternate_profile())
+
+    assert sim.profile is original
+    assert sim.sensors.generation == 1
+
+
+def test_failed_apply_retains_the_running_profile(tmp_path):
+    sim = _applyable_sim(tmp_path)
+    sim.sensors = _FakeSensors(fail=True)
+    original = sim.profile
+
+    with pytest.raises(RuntimeError, match="staged channel"):
+        sim.apply_profile(_alternate_profile())
+
+    # Construction is staged before anything is swapped, so a failure leaves
+    # the running profile and its generation exactly as they were.
+    assert sim.profile is original
+    assert sim.sensors.generation == 1
+
+
+def test_disarmed_apply_swaps_the_profile_and_resets_cadence(tmp_path):
+    sim = _applyable_sim(tmp_path)
+    profile = _alternate_profile()
+
+    sim.apply_profile(profile)
+
+    assert sim.profile is profile
+    assert sim.args.profile is profile
+    assert (sim.args.width, sim.args.height) == (320, 240)
+    assert sim.args.fps == profile.data["physics_hz"]
+    assert sim.sensors.tick_index == 0
+    assert sim.sensors.generation == 2
+    assert (sim.dsim_report_dir / "drone-profile.json").exists()
+    assert (sim.dsim_report_dir / "sensor-manifest.json").exists()

@@ -153,6 +153,185 @@ class IntakeMeter:
         }
 
 
+#: A sensor whose first period has not had time to pass yet. Deliberately not
+#: in ``SEVERITY``: a module that has only just connected is not failing, and
+#: aggregating it as a grade would paint every startup red for a second.
+STARTING = "starting"
+
+#: How late a sample may be, in multiples of its own period, before lateness
+#: is worth reporting on its own. A sensor at its configured rate is always
+#: within one; three absorbs a scheduling boundary, ten is a stopped stream.
+_LATE_PERIODS = 3.0
+_STALLED_PERIODS = 10.0
+
+
+class SensorIntake:
+    """What one module takes in from each sensor it actually uses.
+
+    This is the consumer half of the sensor health contract. It is not the
+    same measurement as :class:`IntakeMeter`, which says whether a module
+    completed its own work often enough: a module can run its loop at full
+    rate while one of its cameras has stopped arriving, and one number cannot
+    say both. Nor is it derivable from the provider's production counts --
+    that is the whole point, because a producer that is publishing perfectly
+    is exactly what a stalled reader looks like from the other side.
+
+    Rates and ages are in *simulated* time, because sample cadence is a
+    property of the data; module liveness is a wall-clock question and is
+    answered elsewhere.
+    """
+
+    def __init__(self) -> None:
+        self._inputs: dict[str, dict[str, Any]] = {}
+
+    def follow(self, subscriptions) -> None:
+        """Declare the complete set of sensors in use, replacing the last set.
+
+        A sensor that disappears from a new generation's manifest disappears
+        from the report with it, rather than lingering as a permanent fault
+        for a stream nobody is subscribed to any more.
+        """
+        wanted = {}
+        for subscription in subscriptions:
+            sensor_id = subscription["sensor_id"]
+            entry = self._inputs.get(sensor_id)
+            generation = subscription.get("generation")
+            identity = (subscription.get('provider_session_id'), generation,
+                        subscription.get('reset_epoch'))
+            if entry is None or entry.get('identity') != identity:
+                # A new generation is a new stream: sequences restart and the
+                # rate window means nothing across the boundary.
+                entry = _fresh_input(generation)
+                entry['identity'] = identity
+            entry.update(required=bool(subscription.get("required", True)),
+                         expected_hz=subscription.get("expected_hz"),
+                         sync_group=subscription.get("sync_group"))
+            wanted[sensor_id] = entry
+        self._inputs = wanted
+
+    def track(self, *handles, required: bool = True) -> None:
+        """Declare and sample every open sensor handle, in one call.
+
+        A handle is anything exposing ``subscription()`` and ``observation()``
+        -- :class:`dcmn.sensors.SensorVideo` is the one every consumer holds.
+        Call it wherever frames are polled rather than once a report: the
+        observed rate is counted from the samples actually admitted, so
+        sampling it on the reporting cadence would measure the report.
+        """
+        subscriptions, observations = [], []
+        for handle in handles:
+            if handle is None:
+                continue
+            subscription = handle.subscription(required=required)
+            if subscription is None:
+                continue
+            subscriptions.append(subscription)
+            observations.append(handle.observation())
+        self.follow(subscriptions)
+        for observation in observations:
+            if observation is not None:
+                self.observe(observation)
+
+    def observe(self, observation) -> None:
+        """Note one sample that this module actually took in.
+
+        Sequences are per sensor and per generation, so a repeat is ignored
+        and a gap is counted: those are records published while this module
+        was busy elsewhere, which is a different number from the transport's
+        own overrun count and is kept separately.
+        """
+        entry = self._inputs.get(observation["sensor_id"])
+        if entry is None:
+            return
+        sequence = int(observation["sequence"])
+        if entry["last_sequence"] is not None:
+            if sequence <= entry["last_sequence"]:
+                return
+            entry["skipped"] += sequence - entry["last_sequence"] - 1
+        entry["last_sequence"] = sequence
+        entry["last_sim_time_s"] = float(observation["sim_time_s"])
+        entry["capture_id"] = observation.get("capture_id")
+        entry["overruns"] = int(observation.get("overruns", 0) or 0)
+        entry["drops"] = int(observation.get("drops", 0) or 0)
+        entry['cache_bytes'] = int(observation.get('cache_bytes', 0) or 0)
+        entry["events"] += 1
+
+    def report(self, sim_now: float) -> dict[str, dict[str, Any]]:
+        """Close the window and describe every declared input."""
+        groups: dict[str, set] = {}
+        for entry in self._inputs.values():
+            if entry["sync_group"] and entry["capture_id"] is not None:
+                groups.setdefault(entry["sync_group"], set()).add(entry["capture_id"])
+        out = {}
+        for sensor_id, entry in self._inputs.items():
+            out[sensor_id] = _close(entry, sim_now, groups)
+        return out
+
+    def grade(self) -> str:
+        """The worst state among the inputs this module says it requires."""
+        return worst(entry["state"] for entry in self._inputs.values()
+                     if entry["required"])
+
+
+def _fresh_input(generation) -> dict[str, Any]:
+    return {"generation": generation, "required": True, "expected_hz": None,
+            "sync_group": None, "last_sequence": None, "last_sim_time_s": None,
+            "capture_id": None, "skipped": 0, "overruns": 0, "drops": 0,
+            "events": 0, "window_start_s": None, "observed_hz": None, "cache_bytes": 0,
+            "state": STARTING, "started_s": None}
+
+
+def _close(entry: dict[str, Any], sim_now: float, groups) -> dict[str, Any]:
+    start, entry["window_start_s"] = entry["window_start_s"], sim_now
+    if entry["started_s"] is None:
+        entry["started_s"] = sim_now
+    if start is not None and sim_now > start:
+        entry["observed_hz"] = entry["events"] / (sim_now - start)
+    entry["events"] = 0
+    skipped, entry["skipped"] = entry["skipped"], 0
+    expected = entry["expected_hz"]
+    age = (None if entry["last_sim_time_s"] is None
+           else max(0.0, sim_now - entry["last_sim_time_s"]))
+    sync = "alone"
+    if entry["sync_group"]:
+        captures = groups.get(entry["sync_group"], set())
+        sync = "diverged" if len(captures) > 1 else "ok"
+    entry["state"] = _state(entry, age, expected, sim_now, sync)
+    return {"generation": entry["generation"], "required": entry["required"],
+            "expected_hz": expected,
+            "observed_hz": (None if entry["observed_hz"] is None
+                            else round(entry["observed_hz"], 3)),
+            "last_sequence": entry["last_sequence"],
+            "age_s": None if age is None else round(age, 4),
+            "skipped": skipped, "overruns": entry["overruns"],
+            "drops": entry["drops"], "cache_bytes": entry['cache_bytes'],
+            "sync": sync, "state": entry["state"]}
+
+
+def _state(entry, age, expected, sim_now, sync) -> str:
+    """Whether an input is healthy, still starting, or failing, and why.
+
+    Rate alone is not enough: a stream that stopped a moment ago still
+    averages its configured rate over the window it stopped in, so lateness is
+    graded beside it and the worse of the two wins. A synchronized group whose
+    members report different captures is unhealthy however good both rates
+    look, because the geometry that made them a group no longer holds.
+    """
+    if not expected or expected <= 0.0:
+        return UNKNOWN
+    period = 1.0 / expected
+    if entry["last_sim_time_s"] is None:
+        started = entry["started_s"]
+        early = started is None or sim_now - started < 2.0 * period
+        return STARTING if early else BAD
+    if entry["observed_hz"] is None:
+        return STARTING
+    lateness = OK if age <= _LATE_PERIODS * period else (
+        WARN if age <= _STALLED_PERIODS * period else BAD)
+    return worst([grade(entry["observed_hz"], expected), lateness,
+                  BAD if sync == "diverged" else OK])
+
+
 #: What a module that reports nothing looks like.
 UNREPORTED: dict[str, Any] = {"basis": "sim", "wanted_hz": None,
                               "achieved_hz": None,

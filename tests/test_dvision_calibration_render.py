@@ -149,6 +149,119 @@ def test_ring_fixture_measures_the_same_from_all_four_sides() -> None:
                 f"y={expected.y:.1f} at heading {RING_HEADINGS[0]:.0f}")
 
 
+# ---------------------------------------------------------------------------
+# Variable-FOV lens contract
+# ---------------------------------------------------------------------------
+
+def test_narrowing_the_fov_moves_landmarks_outward(tmp_path) -> None:
+    """A profile FOV change must change the rendered lens, not just the model.
+
+    The white panel sits off the optical axis, so its pinhole offset and its
+    rendered width both scale with fx: narrowing the FOV raises the
+    magnification and pushes the landmark outward, widening it pulls the
+    landmark back inward. Published fx must agree with the FOV it was derived
+    from, or the manifest lies about the pixels it describes.
+    """
+    import math
+
+    from dsim.profiles import DroneProfile, default_profile
+
+    def render(fov: float):
+        draft = default_profile()
+        draft["sensors"][0]["model"]["fov_h_deg"] = fov
+        profile = DroneProfile.parse(draft)
+        path = tmp_path / f"fov-{fov:.0f}.json"
+        profile.save(path)
+        sim = DeterministicSim(drone_profile=str(path))
+        try:
+            frame = sim.render().copy()
+        finally:
+            sim.close()
+        model = profile.primary["model"]
+        assert model["fx_px"] == pytest.approx(
+            FRAME_WIDTH / (2.0 * math.tan(math.radians(fov) / 2.0)))
+        white = color_centroid(frame, "white")
+        white_width = _white_mask_width(frame)
+        return model["fx_px"], white, white_width
+
+    fx_wide, white_wide, width_wide = render(70.0)
+    fx_narrow, white_narrow, width_narrow = render(35.0)
+    fx_broad, white_broad, _width_broad = render(100.0)
+
+    scale = fx_narrow / fx_wide
+    assert scale > 1.5, "narrowing the FOV must raise fx"
+
+    off_wide = white_wide.x - CENTER_X
+    off_narrow = white_narrow.x - CENTER_X
+    off_broad = white_broad.x - CENTER_X
+    assert off_wide > 0 and off_narrow > off_wide, (
+        "the off-axis landmark must move outward when the FOV narrows")
+    assert 0 < off_broad < off_wide, (
+        f"widening the FOV must pull the landmark inward: offset went "
+        f"{off_wide:.1f} -> {off_broad:.1f} px")
+    assert off_wide / off_broad == pytest.approx(fx_wide / fx_broad, rel=0.05)
+    assert off_narrow / off_wide == pytest.approx(scale, rel=0.05), (
+        f"landmark offset grew {off_narrow / off_wide:.3f}x but fx grew "
+        f"{scale:.3f}x; the rendered lens does not match the published model")
+
+    assert width_narrow / width_wide == pytest.approx(scale, rel=0.05), (
+        f"landmark width grew {width_narrow / width_wide:.3f}x but fx grew "
+        f"{scale:.3f}x; the rendered lens does not match the published model")
+
+
+def test_cameras_render_at_their_own_resolutions(tmp_path) -> None:
+    """Resolution is per camera, and changing it must reach the renderer.
+
+    The host window an offscreen renderer opens cannot be resized, so a camera
+    that does not match it needs its own buffer. Without one, applying a
+    profile at a different resolution raised inside Panda3D rather than
+    rendering, and two cameras of different sizes could not coexist at all.
+    """
+    from dsim.profiles import DroneProfile, default_profile
+
+    def profile(width, height):
+        draft = default_profile(width, height)
+        draft["sensors"][0]["id"] = draft["primary_camera"] = "wide"
+        draft["sensors"].append(dict(
+            id="narrow", type="camera.rgb", enabled=True, rate_hz=30.0,
+            parent="body", pose_parent=dict(z_m=0.1, pitch_deg=-5.0),
+            model=dict(width_px=width // 2, height_px=height // 2,
+                       fov_h_deg=70.0)))
+        return DroneProfile.parse(draft)
+
+    sim = DeterministicSim(drone_profile=profile(320, 240))
+    try:
+        wide = sim.render(camera_id="wide")
+        narrow = sim.render(camera_id="narrow")
+        assert wide.shape == (240, 320, 3)
+        assert narrow.shape == (120, 160, 3)
+        # Same lens, half the sampling: the landmark lands at the same
+        # fraction across each image.
+        for frame, width in ((wide, 320), (narrow, 160)):
+            assert color_centroid(frame, "white").x / width == pytest.approx(
+                0.63, abs=0.05)
+    finally:
+        sim.close()
+
+    # A different resolution, through the same renderer, is what a profile
+    # apply does at run time.
+    other = DeterministicSim(drone_profile=profile(256, 192))
+    try:
+        assert other.render(camera_id="wide").shape == (192, 256, 3)
+    finally:
+        other.close()
+
+
+def _white_mask_width(frame_rgb: np.ndarray) -> float:
+    mask = ((frame_rgb[..., 0] > 210) & (frame_rgb[..., 1] > 210)
+            & (frame_rgb[..., 2] > 210))
+    xs = np.nonzero(mask)[1]
+    assert len(xs) >= MINIMUM_MARKER_PIXELS, (
+        f"white marker has {len(xs)} pixels, expected "
+        f"{MINIMUM_MARKER_PIXELS}+")
+    return float(xs.max() - xs.min())
+
+
 @pytest.mark.parametrize("heading", RING_HEADINGS)
 def test_yaw_right_moves_landmarks_left_from_every_heading(heading: float) -> None:
     """The dynamic check the static group only makes at heading 0."""

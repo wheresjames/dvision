@@ -14,6 +14,8 @@ import numpy as np
 from dtest.artifacts import save_failure_bundle
 from dtest.backend import BackendCapabilities
 from dtest.calibration_scene import CALIBRATION_MAP, ROOT
+from dcmn.sensors import open_camera
+from dsim.profiles import DroneProfile, default_profile
 from dvision2_common import controlled_command, load_pymembus, shared_names
 
 
@@ -26,6 +28,8 @@ class DsimProcessHarness:
 
     def __init__(self, artifact_dir: Path, *, map_path: Path = CALIBRATION_MAP,
                  start_heading: float = 0.0, fps: int = 30,
+                 drone_profile=None, frames: int | None = None,
+                 sim_speed: str | None = None,
                  setpoint_timeout_s: float | None = 0.0) -> None:
         self.id = f"dtest-{uuid.uuid4().hex[:12]}"
         self.names = shared_names(self.id)
@@ -36,6 +40,11 @@ class DsimProcessHarness:
         self.map_path = Path(map_path)
         self.start_heading = start_heading
         self.fps = fps
+        #: A resolved profile to fly, or None for the built-in default at
+        #: ``fps``. A release test flies the committed reference profile.
+        self.drone_profile = drone_profile
+        self.frames = frames
+        self.sim_speed = sim_speed
         # None keeps the simulator's own default; a test that needs the guided
         # setpoint failsafe asks for it explicitly.
         self.setpoint_timeout_s = setpoint_timeout_s
@@ -85,29 +94,32 @@ class DsimProcessHarness:
                 "start_heading_deg": self.start_heading,
                 "fps": self.fps,
                 "shared_names": self.names,
-                "camera": {
-                    k: self.last_status.get(k)
-                    for k in ("camera.width_px", "camera.height_px",
-                              "camera.fov_h_deg", "camera.fov_v_deg",
-                              "camera.pitch_deg")
-                },
+                "camera": self.video.model if self.video is not None else {},
             },
             details={"instance_id": self.id, **details},
         )
 
     def start(self) -> None:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        profile_path = self.artifact_dir / 'drone-profile.json'
+        profile = self.drone_profile or DroneProfile.parse(
+            default_profile(rate_hz=self.fps))
+        profile.save(profile_path)
         cmd = [
             sys.executable, str(ROOT / "apps/dsim/dsim.py"),
             "--id", self.id,
             "--map", str(self.map_path),
             "--start-heading", str(self.start_heading),
-            "--fps", str(self.fps),
+            "--drone-profile", str(profile_path),
             "--no-ui",
             "--report-dir", str(self.report_dir),
         ]
         if self.setpoint_timeout_s is not None:
             cmd += ["--setpoint-timeout", str(self.setpoint_timeout_s)]
+        if self.frames is not None:
+            cmd += ["--frames", str(self.frames)]
+        if self.sim_speed is not None:
+            cmd += ["--sim-speed", self.sim_speed]
         self._stderr_fh = self._stderr_path.open("w", encoding="utf-8")
         self.process = subprocess.Popen(
             cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL,
@@ -134,9 +146,7 @@ class DsimProcessHarness:
     def _connect(self) -> bool:
         self._assert_running()
         if self.video is None:
-            handle = self.pm.memvid()
-            if handle.open_existing(self.names["video"]):
-                self.video = handle
+            self.video = open_camera(self.id)
         if self.command is None:
             handle = self.pm.memcmd()
             if handle.open(self.names["command"], 65536):
@@ -322,7 +332,7 @@ class DsimProcessHarness:
         for factory, name in (
             (self.pm.memkv, self.names["status"]),
             (self.pm.memcmd, self.names["command"]),
-            (self.pm.memvid, self.names["video"]),
+            (self.pm.memkv, self.names["sensors"]),
         ):
             try:
                 factory.remove(name)

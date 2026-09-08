@@ -272,7 +272,10 @@ def test_camera_matrix_matches_the_published_camera_geometry() -> None:
     from dtest.deterministic import DeterministicSim
     from daic.mini_slam_detector import MiniSLAMDetector
 
-    telemetry = DeterministicSim(heading_deg=0.0).read_telemetry()
+    sim = DeterministicSim(heading_deg=0.0)
+    model = sim.profile.primary['model']
+    telemetry = {'camera.' + k: str(v) for k, v in model.items()}
+    telemetry['camera.fov_h_deg'] = str(math.degrees(2*math.atan(model['width_px']/(2*model['fx_px']))))
     K = MiniSLAMDetector._build_K(telemetry)
     width = float(telemetry["camera.width_px"])
     height = float(telemetry["camera.height_px"])

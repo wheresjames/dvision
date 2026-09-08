@@ -59,10 +59,13 @@ def _fly(tmp_path: Path, sim_speed: str) -> dict:
     """One complete tour, and the summary dway wrote for it."""
     instance = f"speed-{uuid.uuid4().hex[:10]}"
     report_dir = tmp_path / f"run-{sim_speed}"
+    from dsim.profiles import DroneProfile, default_profile
+    profile = tmp_path / 'camera.json'
+    DroneProfile.parse(default_profile(rate_hz=5)).save(profile)
     simulator = subprocess.Popen(
         [sys.executable, str(ROOT / "apps/dsim/dsim.py"), "--id", instance,
          "--map", str(MAP), "--no-ui", "--report-dir", str(report_dir),
-         "--sim-speed", sim_speed, "--video-hz", "5"],
+         "--sim-speed", sim_speed, "--drone-profile", str(profile)],
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         _await_simulator(instance)

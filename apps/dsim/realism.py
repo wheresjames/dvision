@@ -66,6 +66,7 @@ REALISM_DEFAULTS: dict[str, Any] = {
     "telemetry_latency_ms": 0.0,
     "telemetry_jitter_ms": 0.0,
     "sensor_noise": "none",
+    "ambient_temp_c": 20.0,
     "battery_failsafe_pct": 0.0,
     "battery_drain_pct_s": 0.01,
     "geofence": "",
@@ -175,6 +176,7 @@ class Realism:
     wind_dir_deg: float = 0.0
     wind_gust_mps: float = 0.0
     sensor_noise: str = "none"
+    ambient_temp_c: float = 20.0
     battery_failsafe_pct: float = 0.0
     battery_drain_pct_s: float = 0.01
     geofence: Geofence | None = None
@@ -183,6 +185,12 @@ class Realism:
     seed: int = 1234
     # Runtime estimator faults, set by command; absent means healthy.
     faults: dict[str, bool] = field(default_factory=dict)
+    #: Whether the vehicle carries a GNSS receiver at all. This is hardware,
+    #: so the drone profile owns it and the simulator sets it; the mode above
+    #: is the *quality* of a receiver that exists. Without one there is no fix
+    #: to degrade and no global estimate to validate, which is a different
+    #: situation from a fitted receiver that cannot see the sky.
+    gnss_installed: bool = True
 
     def __post_init__(self) -> None:
         self._validate()
@@ -236,6 +244,7 @@ class Realism:
             wind_dir_deg=float(merged["wind_dir_deg"]),
             wind_gust_mps=float(merged["wind_gust_mps"]),
             sensor_noise=str(merged["sensor_noise"]),
+            ambient_temp_c=float(merged["ambient_temp_c"]),
             battery_failsafe_pct=float(merged["battery_failsafe_pct"]),
             battery_drain_pct_s=float(merged["battery_drain_pct_s"]),
             geofence=Geofence.parse(str(merged["geofence"])),
@@ -263,6 +272,7 @@ class Realism:
             "telemetry_latency_ms": self.telemetry.latency_s * 1000.0,
             "telemetry_jitter_ms": self.telemetry.jitter_s * 1000.0,
             "sensor_noise": self.sensor_noise,
+            "ambient_temp_c": self.ambient_temp_c,
             "battery_failsafe_pct": self.battery_failsafe_pct,
             "battery_drain_pct_s": self.battery_drain_pct_s,
             "geofence": "" if self.geofence is None else self.geofence.describe(),
@@ -291,8 +301,9 @@ class Realism:
         reseeded = candidate.seed != self.seed
         for name in ("gps_mode", "gps_noise_m", "local_estimator", "wind_mps",
                      "wind_dir_deg", "wind_gust_mps", "sensor_noise",
-                     "battery_failsafe_pct", "battery_drain_pct_s", "geofence",
-                     "geofence_action", "seed"):
+                     "ambient_temp_c", "battery_failsafe_pct",
+                     "battery_drain_pct_s", "geofence", "geofence_action",
+                     "seed"):
             setattr(self, name, getattr(candidate, name))
         if reseeded:
             self._rng = random.Random(self.seed)
@@ -345,6 +356,10 @@ class Realism:
             self.gps_noise_m = max(0.0, float(noise_m))
         self._retune()
 
+    def set_gnss_installed(self, installed: bool) -> None:
+        """Fit or remove the receiver. The drone profile decides this."""
+        self.gnss_installed = bool(installed)
+
     def set_estimator(self, **flags: bool) -> None:
         """Fault or restore an estimator, independently of what caused it."""
         for name, value in flags.items():
@@ -380,22 +395,34 @@ class Realism:
     def wind_speed_mps(self) -> float:
         return self.wind_mps + self._gust.value
 
+    @property
+    def baro_drift_m(self) -> float:
+        """The slow altitude wander a barometer currently shows.
+
+        A published sample reads this rather than re-rolling it: the drift is
+        a property of the air and the instrument's warm-up, evolving on every
+        physics tick, and it must be the same number whether it reaches a
+        client through vehicle status or through a barometer record.
+        """
+        return self._baro_drift.value
+
     # ------------------------------------------------------------------
     # Sensors and estimators
     # ------------------------------------------------------------------
 
     def gps_fix(self) -> dict[str, float]:
-        return dict(GPS_MODES[self.gps_mode])
+        """The fix a client can read. A receiver that is not fitted has none."""
+        return dict(GPS_MODES[self.gps_mode if self.gnss_installed else "off"])
 
     def gps_offset_m(self) -> tuple[float, float, float]:
         """North/east/up error currently present in the published fix."""
-        if GPS_MODES[self.gps_mode]["fix_type"] == 0:
+        if self.gps_fix()["fix_type"] == 0:
             return 0.0, 0.0, 0.0
         return self._gps_north.value, self._gps_east.value, self._gps_alt.value
 
     def estimators(self) -> dict[str, bool]:
         """Live estimator validity. Arming does not make an estimator valid."""
-        global_ok = GPS_MODES[self.gps_mode]["fix_type"] >= GPS_USABLE_FIX
+        global_ok = self.gps_fix()["fix_type"] >= GPS_USABLE_FIX
         attitude = self.faults.get("attitude", True)
         # Local validity is independent of GPS on purpose: that is the
         # GPS-denied case worth testing, where VIO or flow still holds a pose.
@@ -453,6 +480,7 @@ class Realism:
             "realism.telemetry_latency_ms": f"{self.telemetry.latency_s * 1000.0:.3f}",
             "realism.telemetry_jitter_ms": f"{self.telemetry.jitter_s * 1000.0:.3f}",
             "realism.sensor_noise": self.sensor_noise,
+            "realism.ambient_temp_c": f"{self.ambient_temp_c:.2f}",
             "realism.battery_failsafe_pct": f"{self.battery_failsafe_pct:.3f}",
             "realism.battery_drain_pct_s": f"{self.battery_drain_pct_s:.4f}",
             "realism.seed": str(self.seed),
@@ -470,6 +498,7 @@ class Realism:
             "telemetry_latency_ms": round(self.telemetry.latency_s * 1000.0, 3),
             "telemetry_jitter_ms": round(self.telemetry.jitter_s * 1000.0, 3),
             "sensor_noise": self.sensor_noise,
+            "ambient_temp_c": self.ambient_temp_c,
             "battery_failsafe_pct": self.battery_failsafe_pct,
             "battery_drain_pct_s": self.battery_drain_pct_s,
             "geofence": "" if self.geofence is None else self.geofence.describe(),

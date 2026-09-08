@@ -48,27 +48,32 @@ self.sim_time_s += dt
 rather than the wall clock: the control lease, the guided setpoint timeout,
 how long the vehicle has been in GUIDED, and the telemetry delay ring.
 
-In real time `dt` is measured from the wall clock, so simulated and wall time
-track each other: if the host stalls, the vehicle is owed the truth about how
-long that took. Under `--sim-speed` the step is fixed at `1/fps` instead — a
-scaled clock is not a measurement of the room, so measuring it would be
-meaningless, and a fixed step is what makes a scaled run repeatable. A
-fixed-timestep harness does the same in-process, and can advance a second of
-flight in a millisecond or stall for a second without the vehicle ageing.
+`dt` is fixed at `1/physics_hz` in every mode — `physics_hz` is a drone-profile
+field (300 Hz in the default profile), and camera publishing runs at its own
+profile rate as an integer divisor of it. Real time *paces* those fixed steps
+against the wall clock: it accumulates elapsed wall time and executes as many
+fixed steps as it owes, but never enlarges a step to catch up. If the host
+stalls, the simulation reports the shortfall through `sim.speed_achieved`
+rather than pretending the vehicle lived through it; physics stays repeatable
+because the step never changes. A scaled run does the same at
+`step / multiplier`, and the unpaced `max` mode runs the identical steps with
+no sleeping at all. A fixed-timestep harness does the same in-process, and can
+advance a second of flight in a millisecond or stall for a second without the
+vehicle ageing.
 
-It is published once per frame as the `sim.time_s` status key.
+It is published once per physics tick as the `sim.time_s` status key.
 
 ### 2.1 What a client actually receives
 
 `sim.time_s` is built inside `status_fields()` and pushed through the **same
 telemetry delay ring as every other key**. A client's view of it is therefore:
 
-- **Quantised** to the publish rate — 33 ms at the default 30 Hz.
+- **Quantised** to the physics publish rate — 3.3 ms at the default 300 Hz.
 - **Delayed** by the configured telemetry latency.
 - **Occasionally frozen**: when the delay ring releases nothing,
   `published_fields()` returns `None` and the previous values stand.
 
-Measured over one simulated second at 30 Hz:
+Measured over one simulated second of publishing at 30 Hz:
 
 | | last `sim.time_s` readable | lag | publishes returning nothing |
 |---|---|---|---|
@@ -101,7 +106,7 @@ Concrete, current, and the reference for anything new.
 
 | Reader | Timer |
 |---|---|
-| `dsim` | control lease expiry, guided setpoint timeout, GUIDED entry, telemetry delay ring, battery drain |
+| `dsim` | control lease expiry, guided setpoint timeout, GUIDED entry, telemetry delay ring, battery drain, every sensor's sample cadence and its `sim_time_us` stamp |
 | `dway` | the whole mission clock -- dwell, arrival gates, leg timeouts, setpoint stream -- plus the readiness deadline, scheduled start instant and bus event timestamps |
 | `dalg` | frame capture interval (`capture_fps`), coordinator-silence watchdog, scheduled start instant |
 | `daic` | planner state timers (arming, target loss, search legs), the optical-flow frame interval, and the SLAM frame timestamp |
@@ -111,7 +116,7 @@ Concrete, current, and the reference for anything new.
 
 | Reader | Timer |
 |---|---|
-| all | `module.hello` / `module.heartbeat` cadence and `PipelineView` expiry |
+| all | `module.hello` / `module.heartbeat` / `module.sensor_health` cadence and `PipelineView` expiry |
 | `dway` | command-acknowledgement deadline (stretched for a slow-motion vehicle), vehicle-state staleness, the `--timeout` abort |
 | `dalg` | presence heartbeat, coordinator-silence wall backstop |
 | `daic`, `dctl` | status staleness ("is the simulator still publishing?") |
@@ -121,6 +126,16 @@ Presence is deliberately on the wall clock everywhere. `PipelineView` expires
 members on `time.monotonic()`, so a module that heartbeats on simulated time
 vanishes from every registry the moment the simulator lags. `dalg/run.py`
 carries a comment recording that this was tried and reverted.
+
+Sensor health splits along the same line, and the split is the reason the two
+numbers are reported separately. **Data cadence is simulated**: a sensor's
+configured rate, the rate a consumer observed, and the age of its last sample
+are all in simulated seconds, because a camera at 30 Hz is at 30 Hz whether
+that second took one wall second or a tenth of one. **The report itself is
+wall-clock**: `module.sensor_health` is published once per wall second and
+expires on the wall clock with the heartbeat, because "is this module still
+telling me anything" is a liveness question. A module graded on simulated
+rates alone would look healthy right up until it stopped existing.
 
 ---
 
@@ -166,11 +181,11 @@ A time-scaled simulation advances `sim.time_s` faster or slower than the wall
 clock. `dsim --sim-speed <multiplier|max>` selects it, and the monitor's
 header menu changes it while the simulation runs; omitting the option is real
 time, and real time is never made to wait. Changing speed mid-run is sound for
-the same reason scaling is: no consumer reads the rate, only the clock. `--video-hz` publishes video
-below the physics rate, which is what makes a scaled run fast: rendering is
-the whole per-tick cost, and publishing at the rate consumers actually sample
-preserves the simulated interval between frames while removing most of the
-work.
+the same reason scaling is: no consumer reads the rate, only the clock. The
+camera profile rate publishes frames below the physics rate, which is what
+makes a scaled run fast: rendering is the whole per-tick cost, and publishing
+at the rate consumers actually sample preserves the simulated interval between
+frames while removing most of the work.
 
 **Nothing about the protocol changes.** Only the mapping from simulated
 seconds to wall seconds changes. Specifically:
