@@ -6,4 +6,4 @@ panda3d-simplepbr==0.13.1
 pillow==12.3.0
 matplotlib==3.10.6
 pymembus==2.2.0
-pytest==9.0.3
+pytest==9.1.1
