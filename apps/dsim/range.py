@@ -20,6 +20,7 @@ import numpy as np
 from dsim.dsim import (Panda3DRenderer, _OBSTACLE_HALF_EXTENT_M,
                        _obstacle_height_m)
 from dsim.transforms import pinhole_rays
+from dsim.sensor_models import directions
 
 EXACT_BACKEND = "raycast"
 EXACT_BACKEND_REASON = (
@@ -54,6 +55,25 @@ class Scene:
 #: against the same map every simulated tick. The list itself is retained so a
 #: freed list's id cannot be reused underneath a stale entry.
 _SCENE_CACHE: dict[int, tuple[list, Scene]] = {}
+
+
+def cast(scene, pose_world, kind: str, model) -> np.ndarray:
+    """True first-surface range along every ray of one capture.
+
+    ``inf`` where the beam leaves the world without hitting anything. The
+    sensor's rays are generated in its own axes and rotated by the composed
+    pose, so a mount chain, a body attitude and a fixed misalignment all reach
+    the geometry through the same path.
+
+    This lives beside the ray service rather than in ``sensor_models`` because
+    it is the one part of a range capture that is about *this* world. The
+    model around it -- ray directions, noise, the reducer -- is backend-neutral
+    and stays there, so a second provider reuses the model and answers this
+    from its own geometry. See ``dcmn.sensor_backend.SensorBackend``.
+    """
+    rays = directions(kind, model) @ np.asarray(pose_world)[:3, :3].T
+    return cast_rays(scene, np.asarray(pose_world)[:3, 3], rays,
+                     min_range_m=model['min_range_m'], max_range_m=model['max_range_m'])
 
 
 def scene_geometry(sim_map) -> Scene:

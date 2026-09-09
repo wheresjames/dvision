@@ -16,6 +16,7 @@ import pytest
 from dcmn.sensors import (CAMERA_FRAME, LIDAR_FRAME, PACKED_ARRAY, RANGE_SAMPLE,
                           HEADER, RecordRing, SensorSamples, SensorVideo,
                           decode_record, encode_record, unpack_array)
+from dsim.backend import SimulatorBackend
 from dsim.dsim import DroneState
 from dsim.profiles import (DroneProfile, camera_profile, default_profile,
                            stereo_pair)
@@ -54,10 +55,21 @@ class _Vehicle:
         return 52.0 + y * 1e-5, 13.0 + x * 1e-5, 34.0 + z
 
 
+def backend(objects=(), renderer=None, vehicle=None):
+    """The real dsim backend over a synthetic map, with test doubles behind it.
+
+    Using `SimulatorBackend` rather than a bespoke fake is deliberate: these
+    tests are the ones that would notice a seam drifting away from what dsim
+    actually answers.
+    """
+    return SimulatorBackend(SimpleNamespace(objects=list(objects)),
+                            renderer if renderer is not None else Renderer(),
+                            vehicle=vehicle)
+
+
 def manager(profile, *, name=None, objects=(), renderer=None, seed=0, vehicle=None):
     return SensorManager(name or instance(), profile,
-                         SimpleNamespace(objects=list(objects)),
-                         renderer or Renderer(), vehicle=vehicle, seed=seed)
+                         backend(objects, renderer, vehicle), seed=seed)
 
 
 # ---------------------------------------------------------------------------

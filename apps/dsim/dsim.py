@@ -952,9 +952,11 @@ class DroneSimulator:
         pm = self.pymembus
         self._remove_ipc_names()
 
+        from dsim.backend import SimulatorBackend
         from dsim.sensor_manager import SensorManager
         self.sensors = SensorManager(
-            self.args.id, self.profile, self.map, self.p3d, vehicle=self,
+            self.args.id, self.profile,
+            SimulatorBackend(self.map, self.p3d, vehicle=self),
             seed=int(getattr(self.args, "realism_seed", 0) or 0))
         self._fit_sensors()
         self._write_sensor_profile()

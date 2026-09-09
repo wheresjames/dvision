@@ -175,11 +175,15 @@ def magnetometer(model, vehicle, state, rng):
     itself are all deferred; what is published is the heading a corrected
     compass would report, with the environment's heading noise and this
     instrument's own combined.
+
+    The renderer's private yaw is converted by the backend rather than here:
+    this record and the ``body.heading_deg`` beside it in the same capture have
+    to be the same number, and a provider with its own yaw convention gets to
+    say what that number is exactly once.
     """
-    from dsim.dsim import sim_yaw_to_compass_heading
     profile = SENSOR_NOISE_PROFILES[vehicle.realism.sensor_noise]
     sigma = combined(model["noise_std_deg"], profile["heading_deg"])
-    heading = sim_yaw_to_compass_heading(state.yaw_deg) + rng.standard_normal() * sigma
+    heading = vehicle.compass_heading(state.yaw_deg) + rng.standard_normal() * sigma
     return dict(schema="magnetometer.sample.v1",
                 heading_deg=heading % 360.0, valid=True), True
 

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from dcmn.sensors import CAMERA_FRAME, RecordRing, SensorVideo
+from dsim.backend import SimulatorBackend
 from dsim.dsim import DroneSimulator, DroneState
 from dsim.profiles import (MAX_COMPONENTS, MAX_ID_BYTES, DroneProfile,
                            camera_profile, default_profile)
@@ -136,7 +137,7 @@ class Renderer:
 
 def manager(profile):
     return SensorManager("sensor-release-" + uuid.uuid4().hex[:8], profile,
-                         SimpleNamespace(objects=[]), Renderer())
+                         SimulatorBackend(SimpleNamespace(objects=[]), Renderer()))
 
 
 @pytest.mark.parametrize("mutate,field", [
@@ -330,7 +331,7 @@ def test_renderer_allocation_failure_precedes_registry_commit():
         before = sensors.manifest
         def refuse(profile):
             raise RuntimeError('camera allocation refused')
-        sensors.renderer.prepare_profile = refuse
+        sensors.backend.renderer.prepare_profile = refuse
         with pytest.raises(RuntimeError, match='camera allocation refused'):
             sensors.apply(DroneProfile.parse(camera_profile(24, 16, physics_hz=30.)))
         assert sensors.generation == 1

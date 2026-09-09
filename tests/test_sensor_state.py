@@ -16,7 +16,8 @@ import numpy as np
 import pytest
 
 from dsim import state_sensors
-from dsim.dsim import DroneState, compass_heading_to_sim_yaw
+from dsim.dsim import (DroneState, compass_heading_to_sim_yaw,
+                       sim_yaw_to_compass_heading)
 from dsim.profiles import DroneProfile, camera_profile, default_profile
 from dsim.realism import REALISM_DEFAULTS, Realism
 from dsim.sensor_models import capture_rng
@@ -30,10 +31,13 @@ def realism(**settings):
 
 
 def vehicle(**settings):
-    """The context a state sensor reads: an environment and a geodetic datum."""
+    """The context a state sensor reads: an environment, a datum, a yaw convention."""
     model = realism(**settings)
     return SimpleNamespace(
         realism=model, origin_alt_m=34.0,
+        # The compass reads its convention from the backend rather than
+        # importing dsim's, so the double has to supply dsim's here.
+        compass_heading=sim_yaw_to_compass_heading,
         # A flat local datum: the sensors are checked on what they do with a
         # position, not on the geodesy of the map, which has its own tests.
         map_to_gps=lambda x, y, z: (52.0 + y * 1e-5, 13.0 + x * 1e-5, 34.0 + z))

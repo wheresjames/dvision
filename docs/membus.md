@@ -575,6 +575,7 @@ names based on absent historical interfaces.
 | Sensor names, registry, envelope and readers | [sensors.py](../apps/dcmn/sensors.py) | [sensor contract](../tests/test_sensor_contract.py) |
 | Allocation sizes and validation | [profiles.py](../apps/dsim/profiles.py) | [release/lifecycle](../tests/test_sensor_release.py) |
 | Capture scheduling and payload publication | [sensor_manager.py](../apps/dsim/sensor_manager.py) | [stereo](../tests/test_sensor_stereo.py), [state sensors](../tests/test_sensor_state.py) |
+| The one simulator-shaped seam under scheduling | [sensor_backend.py](../apps/dcmn/sensor_backend.py), [dsim backend](../apps/dsim/backend.py) | [sensor backend](../tests/test_sensor_backend.py) |
 | Array layout and physical models | [sensor_models.py](../apps/dsim/sensor_models.py), [state_sensors.py](../apps/dsim/state_sensors.py) | [geometry](../tests/test_sensor_geometry.py) |
 | Broadcast events and presence projection | [module_bus.py](../apps/dcmn/module_bus.py) | [module bus](../tests/test_module_bus.py) |
 | Intake health and aggregation | [health.py](../apps/dcmn/health.py), [DSIM health](../apps/dsim/health.py) | [sensor health](../tests/test_sensor_health.py) |

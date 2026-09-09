@@ -19,7 +19,7 @@ from dsim import sensor_models
 from dsim.dsim import Panda3DRenderer
 from dsim.headless import HeadlessSimulator
 from dsim.profiles import DroneProfile, default_profile, scan_angles_deg
-from dsim.range import cast_rays, scene_geometry
+from dsim.range import cast, cast_rays, scene_geometry
 from dtest.calibration_scene import CALIBRATION_MAP
 
 WALL_H = Panda3DRenderer.WALL_H
@@ -282,7 +282,7 @@ def test_appearance_presets_cannot_move_a_measured_range():
         driver.scene_preset = preset
         readings.append(driver.sample("noisy", index=2, seed=5)["range_m"])
     assert np.allclose(*readings, equal_nan=True)
-    assert "scene_preset" not in sensor_models.cast.__code__.co_varnames
+    assert "scene_preset" not in cast.__code__.co_varnames
 
 
 def test_a_range_sensor_pans_with_its_ptz_mount():

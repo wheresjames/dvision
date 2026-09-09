@@ -6,6 +6,12 @@ measurements, the transport layer supplies channels, and this ties a physics
 tick to both: one frozen vehicle snapshot per capture, one capture id shared by
 everything sampled at that instant, and one deterministic random stream per
 sensor and logical capture.
+
+None of that is about any particular simulator, and this module deliberately
+imports none. Everything world-specific -- the geometry a beam meets, the
+renderer that fills a camera frame, the vehicle datum a state sensor reads --
+arrives through one :class:`dcmn.sensor_backend.SensorBackend`, so a second
+provider supplies measurements rather than reimplementing the transport.
 """
 
 from __future__ import annotations
@@ -19,22 +25,18 @@ from dcmn import health
 from dcmn.sensors import (CAMERA_FRAME, LIDAR_FRAME, RANGE_SAMPLE, STATE_PAYLOAD,
                           STATUS_INVALID, STATUS_VALID, SensorPublisher)
 from dsim import sensor_models, state_sensors
-from dsim.dsim import sim_yaw_to_compass_heading
 from dsim.profiles import ARRAY_TYPES, STATE_TYPES
-from dsim.range import scene_geometry
 from dsim.transforms import pose_angles, resolve
 
 
 class SensorManager:
     """Owns the sensor plane of one running simulator."""
 
-    def __init__(self, instance, profile, sim_map, renderer=None, *, vehicle=None,
-                 seed=0, session=None):
-        self.sim_map = sim_map
-        self.renderer = renderer
-        #: What the state sensors read: ``realism``, ``map_to_gps`` and
-        #: ``origin_alt_m``. ``DroneSimulator`` satisfies it directly.
-        self.vehicle = vehicle
+    def __init__(self, instance, profile, backend, *, seed=0, session=None):
+        #: The one simulator-specific surface: geometry, camera views and the
+        #: vehicle datum the state sensors read. See
+        #: :class:`dcmn.sensor_backend.SensorBackend`.
+        self.backend = backend
         self.seed = int(seed)
         self.publisher = SensorPublisher(instance, profile, session=session)
         self.capture_id = 0
@@ -73,21 +75,16 @@ class SensorManager:
         """Swap in a validated profile as one new generation."""
         previous = {sensor['id'] for sensor, _ in self.schedule
                     if sensor['type'] == 'camera.rgb'}
-        prepared = None
-        if self.renderer is not None and hasattr(self.renderer, 'prepare_profile'):
-            prepared = self.renderer.prepare_profile(profile)
+        prepared = self.backend.prepare_profile(profile)
         try:
             self.publisher.apply(profile)
         except Exception:
-            if prepared is not None:
-                self.renderer.finish_profile(prepared, commit=False)
+            self.backend.finish_profile(prepared, commit=False)
             raise
-        if prepared is not None:
-            self.renderer.finish_profile(prepared, commit=True)
+        self.backend.finish_profile(prepared, commit=True)
         self._install(profile)
         self.capture_id = 0
-        if self.renderer is not None:
-            self.renderer.drop_views(previous - {sensor['id'] for sensor, _ in self.schedule})
+        self.backend.drop_views(previous - {sensor['id'] for sensor, _ in self.schedule})
 
     def reset(self):
         """Drone reset: cadence and noise restart, transport identity does not."""
@@ -172,7 +169,7 @@ class SensorManager:
 
     def _body(self, state):
         return dict(x_m=state.x, y_m=state.y, z_m=state.z,
-                    heading_deg=sim_yaw_to_compass_heading(state.yaw_deg),
+                    heading_deg=self.backend.compass_heading(state.yaw_deg),
                     roll_deg=state.roll_deg, pitch_deg=state.pitch_deg,
                     vx_mps=state.vx, vy_mps=state.vy, vz_mps=state.vz)
 
@@ -181,13 +178,15 @@ class SensorManager:
             return False
         requests = []
         try:
-            if self.renderer is None:
-                raise RuntimeError('a camera is scheduled but no renderer is attached')
+            # The body datum reaches the record through the backend as well, so
+            # it belongs inside the guard: a backend that cannot answer it
+            # fails these cameras rather than the physics loop.
+            body = self._body(state)
             poses = {sensor['id']: resolve(self.profile.data, sensor['id'], state)
                      for sensor, _index in due}
             requests = [(sensor['id'], sensor['model'], poses[sensor['id']],
                          self.publisher.camera_slot(sensor['id'])) for sensor, _index in due]
-            self.renderer.render_views(requests)
+            self.backend.render_views(requests)
         except (RuntimeError, ValueError) as exc:
             for sensor, _index in due:
                 self._failed_capture(sensor['id'], exc)
@@ -195,7 +194,6 @@ class SensorManager:
         finally:
             # Drop the shared-memory views before the slots advance under them.
             del requests
-        body = self._body(state)
         for sensor, _index in due:
             sensor_id = sensor['id']
             try:
@@ -219,7 +217,7 @@ class SensorManager:
         sensor_id, kind, model = sensor['id'], sensor['type'], sensor['model']
         pose_world = resolve(self.profile.data, sensor_id, state)
         rng = sensor_models.capture_rng(self.seed, sensor_id, self.publisher.reset_epoch, index)
-        truth = sensor_models.cast(scene_geometry(self.sim_map), pose_world, kind, model)
+        truth = self.backend.range_truth(pose_world, kind, model)
         ranges, confidence = sensor_models.measure(truth, model, rng)
         common = dict(pose=pose_angles(pose_world), pose_world=pose_world.tolist(),
                       body=self._body(state), min_range_m=model['min_range_m'],
@@ -258,8 +256,6 @@ class SensorManager:
         configuration a consumer already has from the manifest.
         """
         sensor_id, kind, model = sensor['id'], sensor['type'], sensor['model']
-        if self.vehicle is None:
-            raise RuntimeError(f'{sensor_id}: {kind} needs a vehicle context')
         rng = sensor_models.capture_rng(self.seed, sensor_id,
                                         self.publisher.reset_epoch, index)
         if kind == 'motion.imu':
@@ -267,13 +263,13 @@ class SensorManager:
             payload, valid = state_sensors.imu(model, self.profile.data, sensor_id,
                                                state, self._previous, dt, rng)
         elif kind == 'position.gnss':
-            payload, valid = state_sensors.gnss(model, self.vehicle, state, rng)
+            payload, valid = state_sensors.gnss(model, self.backend, state, rng)
         elif kind == 'altimeter.barometric':
-            payload, valid = state_sensors.barometer(model, self.vehicle, state, rng)
+            payload, valid = state_sensors.barometer(model, self.backend, state, rng)
         elif kind == 'heading.magnetometer':
-            payload, valid = state_sensors.magnetometer(model, self.vehicle, state, rng)
+            payload, valid = state_sensors.magnetometer(model, self.backend, state, rng)
         else:
-            payload, valid = state_sensors.temperature(model, self.vehicle, state, rng)
+            payload, valid = state_sensors.temperature(model, self.backend, state, rng)
         self._record(sensor_id, sim_us, lambda sequence: self.publisher.write_compact(
             sensor_id, sequence, self.capture_id, sim_us, STATE_PAYLOAD[kind], payload,
             status=STATUS_VALID if valid else STATUS_INVALID), valid=valid)

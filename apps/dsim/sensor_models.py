@@ -19,7 +19,6 @@ import struct
 import numpy as np
 
 from dsim.profiles import scan_angles_deg
-from dsim.range import cast_rays
 from dsim.transforms import pinhole_rays, spherical_rays
 
 #: Versioned seed material. Changing any part of the encoding, the digest or
@@ -78,19 +77,6 @@ def directions(kind: str, model) -> np.ndarray:
     if kind == 'lidar.scan2d': return scan_directions(model)
     if kind == 'lidar.range_image': return image_directions(model)
     return cone_directions(model)
-
-
-def cast(scene, pose_world, kind: str, model) -> np.ndarray:
-    """True first-surface range along every ray of one capture.
-
-    ``inf`` where the beam leaves the world without hitting anything. The
-    sensor's rays are generated in its own axes and rotated by the composed
-    pose, so a mount chain, a body attitude and a fixed misalignment all reach
-    the geometry through the same path.
-    """
-    rays = directions(kind, model) @ np.asarray(pose_world)[:3, :3].T
-    return cast_rays(scene, np.asarray(pose_world)[:3, 3], rays,
-                     min_range_m=model['min_range_m'], max_range_m=model['max_range_m'])
 
 
 def measure(truth: np.ndarray, model, rng) -> tuple[np.ndarray, np.ndarray]:

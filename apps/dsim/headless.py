@@ -14,8 +14,8 @@ from dsim.dsim import (
 )
 from dvision2_common import load_map
 from dsim import sensor_models
+from dsim.backend import SimulatorBackend
 from dsim.profiles import ARRAY_TYPES, DroneProfile, default_profile
-from dsim.range import scene_geometry
 from dsim.transforms import resolve
 
 FIXED_DT = 0.05
@@ -227,7 +227,9 @@ class HeadlessSimulator:
         if kind == "camera.rgb":
             raise ValueError(f"{sensor_id}: use render() for an RGB camera")
         pose_world = resolve(self.profile.data, sensor_id, self.sim.state)
-        truth = sensor_models.cast(scene_geometry(self.sim.map), pose_world, kind, model)
+        # The same seam the scheduler measures through, so a headless assertion
+        # and a published record cannot disagree about what the world is.
+        truth = SimulatorBackend(self.sim.map).range_truth(pose_world, kind, model)
         ranges, confidence = sensor_models.measure(
             truth, model, sensor_models.capture_rng(seed, sensor_id, reset_epoch, index))
         reading = dict(pose_world=pose_world, truth_m=truth, range_m=ranges,

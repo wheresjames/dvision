@@ -17,6 +17,7 @@ import pytest
 from dcmn import health
 from dcmn.health import SensorIntake
 from dcmn.module_bus import (SENSOR_HEALTH_EVENT, ModuleEvent, PipelineView)
+from dsim.backend import SimulatorBackend
 from dsim.dsim import DroneState
 from dsim.health import SimulationHealth, required_sensor_grade
 from dsim.profiles import DroneProfile, camera_profile, stereo_pair
@@ -246,9 +247,10 @@ class Renderer:
     def drop_views(self, camera_ids): pass
 
 
-def manager(profile, **kwargs):
+def manager(profile, *, vehicle=None, **kwargs):
     return SensorManager('sensor-health-' + uuid.uuid4().hex[:8], profile,
-                         SimpleNamespace(objects=[]), Renderer(), **kwargs)
+                         SimulatorBackend(SimpleNamespace(objects=[]), Renderer(),
+                                          vehicle=vehicle), **kwargs)
 
 
 def sensing_profile():
@@ -373,7 +375,7 @@ def test_camera_failures_are_reported_while_other_sensors_continue(failure):
         def refuse(*args, **kwargs):
             raise RuntimeError('camera unavailable')
         if failure == 'render':
-            sensors.renderer.render_views = refuse
+            sensors.backend.renderer.render_views = refuse
         else:
             sensors.publisher.commit_camera = refuse
         for tick in range(30):

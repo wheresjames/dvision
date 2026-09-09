@@ -83,6 +83,8 @@ apps/                       The six applications and the view layer they share.
     pacing.py                 Repaint caps, so a window never paces control
     window.py                 Window geometry persistence and the input-method opt-out
     sensors.py                Sensor discovery, record wire format, camera intake
+    sensor_backend.py         The one seam a sensor provider fills: geometry,
+                              camera views, and the vehicle datum
     device_view.py            The Devices tab: tree, pane grid, and every renderer
     device_export.py          Pane snapshot PNG and JSON/CSV sample dumps
     layout.py                 The pane grid: placement, spans, repair, persistence
@@ -94,6 +96,7 @@ apps/                       The six applications and the view layer they share.
 
   dsim/
     dsim.py                   Simulator: physics, rendering, IPC server, UI
+    backend.py                dsim's answer to the sensor plane's three seams
     headless.py               Fixed-timestep in-process driver with set_pose()
     profiles.py               Drone hardware profiles: load, validate, resolve
     transforms.py             The parent-linked body/mount/sensor transform graph
@@ -194,7 +197,11 @@ tests/
   test_dcmn_layout.py       Grid placement, spans and record repair
   test_dcmn_session.py      Sensor intake, caching and accounting
   test_dctl_devices.py      The Devices tab inside a real dctl window
-  test_sensor_*.py          Sensor contract, geometry, state, stereo, health, release
+  test_sensor_*.py          Sensor contract, geometry, state, stereo, health,
+                            release, and the backend seam under all of them
+  bridge_probe.py           A full sensor run through a non-dsim backend, in a
+                            fresh interpreter: proves the scheduler stays free
+                            of the simulator at capture time, not just at import
   test_dalg_*.py            Algorithm core, scoring, profile editor, real-process run
   test_module_bus.py        Module presence, run coordination and shutdown
   test_event_viewer.py      Bounded event history, filters and eviction
