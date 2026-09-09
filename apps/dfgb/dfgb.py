@@ -57,6 +57,7 @@ from dvision2_common import (
     shared_names,
     validate_id,
 )
+from dcmn import theme
 from dcmn.module_bus import PymembusModuleBus, requests_shutdown
 from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
@@ -258,13 +259,14 @@ def compute_drone_control(
 class StatusUi:
     """Tkinter window showing live bridge and FlightGear status."""
 
-    _BG      = "#1a1e24"
-    _CARD    = "#21262d"
-    _FG      = "#c9d1d9"
-    _DIM     = "#8b949e"
-    _GREEN   = "#3fb950"
-    _RED     = "#f85149"
-    _YELLOW  = "#d29922"
+    # The shared palette by role, not a private copy of its values.
+    _BG      = theme.BG
+    _CARD    = theme.PANEL
+    _FG      = theme.DRONE_EDGE
+    _DIM     = theme.DIM
+    _GREEN   = theme.OK
+    _RED     = theme.DANGER
+    _YELLOW  = theme.CAUTION
     _FONT    = ("Monospace", 10)
     _BOLD    = ("Monospace", 9, "bold")
 

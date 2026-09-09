@@ -15,7 +15,6 @@ from dvision2_common import validate_id
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = 'dvision2.drone-profile.v1'
-MAX_MEMORY = 256 * 1024 * 1024
 MAX_COMPONENTS = 64
 MAX_ID_BYTES = 48
 MAX_PROFILE_BYTES = 65536

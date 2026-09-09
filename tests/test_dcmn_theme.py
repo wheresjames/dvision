@@ -16,8 +16,13 @@ import pytest
 from dcmn import theme
 
 ROOT = Path(__file__).resolve().parents[1]
+# Every module that paints. The list is the whole guard: `daic.py` carried a
+# twelve-constant copy of this palette for as long as it was missing from here,
+# and two of its entries had already drifted away from the shared values.
 WINDOW_MODULES = ("apps/dsim/dsim.py", "apps/dctl/dctl.py", "apps/dway/dway.py",
-                  "apps/dway/editor.py", "apps/dway/report.py")
+                  "apps/dway/editor.py", "apps/dway/report.py",
+                  "apps/daic/daic.py", "apps/daic/run_reporter.py",
+                  "apps/dfgb/dfgb.py", "apps/dalg/report_html.py")
 HEX_COLOUR = re.compile(r'"#[0-9a-fA-F]{3,8}"')
 
 

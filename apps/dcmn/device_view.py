@@ -527,7 +527,9 @@ class VectorRenderer(Renderer):
             for (x, mean, minimum, maximum), colour in zip(arrays, (theme.DANGER, theme.OK, theme.ACCENT)):
                 if not x: continue
                 px = [5+(stamp-sample.sim_time_s+window)/window*(width-10) for stamp in x]
-                scale = lambda data: [bottom-(v-low)/max(1e-6, high-low)*(bottom-top) for v in data]
+                # noqa B023: called within the iteration that defines it, so
+                # the loop variables it closes over cannot have moved on.
+                scale = lambda data: [bottom-(v-low)/max(1e-6, high-low)*(bottom-top) for v in data]  # noqa: B023
                 ys, lo, hi = scale(mean), scale(minimum), scale(maximum)
                 if len(px) > 1:
                     polygon = [v for point in zip(px, lo) for v in point]+[v for point in reversed(list(zip(px, hi))) for v in point]
@@ -1312,7 +1314,7 @@ class DevicesView:
         arranging = self.arrange.get()
         self.grid.set_arranging(arranging)
         anchor = self.arrange_button
-        for button, axis, growable in self.structure:
+        for button, _axis, _growable in self.structure:
             if arranging:
                 button.pack(side='left', after=anchor)
             else: button.pack_forget()

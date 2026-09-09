@@ -32,7 +32,7 @@ from dsim.range import raycast_map
 from dtest.calibration_scene import CENTER_X
 from dtest.assertions import (assert_calibration_orientation,
                               assert_channel_order, assert_landmark_moves)
-from dtest.color_probe import color_centroid, horizon_row
+from dtest.color_probe import horizon_row
 from dtest.deterministic import DeterministicSim
 
 pytest.importorskip("panda3d")

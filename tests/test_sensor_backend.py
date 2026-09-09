@@ -155,7 +155,7 @@ def test_the_base_backend_names_the_seam_it_cannot_answer():
     with pytest.raises(RuntimeError, match='renders none'):
         base.render_views([])
     with pytest.raises(RuntimeError, match='no vehicle datum'):
-        base.realism
+        base.realism  # noqa: B018  -- reading the property is the check
     with pytest.raises(RuntimeError, match='no vehicle datum'):
         base.map_to_gps(0., 0., 0.)
     # The optional camera-lifecycle hooks are the ones a backend may ignore,

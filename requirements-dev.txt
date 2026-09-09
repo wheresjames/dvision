@@ -1,0 +1,8 @@
+# Tooling that checks the project but is not part of running it.
+# The runtime environment is requirements.txt; keep the two separate so a
+# deployment does not pull a linter and an auditor along with the simulator.
+-r requirements.txt
+
+ruff==0.16.6
+pip-audit==2.9.0
+pytest-cov==7.0.0

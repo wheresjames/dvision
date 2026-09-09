@@ -29,6 +29,7 @@ for _path in (str(ROOT), str(APPS)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+from dcmn import theme
 from dcmn.sensors import open_camera
 
 from dvision2_common import (
@@ -221,21 +222,6 @@ def _cmd_install(verbose: bool = False) -> int:
     return 0 if all_ok else 1
 
 
-# ---------------------------------------------------------------------------
-# Dark theme (matches dctl palette)
-# ---------------------------------------------------------------------------
-_BG        = "#0d1117"
-_BG_PANEL  = "#161b22"
-_BG_ENTRY  = "#21262d"
-_FG        = "#e6edf3"
-_FG_DIM    = "#8b949e"
-_ACCENT    = "#58a6ff"
-_ACCENT2   = "#57ab5a"   # green for healthy / enabled
-_ACCENT3   = "#e5534b"   # red for error / disabled
-_BORDER    = "#30363d"
-_BTN_BG    = "#21262d"
-_BTN_ACT   = "#30363d"
-_VIDEO_BG  = "#010409"
 _SEARCH_HOLD_YAW_DPS = 18.0
 _APPROACH_BLOCK_RISK = 0.25
 _APPROACH_BLOCK_FRONT_OCC_M = 1.5
@@ -617,54 +603,54 @@ class DaicController:
     # ------------------------------------------------------------------
 
     def _apply_theme(self) -> None:
-        self.root.configure(bg=_BG)
+        self.root.configure(bg=theme.BG)
         s = ttk.Style(self.root)
         s.theme_use("clam")
-        s.configure(".", background=_BG, foreground=_FG,
-                    bordercolor=_BORDER, darkcolor=_BG_PANEL,
-                    lightcolor=_BG_PANEL, fieldbackground=_BG_ENTRY,
-                    troughcolor=_BG_PANEL, selectbackground=_ACCENT,
-                    selectforeground=_FG)
-        s.configure("TFrame",     background=_BG)
-        s.configure("Header.TFrame", background=_BG_PANEL)
-        s.configure("TLabel",     background=_BG, foreground=_FG)
-        s.configure("Dim.TLabel", background=_BG, foreground=_FG_DIM)
-        s.configure("Brand.TLabel", background=_BG_PANEL, foreground=_FG,
+        s.configure(".", background=theme.BG, foreground=theme.TEXT,
+                    bordercolor=theme.GRID, darkcolor=theme.PANEL,
+                    lightcolor=theme.PANEL, fieldbackground=theme.ENTRY,
+                    troughcolor=theme.PANEL, selectbackground=theme.ACCENT,
+                    selectforeground=theme.TEXT)
+        s.configure("TFrame",     background=theme.BG)
+        s.configure("Header.TFrame", background=theme.PANEL)
+        s.configure("TLabel",     background=theme.BG, foreground=theme.TEXT)
+        s.configure("Dim.TLabel", background=theme.BG, foreground=theme.DIM)
+        s.configure("Brand.TLabel", background=theme.PANEL, foreground=theme.TEXT,
                     font=("TkDefaultFont", 11, "bold"))
-        s.configure("HeaderDim.TLabel", background=_BG_PANEL, foreground=_FG_DIM)
-        s.configure("Video.TLabel", background=_VIDEO_BG, foreground=_FG_DIM)
+        s.configure("HeaderDim.TLabel", background=theme.PANEL, foreground=theme.DIM)
+        s.configure("Video.TLabel", background=theme.CANVAS, foreground=theme.DIM)
         s.configure("TLabelframe",
-                    background=_BG_PANEL, bordercolor=_BORDER,
-                    lightcolor=_BORDER,   darkcolor=_BORDER)
+                    background=theme.PANEL, bordercolor=theme.GRID,
+                    lightcolor=theme.GRID,   darkcolor=theme.GRID)
         s.configure("TLabelframe.Label",
-                    background=_BG_PANEL, foreground=_ACCENT)
+                    background=theme.PANEL, foreground=theme.ACCENT)
         s.configure("TButton",
-                    background=_BTN_BG, foreground=_FG,
-                    bordercolor=_BORDER, lightcolor=_BORDER, darkcolor=_BORDER,
-                    focuscolor=_ACCENT, padding=(10, 6), relief="flat")
+                    background=theme.BUTTON, foreground=theme.TEXT,
+                    bordercolor=theme.GRID, lightcolor=theme.GRID, darkcolor=theme.GRID,
+                    focuscolor=theme.ACCENT, padding=(10, 6), relief="flat")
         s.map("TButton",
-              background=[("pressed", _BG_PANEL), ("active", _BTN_ACT)],
-              bordercolor=[("active", _ACCENT)])
-        s.configure("Accent.TButton", background="#1f6feb", foreground="#ffffff",
-                    bordercolor="#388bfd", lightcolor="#388bfd", darkcolor="#1f6feb",
+              background=[("pressed", theme.PANEL), ("active", theme.BUTTON_ACTIVE)],
+              bordercolor=[("active", theme.ACCENT)])
+        s.configure("Accent.TButton", background=theme.ACCENT_BUTTON, foreground=theme.ON_EMPHASIS,
+                    bordercolor=theme.ACCENT_BUTTON_EDGE, lightcolor=theme.ACCENT_BUTTON_EDGE, darkcolor=theme.ACCENT_BUTTON,
                     padding=(10, 6), relief="flat")
         s.map("Accent.TButton",
-              background=[("pressed", "#1158c7"), ("active", "#388bfd")])
-        s.configure("Danger.TButton", background="#da3633", foreground="#ffffff",
-                    bordercolor="#f85149", lightcolor="#f85149", darkcolor="#da3633",
+              background=[("pressed", theme.ACCENT_BUTTON_PRESSED), ("active", theme.ACCENT_BUTTON_EDGE)])
+        s.configure("Danger.TButton", background=theme.DANGER_BUTTON, foreground=theme.ON_EMPHASIS,
+                    bordercolor=theme.DANGER, lightcolor=theme.DANGER, darkcolor=theme.DANGER_BUTTON,
                     padding=(10, 6), relief="flat")
         s.map("Danger.TButton",
-              background=[("pressed", "#b62324"), ("active", "#f85149")])
+              background=[("pressed", theme.DANGER_BUTTON_PRESSED), ("active", theme.DANGER)])
         # Health label styles
-        for tag, color in (("Ok", _ACCENT2), ("Warn", "#e09440"), ("Err", _ACCENT3), ("Wait", _FG_DIM)):
+        for tag, color in (("Ok", theme.OK), ("Warn", theme.ATTENTION), ("Err", theme.DANGER), ("Wait", theme.DIM)):
             s.configure(f"Health{tag}.TLabel",
-                        background=_BG_PANEL, foreground=color,
+                        background=theme.PANEL, foreground=color,
                         font=("TkFixedFont", 9, "bold"))
         s.configure("HealthKey.TLabel",
-                    background=_BG_PANEL, foreground=_FG_DIM,
+                    background=theme.PANEL, foreground=theme.DIM,
                     font=("TkFixedFont", 9))
         s.configure("HealthDetail.TLabel",
-                    background=_BG_PANEL, foreground=_FG_DIM,
+                    background=theme.PANEL, foreground=theme.DIM,
                     font=("TkDefaultFont", 8))
 
     def _build_ui(self) -> None:
@@ -783,7 +769,7 @@ class DaicController:
         sz = self._slam_canvas_sz
         self._slam_map_canvas = tk.Canvas(
             slam_frame, width=sz, height=sz,
-            bg=_VIDEO_BG, highlightthickness=0,
+            bg=theme.CANVAS, highlightthickness=0,
         )
         self._slam_map_canvas.pack()
 
@@ -791,7 +777,7 @@ class DaicController:
         local_frame.grid(row=0, column=1, sticky="w", padx=(10, 0))
         self._local_map_canvas = tk.Canvas(
             local_frame, width=sz, height=sz,
-            bg=_VIDEO_BG, highlightthickness=0,
+            bg=theme.CANVAS, highlightthickness=0,
         )
         self._local_map_canvas.pack()
 
@@ -1250,7 +1236,7 @@ class DaicController:
 
         sz = self._slam_canvas_sz
         canvas.delete("all")
-        canvas.create_rectangle(0, 0, sz, sz, fill=_VIDEO_BG, outline="")
+        canvas.create_rectangle(0, 0, sz, sz, fill=theme.CANVAS, outline="")
 
         sd = self.slam_detector
         pose, pts, state = sd.get_map_snapshot()
@@ -1261,7 +1247,7 @@ class DaicController:
         if pts is None or len(pts) == 0 or pose is None:
             canvas.create_text(sz // 2, sz // 2,
                                text=f"SLAM: {label}\nno map data",
-                               fill=_FG_DIM, font=("TkDefaultFont", 8), justify="center")
+                               fill=theme.DIM, font=("TkDefaultFont", 8), justify="center")
             return
 
         # Project map points into the CURRENT camera frame so the drone is
@@ -1303,11 +1289,11 @@ class DaicController:
         step = _nice_step((x_max - x_min) / 3.5)
         gx = math.ceil(x_min / step) * step
         while gx <= x_max:
-            cx_, _ = w2c(gx, z_min);  canvas.create_line(cx_, M, cx_, sz - M, fill="#1c2128")
+            cx_, _ = w2c(gx, z_min);  canvas.create_line(cx_, M, cx_, sz - M, fill=theme.PLOT_GRID)
             gx += step
         gz = math.ceil(z_min / step) * step
         while gz <= z_max:
-            _, cy_ = w2c(x_min, gz);  canvas.create_line(M, cy_, sz - M, cy_, fill="#1c2128")
+            _, cy_ = w2c(x_min, gz);  canvas.create_line(M, cy_, sz - M, cy_, fill=theme.PLOT_GRID)
             gz += step
 
         # Map points coloured by depth (z in camera frame = forward distance).
@@ -1318,7 +1304,7 @@ class DaicController:
             if not (0 <= px < sz and 0 <= py < sz):
                 continue
             norm = min(1.0, d2[i] / max(d90, 1e-9))
-            col  = "#f85149" if norm < 0.25 else ("#e09440" if norm < 0.6 else "#388bfd")
+            col  = theme.DANGER if norm < 0.25 else (theme.ATTENTION if norm < 0.6 else theme.ACCENT_BUTTON_EDGE)
             canvas.create_rectangle(px, py, px + 1, py + 1, fill=col, outline="")
 
         # FOV cone (half-angle 35°).
@@ -1333,7 +1319,7 @@ class DaicController:
             ex_w = drone_xw + math.sin(ang) * cone_w
             ez_w = drone_zw + math.cos(ang) * cone_w
             ex_c, ey_c = w2c(ex_w, ez_w)
-            canvas.create_line(dc_x, dc_y, ex_c, ey_c, fill="#2d3340", width=1)
+            canvas.create_line(dc_x, dc_y, ex_c, ey_c, fill=theme.PLOT_LEADER, width=1)
 
         # Sector risk arcs (thin wedges just outside the FOV cone).
         sectors = self._last_sectors
@@ -1348,7 +1334,7 @@ class DaicController:
         for lo_deg, hi_deg, risk in _arc_sectors:
             if risk < 0.05 or sectors.confidence == 0.0:
                 continue
-            col = ("#3fb950" if risk < 0.35 else ("#e09440" if risk < 0.65 else "#f85149"))
+            col = (theme.OK if risk < 0.35 else (theme.ATTENTION if risk < 0.65 else theme.DANGER))
             n_seg = max(2, int((hi_deg - lo_deg) / 5))
             for seg in range(n_seg):
                 t0 = (lo_deg + (hi_deg - lo_deg) * seg / n_seg)
@@ -1363,16 +1349,16 @@ class DaicController:
 
         # Drone triangle.  Canvas X grows right and canvas Y grows down.
         tip, lft, rgt = _slam_drone_marker(dc_x, dc_y, heading)
-        canvas.create_polygon(*tip, *lft, *rgt, fill=_ACCENT, outline="#c9d1d9", width=1)
+        canvas.create_polygon(*tip, *lft, *rgt, fill=theme.ACCENT, outline=theme.DRONE_EDGE, width=1)
 
         # Labels.
-        state_col = (_ACCENT2 if state == 2 else (_FG_DIM if state == 4 else _ACCENT))
+        state_col = (theme.OK if state == 2 else (theme.DIM if state == 4 else theme.ACCENT))
         canvas.create_text(4, 3, anchor="nw",
                            text=f"{label}  {sd.n_map_points}pts",
                            fill=state_col, font=("TkFixedFont", 7))
         sc_str = f"{sd.scale:.3f}m/u" if sd.scale else "unscaled"
         canvas.create_text(sz - 3, sz - 3, anchor="se",
-                           text=sc_str, fill=_FG_DIM, font=("TkFixedFont", 7))
+                           text=sc_str, fill=theme.DIM, font=("TkFixedFont", 7))
 
     def _draw_local_map(self) -> None:
         """Render the local occupancy grid, planned path, target, and drone."""
@@ -1382,14 +1368,14 @@ class DaicController:
 
         sz = self._slam_canvas_sz
         canvas.delete("all")
-        canvas.create_rectangle(0, 0, sz, sz, fill=_VIDEO_BG, outline="")
+        canvas.create_rectangle(0, 0, sz, sz, fill=theme.CANVAS, outline="")
 
         pose = self._last_route_status.get("pose")
         if pose is None and self.status is not None:
             pose = pose_from_status(self.status.getAll())
         if pose is None:
             canvas.create_text(sz // 2, sz // 2, text="no pose",
-                               fill=_FG_DIM, font=("TkDefaultFont", 8))
+                               fill=theme.DIM, font=("TkDefaultFont", 8))
             return
 
         target_xy = self._last_route_status.get("target_xy")
@@ -1412,10 +1398,10 @@ class DaicController:
         for off in range(-int(half), int(half) + 1, 2):
             x0, y0 = w2c(pose.x - half, pose.y + off)
             x1, y1 = w2c(pose.x + half, pose.y + off)
-            canvas.create_line(x0, y0, x1, y1, fill="#1c2128")
+            canvas.create_line(x0, y0, x1, y1, fill=theme.PLOT_GRID)
             x0, y0 = w2c(pose.x + off, pose.y - half)
             x1, y1 = w2c(pose.x + off, pose.y + half)
-            canvas.create_line(x0, y0, x1, y1, fill="#1c2128")
+            canvas.create_line(x0, y0, x1, y1, fill=theme.PLOT_GRID)
 
         cell_px = max(2, int(cell_m / (2.0 * half) * use))
         for (cx, cy), value in cells.items():
@@ -1425,9 +1411,9 @@ class DaicController:
                 continue
             px, py = w2c(wx, wy)
             if value > 0.2:
-                col = "#f85149" if value >= 1.6 else "#e09440"
+                col = theme.DANGER if value >= 1.6 else theme.ATTENTION
             elif value < -0.2:
-                col = "#238636"
+                col = theme.TREE_FILL
             else:
                 continue
             canvas.create_rectangle(px - cell_px, py - cell_px,
@@ -1439,22 +1425,22 @@ class DaicController:
             for wx, wy in path:
                 px, py = w2c(wx, wy)
                 pts.extend([px, py])
-            canvas.create_line(*pts, fill="#58a6ff", width=2)
+            canvas.create_line(*pts, fill=theme.ACCENT, width=2)
 
         if target_xy is not None:
             tx, ty = w2c(target_xy[0], target_xy[1])
             canvas.create_oval(tx - 4, ty - 4, tx + 4, ty + 4,
-                               outline="#ffdf5d", width=2)
+                               outline=theme.HIGHLIGHT, width=2)
 
         dx, dy = w2c(pose.x, pose.y)
         yaw = math.radians(pose.yaw_deg)
         tip = (dx + int(math.cos(yaw) * 9), dy + int(math.sin(yaw) * 9))
         lft = (dx + int(math.cos(yaw + 2.5) * 5), dy + int(math.sin(yaw + 2.5) * 5))
         rgt = (dx + int(math.cos(yaw - 2.5) * 5), dy + int(math.sin(yaw - 2.5) * 5))
-        canvas.create_polygon(*tip, *lft, *rgt, fill=_ACCENT, outline="#c9d1d9")
+        canvas.create_polygon(*tip, *lft, *rgt, fill=theme.ACCENT, outline=theme.DRONE_EDGE)
         canvas.create_text(4, 3, anchor="nw",
                            text=f"path {len(path)}  cells {len(cells)}",
-                           fill=_FG_DIM, font=("TkFixedFont", 7))
+                           fill=theme.DIM, font=("TkFixedFont", 7))
 
     def _update_health_ui(self) -> None:
         style_map = {"ok": "HealthOk", "warn": "HealthWarn",
@@ -1692,7 +1678,6 @@ class HeadlessAgent:
             while self.running:
                 tick_start = time.monotonic()
                 self._tick(tick_start)
-                elapsed = time.monotonic() - tick_start
                 values = {} if self.status is None else self.status.getAll()
                 frame_period = simulated_poll_delay(
                     max(1, self.args.fps), values,

@@ -163,7 +163,7 @@ def test_camera_free_startup_schedules_controls():
         ctl.args = SimpleNamespace(no_sensors=disabled, camera=None)
         ctl.video = None; ctl.session = SimpleNamespace(manifest=manifest)
         ctl.video_label = SimpleNamespace(configure=lambda **kw: None)
-        ctl._schedule_dashboard = lambda: called.append(True)
+        ctl._schedule_dashboard = lambda: called.append(True)  # noqa: B023  -- called below, same iteration
         ctl.update_video()
         assert called == [True]
 

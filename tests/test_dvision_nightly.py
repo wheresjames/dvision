@@ -37,7 +37,7 @@ def test_longer_live_calibration_stream_remains_consistent(tmp_path) -> None:
             changed = harness.wait_status(
                 lambda s: abs(circular_delta_deg(
                     float(s["drone.heading_deg"]),
-                    float(before["drone.heading_deg"]),
+                    float(before["drone.heading_deg"]),  # noqa: B023  -- awaited in this iteration
                 )) >= 3.0,
                 timeout=3.0,
                 description="nightly alternating yaw response",

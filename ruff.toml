@@ -1,0 +1,49 @@
+# Lint configuration for dvision.
+#
+# The rule set is deliberately narrow. This codebase has a consistent house
+# style that a stock configuration disagrees with in about twelve hundred
+# places -- one-line defs and semicolon-joined statements in the UI code, a
+# long tail of intentionally wide lines, and the `sys.path` bootstrap every
+# entry point performs before it can import a sibling application. None of
+# those are defects, and a linter that reports them is one nobody reads.
+#
+# What is selected is the part that finds mistakes: undefined and unused
+# names, shadowed definitions, mutable defaults, late-binding closures,
+# `except` clauses that swallow control flow. Style stays with the reviewer.
+
+line-length = 110
+target-version = "py311"
+extend-exclude = ["tmp", "reports", "assets", ".cache"]
+
+[lint]
+select = [
+    "F",    # pyflakes: undefined names, unused imports, shadowed definitions
+    "B",    # bugbear: mutable defaults, late binding, control flow in finally
+    "E4",   # import placement that actually breaks
+    "E7",   # comparison and statement mistakes
+    "E9",   # syntax and IO errors
+    "W",    # trailing whitespace, missing final newline
+]
+ignore = [
+    "E701",  # `def x(self): return y` -- pervasive and deliberate in the UI code
+    "E702",  # semicolon-joined statements, same
+    "E731",  # assigning a lambda, used for short local scalers
+    "E402",  # every entry point edits sys.path before importing a sibling app
+    "B905",  # `zip(strict=)`: see the note below
+]
+
+# On B905. Requiring `strict=` on every `zip` is a real check, and turning it
+# on here would be a behaviour change at 22 call sites in the geometry and
+# report code, where equal length is an invariant the caller already holds.
+# Adding it blind would convert a silent truncation bug -- if one exists --
+# into a crash at runtime rather than a finding at review. Worth doing
+# deliberately, one call site at a time; not worth doing as lint adoption.
+
+[lint.per-file-ignores]
+# Tests bind results they do not assert on, to document what a call returns.
+"tests/*" = ["F841"]
+
+[lint.flake8-bugbear]
+# `RangeConfig` is a frozen dataclass, so it is a legitimate default argument:
+# the shared instance cannot be mutated by a caller.
+extend-immutable-calls = ["dsim.range.RangeConfig"]

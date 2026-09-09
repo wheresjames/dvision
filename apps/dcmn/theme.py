@@ -37,6 +37,13 @@ WARN = "#f2cc60"           # planned route, caution
 CAUTION = "#d29922"        # inside tolerance but tighter than asked for
 DANGER = "#f85149"         # failure, crash
 OK = "#3fb950"             # healthy, complete
+ATTENTION = "#e09440"      # a step past CAUTION and short of DANGER: the
+                           # APPROACH state, and the forward sensors in a plot
+
+# Plot and canvas furniture: lines that carry no data and must stay behind it.
+PLOT_GRID = "#1c2128"      # gridlines on a dark plot, dimmer than MAP_GRID
+PLOT_LEADER = "#2d3340"    # a leader from a mark to the thing it labels
+HIGHLIGHT = "#ffdf5d"      # the outline on a selected or called-out shape
 
 
 def blend(first, second, fraction):

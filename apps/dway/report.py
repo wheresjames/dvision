@@ -18,8 +18,6 @@ from dcmn.mapview import draw_map_axes
 #: Bumped when a field changes meaning. New fields may be added without one.
 SUMMARY_SCHEMA_VERSION = 1
 
-OUTCOMES = ("complete", "failed", "aborted")
-
 
 def repeatability_summary(summaries: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate repeated baseline flights into path and arrival variance."""

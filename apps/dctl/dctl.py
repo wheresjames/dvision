@@ -44,23 +44,6 @@ from dvision2_common import (
     shared_names, validate_id,
 )
 
-# ---------------------------------------------------------------------------
-# Dark theme palette
-# ---------------------------------------------------------------------------
-# One palette, in dcmn.theme, so every window's map is the same colour.
-_BG        = theme.BG          # window / frame background
-_BG_PANEL  = theme.PANEL       # panel surface
-_BG_ENTRY  = theme.ENTRY       # entry / spinbox field
-_FG        = theme.TEXT        # primary text
-_FG_DIM    = theme.DIM         # secondary / key labels
-_ACCENT    = theme.ACCENT      # focus / primary actions
-_ACCENT_OK = theme.OK
-_ACCENT_BAD = theme.DANGER
-_BORDER    = theme.GRID        # widget borders
-_BTN_BG    = theme.BUTTON      # button resting
-_BTN_ACT   = theme.BUTTON_ACTIVE   # button hover
-_VIDEO_BG  = theme.CANVAS      # video viewport background
-
 _MANUAL_YAW_RATE_DPS = 45.0
 
 #: Lease renewal, on the wall clock: the nominal beat, and the fastest
@@ -299,7 +282,7 @@ class DroneController:
     def _build_startup_window(self) -> None:
         """A cheap first frame that does not depend on dashboard layout."""
         self._apply_dark_theme()
-        self.root.configure(background=_BG)
+        self.root.configure(background=theme.BG)
         # Keep the top-level at its dashboard size from its first map. Resetting
         # a mapped 640x180 splash to the widgets' requested size caused a second
         # multi-second geometry transaction on some X11 window managers.
@@ -421,39 +404,39 @@ class DroneController:
         # The shared base, then the widgets only the manual pilot uses: the
         # video viewport and the joystick legend.
         s = apply_theme(self.root)
-        s.configure("Video.TLabel", background=_VIDEO_BG, foreground=_FG_DIM)
+        s.configure("Video.TLabel", background=theme.CANVAS, foreground=theme.DIM)
 
         s.configure("TLabelframe",
-            background=_BG_PANEL, bordercolor=_BORDER,
-            lightcolor=_BORDER, darkcolor=_BORDER)
+            background=theme.PANEL, bordercolor=theme.GRID,
+            lightcolor=theme.GRID, darkcolor=theme.GRID)
         s.configure("TLabelframe.Label",
-            background=_BG_PANEL, foreground=_ACCENT)
+            background=theme.PANEL, foreground=theme.ACCENT)
 
         # Joystick legend uses a subtler accent colour
         s.configure("Joy.TLabelframe",
-            background=_BG_PANEL, bordercolor=_BORDER,
-            lightcolor=_BORDER, darkcolor=_BORDER)
+            background=theme.PANEL, bordercolor=theme.GRID,
+            lightcolor=theme.GRID, darkcolor=theme.GRID)
         s.configure("Joy.TLabelframe.Label",
-            background=_BG_PANEL, foreground=_FG_DIM)
-        s.configure("Joy.TFrame", background=_BG_PANEL)
+            background=theme.PANEL, foreground=theme.DIM)
+        s.configure("Joy.TFrame", background=theme.PANEL)
         s.configure("JoyKey.TLabel",
-            background=_BG_PANEL, foreground=_ACCENT,
+            background=theme.PANEL, foreground=theme.ACCENT,
             font=("TkFixedFont", 9, "bold"))
         s.configure("JoyVal.TLabel",
-            background=_BG_PANEL, foreground=_FG,
+            background=theme.PANEL, foreground=theme.TEXT,
             font=("TkFixedFont", 9))
         s.configure("JoySec.TLabel",
-            background=_BG_PANEL, foreground=_FG_DIM,
+            background=theme.PANEL, foreground=theme.DIM,
             font=("TkDefaultFont", 8))
 
         s.configure("TSpinbox",
-            background=_BG_ENTRY, foreground=_FG,
-            fieldbackground=_BG_ENTRY, bordercolor=_BORDER,
-            arrowcolor=_FG, insertcolor=_FG,
-            lightcolor=_BORDER, darkcolor=_BORDER)
+            background=theme.ENTRY, foreground=theme.TEXT,
+            fieldbackground=theme.ENTRY, bordercolor=theme.GRID,
+            arrowcolor=theme.TEXT, insertcolor=theme.TEXT,
+            lightcolor=theme.GRID, darkcolor=theme.GRID)
         s.map("TSpinbox",
-            fieldbackground=[("readonly", _BG_ENTRY)],
-            bordercolor=[("focus", _ACCENT)])
+            fieldbackground=[("readonly", theme.ENTRY)],
+            bordercolor=[("focus", theme.ACCENT)])
 
     # ------------------------------------------------------------------
     # UI construction
