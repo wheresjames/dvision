@@ -339,14 +339,20 @@ def _load_records(path: str | Path) -> list[dict]:
     return records
 
 
-def _median(values: list[float]) -> float | None:
+def median(values: list[float], digits: int = 1) -> float | None:
+    """Middle value, or ``None`` for an empty sample.
+
+    ``digits`` is the caller's reporting precision, not a property of the
+    statistic: a flight log rounds metres to a decimetre, a correlation report
+    keeps three places.
+    """
     if not values:
         return None
     vals = sorted(values)
     mid = len(vals) // 2
     if len(vals) % 2:
-        return round(vals[mid], 1)
-    return round((vals[mid - 1] + vals[mid]) / 2.0, 1)
+        return round(vals[mid], digits)
+    return round((vals[mid - 1] + vals[mid]) / 2.0, digits)
 
 
 def _bearing_deviation(rec: dict) -> dict:
@@ -559,7 +565,7 @@ def diagnose_log(log_path: str | Path,
         "front_occ_close_sources":       dict(sorted(front_occ_sources.items())),
         "front_occ_close_source_age":    {
             key: {
-                "median": _median(vals),
+                "median": median(vals),
                 "max": round(max(vals), 1),
             }
             for key, vals in sorted(front_occ_source_age.items())

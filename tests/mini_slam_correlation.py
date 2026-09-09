@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from daic.flight_log import median
 from dvision2_common import SimMap, load_map
 
 
@@ -180,15 +181,6 @@ def analyze(log_path: str | Path, map_path: str | Path) -> dict[str, Any]:
     def rate(num: int, den: int) -> float:
         return round(num / den, 3) if den else 0.0
 
-    def median(vals: list[float]) -> float | None:
-        if not vals:
-            return None
-        vals = sorted(vals)
-        mid = len(vals) // 2
-        if len(vals) % 2:
-            return round(vals[mid], 3)
-        return round((vals[mid - 1] + vals[mid]) / 2.0, 3)
-
     return {
         "log_path": str(Path(log_path)),
         "map_path": str(Path(map_path)),
@@ -207,8 +199,8 @@ def analyze(log_path: str | Path, map_path: str | Path) -> dict[str, Any]:
         "rangeless_risk_rate": rate(rangeless_risk, risk_ticks),
         "front_occ_close_ticks": front_occ_close,
         "front_occ_close_rate": rate(front_occ_close, total),
-        "nearest_obstacle_ahead_median_when_risk": median(nearest_when_risk),
-        "nearest_obstacle_ahead_median_when_no_risk": median(nearest_when_no_risk),
+        "nearest_obstacle_ahead_median_when_risk": median(nearest_when_risk, 3),
+        "nearest_obstacle_ahead_median_when_no_risk": median(nearest_when_no_risk, 3),
         "by_state": by_state,
     }
 

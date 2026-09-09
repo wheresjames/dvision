@@ -1,6 +1,6 @@
 """Dependency gating for the vision-test groups.
 
-The supported environment is pinned in ``requirements-visiontests.txt`` and
+The supported environment is pinned in ``requirements.txt`` and
 `python -m dtest.preflight` reports anything missing. When a shell genuinely
 lacks rendering or IPC support, only the renderer and process groups may be
 skipped — the physics and coordinate contract tests must still run and still
@@ -51,6 +51,6 @@ def pytest_report_header(config) -> list[str]:
         return []
     return [
         f"vision-test group {stem} not collected: {', '.join(gap)} unavailable; "
-        "install requirements-visiontests.txt"
+        "install requirements.txt"
         for stem, gap in _SKIPPED.items()
     ]

@@ -15,6 +15,7 @@ from pathlib import Path
 
 # The legend borrows the overlay's own palette so the swatches in the report and
 # the pixels in the images cannot drift apart.
+from dcmn import theme
 from dalg.grid import FREE_THRESHOLD, OCCUPIED_THRESHOLD
 from dalg.overlay import (BACKGROUND, FALSE_NEGATIVE, FALSE_POSITIVE, SEEN_FREE,
                           SEEN_WALL, TRUE_POSITIVE, UNDECIDED, UNSEEN_WALL)
@@ -39,7 +40,8 @@ CONTROLS = {
     "exact_range": "control · reads the ground truth (score ceiling)",
 }
 
-GOOD, WARN, BAD, MUTED, TEXT = "#3fb950", "#e09440", "#f85149", "#8b949e", "#e6edf3"
+GOOD, WARN, BAD, MUTED, TEXT = (theme.OK, theme.ATTENTION, theme.DANGER,
+                                theme.DIM, theme.TEXT)
 
 
 def _rgb(colour: tuple[int, int, int]) -> str:
@@ -318,7 +320,7 @@ def render_html(summary: dict, overlays: dict[str, str], region: str | None,
 
     findings_html = ""
     for finding in _findings(summary):
-        border = {"critical": BAD, "warning": WARN, "info": "#58a6ff"}[finding["level"]]
+        border = {"critical": BAD, "warning": WARN, "info": theme.ACCENT}[finding["level"]]
         icon = {"critical": "⛔", "warning": "⚠️", "info": "ℹ️"}[finding["level"]]
         findings_html += f"""
       <div class="finding" style="border-left-color:{border}">

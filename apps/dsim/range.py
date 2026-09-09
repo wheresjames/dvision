@@ -22,12 +22,6 @@ from dsim.dsim import (Panda3DRenderer, _OBSTACLE_HALF_EXTENT_M,
 from dsim.transforms import pinhole_rays
 from dsim.sensor_models import directions
 
-EXACT_BACKEND = "raycast"
-EXACT_BACKEND_REASON = (
-    "Panda3D headless depth readback returned only far-plane samples, so it "
-    "failed the availability gate; the exact ray-cast fallback is selected."
-)
-
 #: Ray-by-obstacle intersection runs in blocks of about this many (ray, box)
 #: pairs. Sized to stay inside cache: the arithmetic is memory bound, and a
 #: block large enough to spill costs more than the extra loop iterations.

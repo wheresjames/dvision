@@ -256,32 +256,6 @@ def servo(detection: Detection,
                          descending=up < -0.1, horiz_dist_m=d_horiz)
 
 
-# GPS navigation constants in SI units.
-_GPS_YAW_GAIN     = 0.8    # deg/s per degree of yaw error
-_GPS_MAX_YAW_DPS  = 35.0
-_GPS_ALIGN_DEG    = 25.0   # start forward motion below this yaw error
-_GPS_NAV_SPEED    = 0.6
-_GPS_NAV_MIN      = 0.2
-_GPS_DECEL_DIST_M = 12.0   # distance at which deceleration begins
-
-
-def navigate_to_bearing(yaw_error_deg: float, dist_m: float) -> ControlOutput:
-    """Fly toward a GPS bearing.
-
-    yaw_error_deg: target_bearing minus drone_compass_heading, normalized to
-                   [-180, 180]. Positive = target is clockwise (right turn needed).
-    dist_m:        metres to target.
-    """
-    yaw_error_deg = (yaw_error_deg + 180.0) % 360.0 - 180.0
-    yaw = _clamp(yaw_error_deg * _GPS_YAW_GAIN, -_GPS_MAX_YAW_DPS, _GPS_MAX_YAW_DPS)
-    if abs(yaw_error_deg) < _GPS_ALIGN_DEG:
-        t = _clamp(dist_m / _GPS_DECEL_DIST_M, 0.0, 1.0)
-        fwd = _GPS_NAV_MIN + t * (_GPS_NAV_SPEED - _GPS_NAV_MIN)
-    else:
-        fwd = 0.0
-    return ControlOutput(forward_mps=fwd, yaw_rate_dps=yaw)
-
-
 def search_step(heading_deg: float, speed: float = _SEARCH_SPEED) -> ControlOutput:
     """Move forward at search speed (caller handles heading via yaw commands)."""
     return ControlOutput(forward_mps=_clamp(speed, 0.0, _MAX_FORWARD))

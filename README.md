@@ -56,6 +56,18 @@ tested or replaced independently.
 ```text
 dvision2_common.py          Shared protocol, map loading, ids, status keys
 compare.py                  Offline comparison of dalg summaries across runs
+requirements.txt            The pinned, supported runtime environment
+requirements-dev.txt        The above plus the linter, auditor and coverage plugin
+ruff.toml                   Lint rules: correctness only, house style left alone
+LICENSE                     MIT
+SECURITY.md                 What to report privately, where, and what is in scope
+.github/
+  dependabot.yml            Weekly pip and action updates, so exact pins stay fresh
+  workflows/
+    ci.yml                  Lint, then the suite on 3.11-3.13 under xvfb
+    codeql.yml              Static analysis on master and weekly
+    security.yml            pip-audit over the pins, gitleaks over the history
+    nightly.yml             The `nightly` marker, on a schedule
 docs/
   clock.md                  Simulated vs wall time, module sync, and the failure modes
   modcom.md                 Module communication: the four shared-memory planes
@@ -106,13 +118,11 @@ apps/                       The six applications and the view layer they share.
     add_menu.py               The Add dropdown: described items, drawn to the palette
     scroll.py                 Scrollable form viewport and popup, shared by the tabs
     range.py                  Shared ray geometry and the exact range oracle
-    depth_probe.py            Measured selection of the exact-range backend
     state_sensors.py          GNSS, IMU, barometer, magnetometer, thermometer models
     realism.py                GPS, estimators, wind, latency, noise, battery, geofence
     realism_panel.py          The Realism tab: those settings, changeable in flight
     health.py                 Whether simulated time and every attached module keep up
     scene.py                  Renderer appearance presets
-    range_backend.v1.json     The measured exact-range backend choice, committed
 
   dctl/
     dctl.py                   Manual controller UI
@@ -310,7 +320,7 @@ skipped: `dsim`'s `flight_path.png` and `dway`'s `track.png` are the two that
 go missing, and both say so on stderr rather than failing the run.
 
 The rendering and vision tests additionally need, and pin in
-`requirements-visiontests.txt`, packages that can move a rendered pixel or a
+`requirements.txt`, packages that can move a rendered pixel or a
 measured number:
 
 ```text
@@ -1440,7 +1450,7 @@ DVISION2_GUI_TESTS=1 pytest -q tests/test_dcmn_device_view.py tests/test_dctl_de
 Install and verify the pinned vision-test environment:
 
 ```sh
-python3 -m pip install -r requirements-visiontests.txt
+python3 -m pip install -r requirements.txt
 python3 -m dtest.preflight
 ```
 
@@ -1461,6 +1471,40 @@ Run the real-process command/status/video and DAIC integration checks:
 ```sh
 pytest -q tests/test_dvision_process_transport.py
 ```
+
+### Linting
+
+```sh
+python3 -m pip install -r requirements-dev.txt
+ruff check .
+```
+
+`ruff.toml` selects correctness rules only -- undefined and unused names,
+shadowed definitions, mutable defaults, late-binding closures, control flow in
+`finally`. It does not enforce style: one-line `def`s, semicolon-joined
+statements in the UI code, wide lines and the `sys.path` bootstrap every entry
+point performs are all deliberate here, and a linter that reported them would
+be a linter nobody read. There is no formatter, for the same reason.
+
+### CI
+
+Every push and pull request runs `ruff`, then the full suite on Python
+3.11-3.13. Two details of this repository shape that job, and are worth knowing
+if you run the suite yourself:
+
+* **A display is not optional.** 67 tests drive real Tk widgets. Without an X
+  display they skip themselves and the run still passes -- 1023 passed / 73
+  skipped instead of 1090 / 6. CI runs under `xvfb-run -a`; locally, either run
+  it on a desktop session or do the same.
+* **A missing dependency is silent.** `tests/conftest.py` drops whole modules
+  when `panda3d`, `cv2` or `pymembus` are unavailable, and says so only in the
+  pytest header. CI therefore runs `python -m dtest.preflight` as its own step,
+  so an incomplete environment fails the job instead of quietly testing less.
+
+Coverage is measured and reported in the job summary, but nothing is gated on
+it. `nightly.yml` runs the `nightly` marker on a schedule; `security.yml` runs
+`pip-audit` and `gitleaks`; `codeql.yml` runs static analysis. See
+[SECURITY.md](SECURITY.md) for how to report something privately.
 
 The process harness allocates a unique IPC ID per test, waits on readiness and
 status conditions rather than fixed startup sleeps, records failure frames and
@@ -1670,7 +1714,6 @@ Test fixtures, which are maps but are not meant to be flown for fun:
 |---|---|
 | `calibration_orientation.txt`, `calibration_orientation_ring.txt` | Coloured landmarks at known bearings, the render/orientation oracle |
 | `chain_front_obstacle.txt`, `chain_left_obstacle.txt`, `chain_right_obstacle.txt` | One obstacle in one place, for the perception chain; left and right are mirror images so a handedness error changes the answer's sign |
-| `range_chirality.txt` | Asymmetric geometry that catches a mirrored range backend |
 
 ### Committed tours
 

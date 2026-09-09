@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'apps')]
 
-import dsim.sensor_manager  # noqa: E402  -- before anything else can pull dsim in
+import dsim.sensor_manager  # noqa: E402,F401  -- imported for its side effect on sys.modules
 
 #: What the reusable half must never reach: the simulator, the ray service it
 #: owns, and the UI toolkit the simulator drags along behind it.

@@ -1,0 +1,105 @@
+# Lint and test on every push and pull request.
+#
+# Two things about this repository shape the job:
+#
+#   * 67 of the tests drive real Tk widgets. Without an X display they skip
+#     themselves silently and the run still passes, so the suite runs under
+#     xvfb-run and the display is not optional.
+#   * tests/conftest.py drops whole modules when panda3d, cv2 or pymembus are
+#     missing, reporting it only in the pytest header. In CI that reads as a
+#     pass, so `dtest.preflight` runs first as its own step and fails the job
+#     when the environment is incomplete.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install ruff==0.16.6
+      - run: ruff check --output-format github .
+
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor the `X | None` annotations and match statements
+        # allow; 3.13 is what the project is developed against.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: System libraries for Panda3D and Tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libgl1 libglu1-mesa libxi6 libxrandr2 libxcursor1 \
+            libxinerama1 libxss1 python3-tk
+
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-dev.txt
+
+      # A skipped group is a silent loss of coverage, so make it loud.
+      - name: Dependency preflight
+        run: python -m dtest.preflight
+
+      - name: Tests
+        run: |
+          xvfb-run -a python -m pytest tests/ \
+            --cov=apps --cov=dtest --cov=dvision2_common \
+            --cov-report=xml --cov-report=term-missing:skip-covered \
+            -q
+
+      # Reported, not gated: the number is worth watching before it is worth
+      # enforcing, and a threshold picked today would be arbitrary.
+      - name: Coverage summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET, pathlib
+          f = pathlib.Path("coverage.xml")
+          if f.exists():
+              rate = float(ET.parse(f).getroot().get("line-rate", 0)) * 100
+              print(f"### Coverage: {rate:.1f}% (Python ${{ matrix.python-version }})")
+          else:
+              print("### Coverage: not produced")
+          PY
+
+      - name: Skipped test groups
+        if: always()
+        run: |
+          xvfb-run -a python -m pytest tests/ --collect-only -q 2>&1 \
+            | grep -i "not collected" >> "$GITHUB_STEP_SUMMARY" || \
+            echo "All test groups collected." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: reports-py${{ matrix.python-version }}
+          path: |
+            reports/
+            tmp/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -19,8 +19,6 @@ class Centroid:
     pixels: int
 
 
-COLOR_NAMES = ("red", "blue", "yellow", "green", "white")
-
 
 def _masks(frame_rgb: np.ndarray) -> dict:
     r = frame_rgb[:, :, 0].astype(np.int16)

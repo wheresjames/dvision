@@ -331,13 +331,6 @@ class Follower:
                 and abs(wrap_deg(leg.heading_deg - sample.heading_deg))
                 <= self.tour.heading_tolerance_deg)
 
-    def dwell_remaining_s(self, now: float) -> float | None:
-        """Seconds of dwell still owed, or ``None`` when not inside the gate."""
-        if self.complete or self._in_gate_since is None:
-            return None
-        leg = self.legs[self.index]
-        return max(0.0, leg.dwell_s - (now - self._in_gate_since))
-
     # -- stepping ------------------------------------------------------
 
     def update(self, sample: Sample) -> FollowerEvent:

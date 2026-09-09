@@ -244,7 +244,7 @@ def test_the_readout_reports_the_pairs_relative_rotation(panel):
     tab.refresh_all()
     text = tab.resolved_var.get()
     assert "baseline 0.1200 m" in text
-    line = next(l for l in text.splitlines() if l.startswith("relative"))
+    line = next(row for row in text.splitlines() if row.startswith("relative"))
     yaw, pitch, roll = (float(line.split()[i]) for i in (2, 4, 6))
     assert yaw == pytest.approx(0.0, abs=0.005)
     assert pitch == pytest.approx(0.0, abs=0.005), "the mount they share cancels"

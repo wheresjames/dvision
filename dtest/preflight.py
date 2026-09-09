@@ -1,6 +1,6 @@
 """Dependency preflight for deterministic and process vision tests.
 
-The supported environment is pinned in ``requirements-visiontests.txt``. The
+The supported environment is pinned in ``requirements.txt``. The
 groups are listed separately because a shell that cannot render or cannot open
 shared memory may skip only those groups — the deterministic physics and
 coordinate contract tests must still run.
@@ -51,7 +51,7 @@ def main() -> int:
             print(f"{group}: ok")
     if failed:
         print(
-            "install requirements-visiontests.txt to complete the supported "
+            "install requirements.txt to complete the supported "
             "vision-test environment",
             file=sys.stderr,
         )
