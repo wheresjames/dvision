@@ -320,7 +320,10 @@ def test_live_daic_detections_and_overlays_refer_to_displayed_pixels(tmp_path) -
 def test_process_failure_writes_a_locatable_artifact_bundle(tmp_path) -> None:
     """A failing process test must leave enough evidence to find the boundary."""
     artifact_dir = artifact_directory(tmp_path, "artifact-bundle")
-    with pytest.raises(AssertionError):
+    # Matched on the message: a harness timeout raises AssertionError too, and
+    # an unqualified `raises` would swallow it and then fail three assertions
+    # later on a missing artifact instead of reporting the timeout.
+    with pytest.raises(AssertionError, match="deliberate failure"):
         with DsimProcessHarness(artifact_dir) as harness:
             harness.arm()
             harness.wait_status(lambda s: s.get("drone.armed") == "1",

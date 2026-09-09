@@ -39,7 +39,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from dvision2_common import load_pymembus
 from dsim.profiles import DroneProfile, default_profile
 from daic.flight_log import analyze_log, diagnose_log, print_diagnosis, print_report
 from daic.run_reporter import _generate_html_report

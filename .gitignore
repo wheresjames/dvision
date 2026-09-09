@@ -1,7 +1,15 @@
 ## Custom
 nohup.out
+# Scratch files are prefixed with an underscore -- but so is every
+# __init__.py, and ignoring those silently ships a tree with no packages.
 _*
+!__init__.py
+# Dotfiles are ignored wholesale, so anything meant to be tracked is
+# re-admitted below. .github in particular is silently lost without this.
 .*
+!.github/
+!.editorconfig
+!.gitignore
 .tools
 *-lock.*
 node_modules
@@ -17,4 +25,7 @@ dfgb-*.log
 NEXT*
 DV-*
 
-
+## Build and check artifacts
+coverage.xml
+htmlcov/
+.coverage*

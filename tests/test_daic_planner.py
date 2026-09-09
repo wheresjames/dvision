@@ -2,7 +2,6 @@
 
 import time
 
-import pytest
 
 from daic.planner import (
     Planner, State,

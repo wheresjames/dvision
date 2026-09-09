@@ -1,0 +1,64 @@
+# Dependency and secret auditing.
+#
+# Both run on a schedule as well as on push: a vulnerability is published
+# against a pin that has not changed, so a check that only fires on commits
+# will not find it.
+name: security
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: pip-audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pip-audit==2.9.0
+      # Auditing the pin file rather than an installed environment: the pins
+      # are what a deployment actually gets, and this needs no build of the
+      # native wheels to check them.
+      - run: pip-audit --strict --requirement requirements.txt --desc
+
+  secrets:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # gitleaks scans history, not just the checkout
+
+      # Run the released binary rather than a third-party action: one less
+      # action to trust, and no licence gate on the org plan.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # --redact keeps a finding out of the public log; the report artifact is
+      # where the detail goes.
+      - name: Scan history
+        run: gitleaks detect --source . --redact --report-format sarif --report-path gitleaks.sarif --exit-code 1
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks.sarif
+          retention-days: 14
+          if-no-files-found: ignore

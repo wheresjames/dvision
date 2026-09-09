@@ -24,16 +24,6 @@ from dway.tour import (
     resolve_map, save_tour,
 )
 
-# One palette, in dcmn.theme, so every window's map is the same colour.
-_BG = theme.BG
-_PANEL = theme.PANEL
-_CANVAS = theme.CANVAS
-_TEXT = theme.TEXT
-_DIM = theme.DIM
-_ACCENT = theme.ACCENT
-_WARN = theme.WARN
-_DANGER = theme.DANGER
-_OK = theme.OK
 _HIT_RADIUS_PX = 9
 _HEADING_HIT_PX = 6
 _HEADING_MIN_LENGTH_PX = 18
@@ -84,7 +74,7 @@ class TourEditor:
 
     def _build_canvas(self) -> None:
         self.canvas = tk.Canvas(self.frame, width=640, height=420,
-                                background=_CANVAS, highlightthickness=0)
+                                background=theme.CANVAS, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="nsew")
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<B1-Motion>", self._on_drag)
@@ -116,8 +106,8 @@ class TourEditor:
 
         ttk.Label(side, text="waypoints", style="Dim.TLabel").grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(10, 2))
-        self.listbox = tk.Listbox(side, height=9, width=38, background=_PANEL,
-                                  foreground=_TEXT, selectbackground=_ACCENT,
+        self.listbox = tk.Listbox(side, height=9, width=38, background=theme.PANEL,
+                                  foreground=theme.TEXT, selectbackground=theme.ACCENT,
                                   highlightthickness=0, borderwidth=0,
                                   activestyle="none", exportselection=False)
         self.listbox.grid(row=5, column=0, columnspan=2, sticky="ew")
@@ -141,8 +131,8 @@ class TourEditor:
 
         ttk.Label(side, text="diagnostics", style="Dim.TLabel").grid(
             row=7, column=0, columnspan=2, sticky="w", pady=(10, 2))
-        self.diagnostics = tk.Text(side, height=10, width=40, background=_PANEL,
-                                   foreground=_TEXT, highlightthickness=0,
+        self.diagnostics = tk.Text(side, height=10, width=40, background=theme.PANEL,
+                                   foreground=theme.TEXT, highlightthickness=0,
                                    borderwidth=0, wrap="word")
         self.diagnostics.grid(row=8, column=0, columnspan=2, sticky="nsew")
         self.diagnostics.configure(state="disabled")
@@ -411,8 +401,8 @@ class TourEditor:
             self.view.draw_map(self.canvas, self.sim_map)
             sx, sy = self._to_canvas(self.sim_map.start_x, self.sim_map.start_y)
             self.canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5,
-                                    outline=_OK, width=2)
-            self.canvas.create_text(sx, sy - 12, text="start", fill=_OK,
+                                    outline=theme.OK, width=2)
+            self.canvas.create_text(sx, sy - 12, text="start", fill=theme.OK,
                                     font=("TkDefaultFont", 7))
         clearances = self._clearances()
         for index, point in enumerate(self.waypoints):
@@ -421,23 +411,23 @@ class TourEditor:
                 px, py = self._to_canvas(self.waypoints[index - 1]["x"],
                                          self.waypoints[index - 1]["y"])
                 leg = clearances[index] if index < len(clearances) else None
-                color = _WARN
+                color = theme.WARN
                 if leg is not None and leg.obstructed:
-                    color = _DANGER
+                    color = theme.DANGER
                 elif leg is not None and leg.clearance_m < self._min_clearance():
                     color = theme.CAUTION
                 self.canvas.create_line(px, py, cx, cy, fill=color, width=2,
                                         dash=(5, 3))
-            fill = _ACCENT if index == self.selected else ""
+            fill = theme.ACCENT if index == self.selected else ""
             self.canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5,
-                                    outline=_WARN, fill=fill, width=2)
+                                    outline=theme.WARN, fill=fill, width=2)
             self.canvas.create_text(cx + 10, cy - 10, text=str(index),
-                                    fill=_WARN, font=("TkDefaultFont", 7))
+                                    fill=theme.WARN, font=("TkDefaultFont", 7))
             heading = math.radians(point["heading_deg"])
             length = self._heading_length()
             self.canvas.create_line(
                 cx, cy, cx + math.sin(heading) * length,
-                cy - math.cos(heading) * length, fill=_TEXT, width=2,
+                cy - math.cos(heading) * length, fill=theme.TEXT, width=2,
                 arrow="last")
 
     def _refresh_list(self) -> None:

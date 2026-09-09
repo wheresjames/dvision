@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 from dtest.dway_rig import (
-    FIXED_DT, FORWARD_TOUR, MAZE_012, ROOT, Rig,
+    FIXED_DT, FORWARD_TOUR, MAZE_012, Rig,
 )
 from dway.mission import MissionState
 from dway.tour import load_tour

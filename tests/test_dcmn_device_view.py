@@ -170,7 +170,7 @@ def test_four_cameras_share_one_copy_budget(root, monkeypatch):
             grid = DeviceGrid(root, session); grid.pack(fill='both', expand=True)
             grid.wanted = ids; grid.set_visible(True); root.update()
             count = 0
-            for i in range(61):
+            for _ in range(61):
                 clock[0] += 1/30
                 sensors.tick(DroneState(0, 0, 1), clock[0]); session.poll()
                 before = {sid: stream.last_seen_video for sid, stream in session.streams.items()}

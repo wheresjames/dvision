@@ -22,8 +22,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Callable
 
-from dvision2_common import gps_bearing, gps_distance_m
-from .controller import (ControlOutput, navigate_to_bearing,
+from .controller import (ControlOutput,
                          servo, search_step, turn, estimate_horiz_dist)
 from .detector import Detection
 
@@ -44,7 +43,6 @@ class State(Enum):
 # ---------------------------------------------------------------------------
 
 SEARCH_ALT_M    = 3.0   # nominal map/test altitude; daic does not climb to it
-TAKEOFF_ALT_M   = 3.0   # legacy constant; daic no longer commands takeoff by default
 
 # How many consecutive frames the target must be visible before transitioning
 # SEARCH → APPROACH and APPROACH → LANDING.
@@ -80,7 +78,6 @@ _LAND_COMPLETE_ALT_M = 0.25
 _ARM_TIMEOUT_S    = 5.0
 # How often to repeat the arm request while waiting for the vehicle to agree.
 _ARM_RETRY_S      = 0.25
-_TAKEOFF_TIMEOUT_S = 15.0
 
 # Stale-status timeout.
 _STATUS_STALE_S = 2.0
@@ -418,37 +415,6 @@ class Planner:
                              status_text=f"landing… {alt:.1f} m")
 
     # ------------------------------------------------------------------
-    # GPS-guided navigation
-    # ------------------------------------------------------------------
-
-    def _gps_nav_to_target(self, status: dict) -> ControlOutput | None:
-        """Return a velocity command toward the target's GPS position, or None
-        if GPS coordinates are unavailable or the target is visually close."""
-        d_lat = _try_float(status.get("drone.lat_deg"))
-        d_lon = _try_float(status.get("drone.lon_deg"))
-        t_lat = _try_float(status.get("target.lat_deg"))
-        t_lon = _try_float(status.get("target.lon_deg"))
-        if None in (d_lat, d_lon, t_lat, t_lon):
-            return None
-        if t_lat == 0.0 and t_lon == 0.0:
-            return None
-        dist_m = gps_distance_m(d_lat, d_lon, t_lat, t_lon)
-        if dist_m < 1.5:
-            # Close enough for visual servo; fall through to expanding square.
-            return None
-        bearing = gps_bearing(d_lat, d_lon, t_lat, t_lon)
-        # drone.compass_deg is 0=north, 90=east (true compass heading).
-        compass = _try_float(status.get("drone.compass_deg"))
-        if compass is None:
-            # drone.heading_deg is published as a compass heading too, so this
-            # is the same quantity from the other key -- not a conversion. It
-            # used to add 90 degrees, from when heading_deg carried the
-            # renderer's internal yaw.
-            compass = _heading(status)
-        yaw_error = (bearing - compass + 360.0) % 360.0
-        return navigate_to_bearing(yaw_error, dist_m)
-
-    # ------------------------------------------------------------------
     # Expanding square search
     # ------------------------------------------------------------------
 
@@ -536,15 +502,6 @@ def _try_float(v: Any) -> float | None:
     except (TypeError, ValueError):
         return None
 
-def _gps_dist_to_target(s: dict) -> float:
-    d_lat = _try_float(s.get("drone.lat_deg"))
-    d_lon = _try_float(s.get("drone.lon_deg"))
-    t_lat = _try_float(s.get("target.lat_deg"))
-    t_lon = _try_float(s.get("target.lon_deg"))
-    if None in (d_lat, d_lon, t_lat, t_lon):
-        return 0.0
-    return gps_distance_m(d_lat, d_lon, t_lat, t_lon)
-
 def _armed(s: dict) -> bool:
     return s.get("drone.armed", "0") == "1"
 
@@ -556,9 +513,6 @@ def _clamp01(v: Any) -> float:
         return max(0.0, min(1.0, float(v)))
     except (TypeError, ValueError):
         return 0.0
-
-def _mode(s: dict) -> str:
-    return s.get("drone.mode", "DISARMED")
 
 def _alt(s: dict) -> float:
     try:

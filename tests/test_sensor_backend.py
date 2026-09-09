@@ -32,7 +32,6 @@ def test_dsim_implements_the_backend_protocol():
     # runtime_checkable proves presence, not signatures -- the rest of this
     # module is what checks that the seams mean what the manager expects.
     assert isinstance(backend, SensorBackend)
-    assert isinstance(BaseSensorBackend(), SensorBackend)
     # Every name the manager reaches for, and no more: a seam added here
     # without a reason is a seam every future backend has to reimplement, so
     # the count is worth pinning.
@@ -40,6 +39,14 @@ def test_dsim_implements_the_backend_protocol():
     assert surface == {'range_truth', 'render_views', 'drop_views', 'prepare_profile',
                        'finish_profile', 'compass_heading', 'realism', 'origin_alt_m',
                        'map_to_gps'}
+    # The base covers the same surface -- checked on the class, not with
+    # `isinstance`. Up to Python 3.11 a protocol instance check reads members
+    # with `hasattr`, which swallows only AttributeError, so it *invokes* the
+    # property members; this base's properties raise RuntimeError by design and
+    # the check blows up instead of answering. 3.12 switched to
+    # `inspect.getattr_static` and stopped invoking them. On the class a
+    # property is a plain attribute either way.
+    assert all(hasattr(BaseSensorBackend, name) for name in surface)
 
 
 def test_the_scheduler_never_reaches_the_simulator():
@@ -155,7 +162,7 @@ def test_the_base_backend_names_the_seam_it_cannot_answer():
     with pytest.raises(RuntimeError, match='renders none'):
         base.render_views([])
     with pytest.raises(RuntimeError, match='no vehicle datum'):
-        base.realism
+        base.realism  # noqa: B018  -- reading the property is the check
     with pytest.raises(RuntimeError, match='no vehicle datum'):
         base.map_to_gps(0., 0., 0.)
     # The optional camera-lifecycle hooks are the ones a backend may ignore,

@@ -448,7 +448,10 @@ def audit(selected: tuple[Mutation, ...], verbose: bool) -> int:
             for rel in drifted:
                 print(f"      {rel}", file=sys.stderr)
             print(f"    originals are in {backup}", file=sys.stderr)
-            return 2
+            # noqa is deliberate: this script rewrites files in place, so a
+            # failed restore is the most important thing that can happen in
+            # this run and must outrank whatever exception got us here.
+            return 2  # noqa: B012
         shutil.rmtree(backup, ignore_errors=True)
 
     print()

@@ -1,0 +1,22 @@
+# The pins in requirements.txt are exact on purpose -- a rendered pixel must
+# not move because a transitive dependency did. Dependabot is what keeps exact
+# pins from quietly going stale, and it opens a PR that CI has to pass before
+# any of them moves.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the tooling, so a linter bump is not five reviews.
+      dev-tooling:
+        patterns: ["ruff", "pip-audit", "pytest*"]
+
+  # Workflows pin actions by commit SHA, which is what makes this entry
+  # necessary: a SHA never updates itself.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

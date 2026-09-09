@@ -24,6 +24,8 @@ from typing import Any
 
 import numpy as np
 
+from dcmn import theme
+
 
 class RunReporter:
     _OCC_INTERVAL_S     = 5.0
@@ -284,18 +286,18 @@ class RunReporter:
         cells   = snap["cells"]
         path    = snap["path"]
 
-        fig = Figure(figsize=(6, 6), facecolor="#0d1117")
+        fig = Figure(figsize=(6, 6), facecolor=theme.BG)
         canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111, facecolor="#161b22")
+        ax = fig.add_subplot(111, facecolor=theme.PANEL)
 
         x0, x1 = pose.x - half, pose.x + half
         y0, y1 = pose.y - half, pose.y + half
         ax.set_xlim(x0, x1)
         ax.set_ylim(y1, y0)   # invert Y: row 0 at top
         ax.set_aspect("equal")
-        ax.tick_params(colors="#8b949e", labelsize=6)
+        ax.tick_params(colors=theme.DIM, labelsize=6)
         for sp in ax.spines.values():
-            sp.set_color("#30363d")
+            sp.set_color(theme.GRID)
 
         # Cells
         for (cx, cy), val in cells.items():
@@ -303,11 +305,11 @@ class RunReporter:
             if abs(wx - pose.x) > half or abs(wy - pose.y) > half:
                 continue
             if val >= 1.6:
-                col, alpha = "#f85149", 0.85
+                col, alpha = theme.DANGER, 0.85
             elif val >= 0.2:
-                col, alpha = "#e09440", 0.55
+                col, alpha = theme.ATTENTION, 0.55
             elif val <= -0.2:
-                col, alpha = "#238636", 0.45
+                col, alpha = theme.TREE_FILL, 0.45
             else:
                 continue
             ax.add_patch(Rectangle(
@@ -318,12 +320,12 @@ class RunReporter:
         # A* path
         if len(path) >= 2:
             ax.plot([p[0] for p in path], [p[1] for p in path],
-                    "-", color="#58a6ff", linewidth=1.5, zorder=3)
+                    "-", color=theme.ACCENT, linewidth=1.5, zorder=3)
 
         # Target
         if target_xy is not None:
             ax.add_patch(Circle(target_xy, 0.35,
-                                facecolor="#f2cc60", edgecolor="#e6edf3",
+                                facecolor=theme.WARN, edgecolor=theme.TEXT,
                                 linewidth=1.2, zorder=4))
 
         # Drone triangle
@@ -335,17 +337,17 @@ class RunReporter:
         rgt  = (pose.x + math.cos(yaw - 2.45) * sz * 0.6,
                 pose.y + math.sin(yaw - 2.45) * sz * 0.6)
         ax.fill([nose[0], lft[0], rgt[0]], [nose[1], lft[1], rgt[1]],
-                color="#58a6ff", zorder=5)
+                color=theme.ACCENT, zorder=5)
 
         occ = sum(1 for v in cells.values() if v >= 1.6)
         ax.set_title(
             f"t={elapsed:.1f}s  occ={occ}  path={len(path)}  "
             f"({pose.x:.1f}, {pose.y:.1f})",
-            color="#e6edf3", fontsize=7, pad=4,
+            color=theme.TEXT, fontsize=7, pad=4,
         )
         canvas.print_figure(
             str(self._dir / f"occ_{seq:03d}.png"),
-            dpi=110, bbox_inches="tight", facecolor="#0d1117",
+            dpi=110, bbox_inches="tight", facecolor=theme.BG,
         )
 
     def _save_slam_ply(
@@ -410,34 +412,34 @@ class RunReporter:
         right = data[:, 5]
         conf  = data[:, 6]
 
-        fig = Figure(figsize=(12, 4), facecolor="#0d1117")
+        fig = Figure(figsize=(12, 4), facecolor=theme.BG)
         canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111, facecolor="#161b22")
+        ax = fig.add_subplot(111, facecolor=theme.PANEL)
 
-        ax.fill_between(t, conf * 0.12, alpha=0.4, color="#30363d", label="confidence ×0.12")
-        ax.plot(t, front, color="#f85149", lw=1.2, label="front")
-        ax.plot(t, fl,    color="#e09440", lw=0.9, label="front-left",  alpha=0.85)
-        ax.plot(t, fr,    color="#e09440", lw=0.9, label="front-right", alpha=0.85, ls="--")
-        ax.plot(t, left,  color="#58a6ff", lw=0.8, label="left",  alpha=0.7)
-        ax.plot(t, right, color="#58a6ff", lw=0.8, label="right", alpha=0.7, ls="--")
+        ax.fill_between(t, conf * 0.12, alpha=0.4, color=theme.GRID, label="confidence ×0.12")
+        ax.plot(t, front, color=theme.DANGER, lw=1.2, label="front")
+        ax.plot(t, fl,    color=theme.ATTENTION, lw=0.9, label="front-left",  alpha=0.85)
+        ax.plot(t, fr,    color=theme.ATTENTION, lw=0.9, label="front-right", alpha=0.85, ls="--")
+        ax.plot(t, left,  color=theme.ACCENT, lw=0.8, label="left",  alpha=0.7)
+        ax.plot(t, right, color=theme.ACCENT, lw=0.8, label="right", alpha=0.7, ls="--")
 
-        ax.axhline(0.12, color="#3fb950", lw=0.8, ls=":", alpha=0.8, label="mark thresh 0.12")
-        ax.axhline(0.25, color="#f85149", lw=0.8, ls=":", alpha=0.8, label="avoid thresh 0.25")
+        ax.axhline(0.12, color=theme.OK, lw=0.8, ls=":", alpha=0.8, label="mark thresh 0.12")
+        ax.axhline(0.25, color=theme.DANGER, lw=0.8, ls=":", alpha=0.8, label="avoid thresh 0.25")
 
         ax.set_xlim(float(t[0]), float(t[-1]))
         ax.set_ylim(-0.05, 1.05)
-        ax.set_xlabel("elapsed (s)", color="#8b949e", fontsize=8)
-        ax.set_ylabel("sector risk", color="#8b949e", fontsize=8)
-        ax.set_title("Obstacle Sector Risk Timeline", color="#e6edf3", fontsize=9)
-        ax.tick_params(colors="#8b949e", labelsize=7)
+        ax.set_xlabel("elapsed (s)", color=theme.DIM, fontsize=8)
+        ax.set_ylabel("sector risk", color=theme.DIM, fontsize=8)
+        ax.set_title("Obstacle Sector Risk Timeline", color=theme.TEXT, fontsize=9)
+        ax.tick_params(colors=theme.DIM, labelsize=7)
         for sp in ax.spines.values():
-            sp.set_color("#30363d")
-        ax.legend(facecolor="#21262d", edgecolor="#30363d",
-                  labelcolor="#e6edf3", fontsize=7, ncol=4, loc="upper right")
+            sp.set_color(theme.GRID)
+        ax.legend(facecolor=theme.ENTRY, edgecolor=theme.GRID,
+                  labelcolor=theme.TEXT, fontsize=7, ncol=4, loc="upper right")
 
         canvas.print_figure(
             str(self._dir / "sector_timeline.png"),
-            dpi=130, bbox_inches="tight", facecolor="#0d1117",
+            dpi=130, bbox_inches="tight", facecolor=theme.BG,
         )
 
     def _save_summary(
@@ -485,13 +487,13 @@ def _run_bg(fn, *args) -> None:
 # ---------------------------------------------------------------------------
 
 _STATE_CSS = {
-    "ARMING":   "#8b949e",
-    "SEARCH":   "#58a6ff",
-    "APPROACH": "#e09440",
-    "LANDING":  "#3fb950",
-    "COMPLETE": "#3fb950",
-    "FAILSAFE": "#f85149",
-    "IDLE":     "#30363d",
+    "ARMING":   theme.DIM,
+    "SEARCH":   theme.ACCENT,
+    "APPROACH": theme.ATTENTION,
+    "LANDING":  theme.OK,
+    "COMPLETE": theme.OK,
+    "FAILSAFE": theme.DANGER,
+    "IDLE":     theme.GRID,
 }
 
 
@@ -590,7 +592,7 @@ def _analyse_findings(ticks: list[dict], transitions: list[dict]) -> list[dict]:
     findings: list[dict] = []
 
     # --- Approach-with-obstacle ---
-    for i, tr in enumerate(transitions):
+    for tr in transitions:
         if tr["to_state"] == "APPROACH" and tr["front_risk"] > 0.5:
             # What was fwd on the tick AFTER the transition?
             next_fwd = _first_approach_fwd(ticks, tr["t"])
@@ -689,7 +691,8 @@ def _make_state_path_b64(ticks: list[dict]) -> str | None:
     try:
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
-        import io, base64
+        import io
+        import base64
     except ImportError:
         return None
 
@@ -706,15 +709,15 @@ def _make_state_path_b64(ticks: list[dict]) -> str | None:
     if len(positions) < 2:
         return None
 
-    fig = Figure(figsize=(7, 7), facecolor="#0d1117")
+    fig = Figure(figsize=(7, 7), facecolor=theme.BG)
     canvas = FigureCanvasAgg(fig)
-    ax = fig.add_subplot(111, facecolor="#161b22")
+    ax = fig.add_subplot(111, facecolor=theme.PANEL)
     ax.set_aspect("equal")
-    ax.tick_params(colors="#8b949e", labelsize=7)
+    ax.tick_params(colors=theme.DIM, labelsize=7)
     for sp in ax.spines.values():
-        sp.set_color("#30363d")
-    ax.set_xlabel("X (m)", color="#8b949e", fontsize=8)
-    ax.set_ylabel("Y (m)", color="#8b949e", fontsize=8)
+        sp.set_color(theme.GRID)
+    ax.set_xlabel("X (m)", color=theme.DIM, fontsize=8)
+    ax.set_ylabel("Y (m)", color=theme.DIM, fontsize=8)
     ax.invert_yaxis()
 
     # Draw path segments coloured by state
@@ -727,7 +730,7 @@ def _make_state_path_b64(ticks: list[dict]) -> str | None:
             j += 1
         seg_x = [p[0] for p in positions[i:j]]
         seg_y = [p[1] for p in positions[i:j]]
-        col   = _STATE_CSS.get(state, "#8b949e")
+        col   = _STATE_CSS.get(state, theme.DIM)
         label = state if state not in plotted_states else None
         ax.plot(seg_x, seg_y, color=col, linewidth=2.0,
                 alpha=0.9, label=label, solid_capstyle="round")
@@ -739,22 +742,22 @@ def _make_state_path_b64(ticks: list[dict]) -> str | None:
 
     # Start and end markers
     ax.plot(positions[0][0],  positions[0][1],  "o",
-            color="#3fb950", markersize=9, markeredgecolor="#e6edf3",
+            color=theme.OK, markersize=9, markeredgecolor=theme.TEXT,
             markeredgewidth=1.5, zorder=5, label="Start")
     last_state = positions[-1][2]
-    end_col = "#f85149" if last_state in ("APPROACH", "FAILSAFE") else "#f2cc60"
+    end_col = theme.DANGER if last_state in ("APPROACH", "FAILSAFE") else theme.WARN
     ax.plot(positions[-1][0], positions[-1][1], "x" if last_state == "APPROACH" else "s",
             color=end_col, markersize=10, markeredgewidth=2.5,
             zorder=5, label="Crash" if last_state == "APPROACH" else "End")
 
     ax.set_title("Flight Path — coloured by planner state",
-                 color="#e6edf3", fontsize=9, pad=6)
-    ax.legend(facecolor="#21262d", edgecolor="#30363d",
-              labelcolor="#e6edf3", fontsize=7)
+                 color=theme.TEXT, fontsize=9, pad=6)
+    ax.legend(facecolor=theme.ENTRY, edgecolor=theme.GRID,
+              labelcolor=theme.TEXT, fontsize=7)
 
     buf = io.BytesIO()
     canvas.print_figure(buf, format="png", dpi=130, bbox_inches="tight",
-                        facecolor="#0d1117")
+                        facecolor=theme.BG)
     return base64.b64encode(buf.getvalue()).decode()
 
 
@@ -787,11 +790,11 @@ def _render_html(
     dist      = summary.get("target_dist_final_m")
 
     result_label = "CRASHED" if crashed else ("LANDED ✓" if state == "COMPLETE" else state)
-    result_color = "#f85149" if crashed else ("#3fb950" if state == "COMPLETE" else "#e09440")
+    result_color = theme.DANGER if crashed else (theme.OK if state == "COMPLETE" else theme.ATTENTION)
 
     finding_html = ""
     for f in findings:
-        border = {"critical": "#f85149", "warning": "#e09440", "info": "#58a6ff"}.get(f["level"], "#8b949e")
+        border = {"critical": theme.DANGER, "warning": theme.ATTENTION, "info": theme.ACCENT}.get(f["level"], theme.DIM)
         icon   = {"critical": "⛔", "warning": "⚠️", "info": "ℹ️"}.get(f["level"], "•")
         finding_html += f"""
         <div style="border-left:4px solid {border};padding:10px 14px;margin:10px 0;background:#161b22;border-radius:0 6px 6px 0">
@@ -802,8 +805,8 @@ def _render_html(
     tr_rows = ""
     for tr in transitions:
         risk  = tr["front_risk"]
-        rcol  = "#f85149" if risk > 0.7 else ("#e09440" if risk > 0.35 else "#3fb950")
-        scol  = _STATE_CSS.get(tr["to_state"], "#8b949e")
+        rcol  = theme.DANGER if risk > 0.7 else (theme.ATTENTION if risk > 0.35 else theme.OK)
+        scol  = _STATE_CSS.get(tr["to_state"], theme.DIM)
         tr_rows += f"""
         <tr>
           <td>{tr['t']:.2f}s</td>

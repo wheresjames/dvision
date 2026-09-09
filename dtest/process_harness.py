@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -21,6 +22,14 @@ from dvision2_common import controlled_command, load_pymembus, shared_names
 
 # Timeline samples retained per instance before the record is decimated.
 _TIMELINE_LIMIT = 2000
+
+#: Multiplier applied to every wait below. A development machine starts Panda3D
+#: in well under a second; a shared four-core CI runner can take several, and a
+#: five-second window for the first video frame is marginal there. Scaling in
+#: one place beats raising the constants: a local failure still fails fast, and
+#: CI sets DVISION_TEST_TIMEOUT_SCALE to buy headroom without hiding a genuine
+#: hang, which would blow the job timeout instead.
+TIMEOUT_SCALE = float(os.environ.get("DVISION_TEST_TIMEOUT_SCALE", "1"))
 
 
 class DsimProcessHarness:
@@ -171,7 +180,7 @@ class DsimProcessHarness:
 
     def _wait_until(self, predicate: Callable[[], bool], *, timeout: float,
                     description: str) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout * TIMEOUT_SCALE
         while time.monotonic() < deadline:
             self._assert_running()
             if predicate():

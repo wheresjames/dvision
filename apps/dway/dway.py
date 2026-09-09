@@ -48,21 +48,6 @@ from dway.mission import (
 from dway.report import FlightRecorder
 from dway.tour import TourError, load_tour
 
-# One palette, in dcmn.theme, so every window's map is the same colour.
-_UI_BG = theme.BG
-_UI_PANEL = theme.PANEL
-_UI_CANVAS = theme.CANVAS
-_UI_GRID = theme.GRID
-_UI_TEXT = theme.TEXT
-_UI_DIM = theme.DIM
-_UI_ACCENT = theme.ACCENT
-_UI_BUTTON = theme.BUTTON
-_UI_BUTTON_ACTIVE = theme.BUTTON_ACTIVE
-_UI_WARN = theme.WARN
-_UI_DANGER = theme.DANGER
-_UI_OK = theme.OK
-
-
 def _describe_waypoint(waypoint) -> str:
     """A waypoint as a line to read, not a dict to decode."""
     described = waypoint.describe()
@@ -314,8 +299,8 @@ class FlyWindow:
         # size and is resized to the map the first time one is available.
         self.view = MapView(cell=16, margin=12)
         self.canvas = tk.Canvas(fly, width=480, height=480,
-                                background=_UI_CANVAS, highlightthickness=1,
-                                highlightbackground=_UI_GRID)
+                                background=theme.CANVAS, highlightthickness=1,
+                                highlightbackground=theme.GRID)
         self.canvas.grid(row=0, column=0, rowspan=2, sticky="nw")
 
         info = ttk.Frame(fly, padding=(12, 0))
@@ -428,12 +413,12 @@ class FlyWindow:
             cx, cy = self._to_canvas(x, y)
             if index:
                 px, py = self._to_canvas(*planned[index - 1])
-                self.canvas.create_line(px, py, cx, cy, fill=_UI_WARN,
+                self.canvas.create_line(px, py, cx, cy, fill=theme.WARN,
                                         dash=(4, 3), tags="map-static")
             self.canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
-                                    outline=_UI_WARN, width=2, tags="map-static")
+                                    outline=theme.WARN, width=2, tags="map-static")
             self.canvas.create_text(cx + 9, cy - 9, text=str(index),
-                                    fill=_UI_WARN, font=("TkDefaultFont", 7),
+                                    fill=theme.WARN, font=("TkDefaultFont", 7),
                                     tags="map-static")
         self._map_drawn = True
 
@@ -456,7 +441,7 @@ class FlyWindow:
             points: list[float] = []
             for x, y in track[-3000:]:
                 points.extend(self._to_canvas(x, y))
-            self._dynamic.append(self.canvas.create_line(*points, fill=_UI_ACCENT))
+            self._dynamic.append(self.canvas.create_line(*points, fill=theme.ACCENT))
         state = mission.last_state
         if state is None:
             return
@@ -475,10 +460,10 @@ class FlyWindow:
             tx, ty, _ = mission.context.ned_to_map(leg.north_m, leg.east_m, leg.down_m)
             lx, ly = self._to_canvas(tx, ty)
             self._dynamic.append(self.canvas.create_line(
-                cx, cy, lx, ly, fill=_UI_ACCENT, dash=(2, 2)))
+                cx, cy, lx, ly, fill=theme.ACCENT, dash=(2, 2)))
 
-    _STATE_COLORS = {"FAILED": _UI_DANGER, "PAUSED": _UI_WARN,
-                     "FLYING": _UI_OK, "COMPLETE": _UI_OK}
+    _STATE_COLORS = {"FAILED": theme.DANGER, "PAUSED": theme.WARN,
+                     "FLYING": theme.OK, "COMPLETE": theme.OK}
 
     def _refresh_text(self) -> None:
         mission = self.flight.mission
@@ -486,7 +471,7 @@ class FlyWindow:
         self.vars["state"].set(f"{name} -- {mission.reason}"
                                if mission.reason else name)
         self.labels["state"].configure(
-            foreground=self._STATE_COLORS.get(name, _UI_TEXT))
+            foreground=self._STATE_COLORS.get(name, theme.TEXT))
 
         strategy, capabilities = mission.strategy, mission.capabilities
         if strategy is not None and capabilities is not None:

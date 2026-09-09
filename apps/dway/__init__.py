@@ -1,0 +1,2 @@
+"""Portable waypoint-navigation contracts."""
+

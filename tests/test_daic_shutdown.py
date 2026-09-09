@@ -11,7 +11,6 @@ The window became impossible to close by any means short of SIGKILL.
 from __future__ import annotations
 
 import argparse
-import sys
 import types
 
 import pytest
