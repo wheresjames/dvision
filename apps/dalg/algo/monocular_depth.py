@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 from dalg.grid import LogOddsGrid
 from dalg.model import Result
-from dalg.algo.spatial import obstacle_band, project_pixels
+from dalg.algo.spatial import (PointObservation, clear_rays, free_space_samples,
+                                obstacle_band, project_pixels)
 
 
 @dataclass(frozen=True)
@@ -27,9 +28,13 @@ class MonocularDepthConfig:
 class MonocularDepthAlgorithm:
     name, sensors = "monocular_depth", ("rgb",)
 
-    def __init__(self, width_m, height_m, intrinsics, settings=None, **_):
+    def __init__(self, width_m, height_m, intrinsics, settings=None, *, evidence=False, **_):
         self.size, self.intrinsics = (width_m, height_m), intrinsics
         self.config = MonocularDepthConfig(**(settings or {}))
+        # The evidence copy also marks the space each depth ray crossed as
+        # free. The scored copy does not, so its scores are exactly what they
+        # were before this algorithm could publish.
+        self.evidence = bool(evidence)
         path = Path(self.config.model_path).expanduser()
         if not self.config.model_path or not path.is_file():
             raise ValueError("monocular_depth requires settings.model_path pointing to an ONNX metric-depth model")
@@ -48,11 +53,18 @@ class MonocularDepthAlgorithm:
     def start(self): self.grid = LogOddsGrid(*self.size); self.frames = self.points = 0
 
     def observe(self, frame):
-        """Fuse the network's depth as perpendicular depth, not radial range.
+        """Measure one frame and fuse it: the scored path, exactly as it always was."""
+        self.fuse(self.measure(frame))
+
+    def measure(self, frame) -> PointObservation:
+        """The network's depth as world points; the expensive half, done once a frame.
 
         Metric-depth heads report distance along the optical axis, which is the
         same convention :func:`project_pixels` inverts; the row of a pixel then
         gives the sample a height, so floor and sky stop reading as walls.
+        Split from :meth:`fuse` so the scored grid and the evidence grid share
+        one inference: running it once per copy was what left this algorithm
+        unable to keep up with the camera.
         """
         blob = cv2.dnn.blobFromImage(np.asarray(frame.rgb, np.uint8), 1/255.0,
             (self.config.input_width, self.config.input_height), swapRB=False)
@@ -65,16 +77,29 @@ class MonocularDepthAlgorithm:
         step = max(1, self.config.stride)
         sampled = depth[::step, ::step]
         rows, columns = np.nonzero(np.isfinite(sampled) & (sampled > 0))
-        self.frames += 1
-        if not len(rows): return
         pose = frame.camera_pose
+        if not len(rows):
+            empty = np.empty(0)
+            return PointObservation(pose, empty, empty, empty)
         x, y, z = project_pixels(pose, columns*step, rows*step,
                                  sampled[rows, columns], self.intrinsics)
+        return PointObservation(pose, x, y, z)
+
+    def fuse(self, observation: PointObservation) -> None:
+        """Write one measured frame into this copy's grid; cheap, done per grid."""
+        self.frames += 1
+        if not len(observation): return
+        pose, x, y, z = observation.pose, observation.xs, observation.ys, observation.zs
         keep = obstacle_band(z, x, y, pose,
                              min_height_m=self.config.min_height_m,
                              max_height_m=self.config.max_height_m,
                              min_range_m=self.config.min_range_m,
                              max_range_m=self.config.max_range_m)
+        if self.evidence:
+            seen = free_space_samples(z, x, y, pose, max_height_m=self.config.max_height_m,
+                                      min_range_m=self.config.min_range_m,
+                                      max_range_m=self.config.max_range_m)
+            clear_rays(self.grid, pose, x[seen], y[seen])
         if not keep.any(): return
         self.grid.accumulate(*self.grid.cells(x[keep], y[keep]),
                              self.config.occupied_log_odds)

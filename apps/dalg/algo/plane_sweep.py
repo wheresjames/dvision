@@ -11,6 +11,12 @@ from dalg.model import Result
 from dalg.algo.spatial import ray_cells
 
 
+#: Keyframes the evidence copy keeps as candidate partners. Keyframes are at
+#: least half a metre apart and a partner is at most max_baseline_m away, so a
+#: few dozen covers any partner the geometry allows, with room for revisits.
+EVIDENCE_WINDOW = 32
+
+
 @dataclass(frozen=True)
 class PlaneSweepConfig:
     depth_min_m: float = .5
@@ -39,9 +45,16 @@ class PlaneSweepAlgorithm:
     name = "plane_sweep"
     sensors = ("rgb",)
 
-    def __init__(self, width_m, height_m, intrinsics, settings=None, **_):
+    def __init__(self, width_m, height_m, intrinsics, settings=None, *, evidence=False, **_):
         self.size, self.intrinsics = (width_m, height_m), intrinsics
         self.config = PlaneSweepConfig(**(settings or {}))
+        # The evidence copy runs for as long as dalg does, so it cannot stop at
+        # max_keyframes the way a scored tour can, and it cannot pair a
+        # keyframe with one captured later. Both differences live behind this
+        # flag; the scored copy is exactly what it was.
+        self.evidence = bool(evidence)
+        self.times: list[float] = []
+        self._arrived = False
         if self.config.depth_steps < 4: raise ValueError("depth_steps must be at least 4")
         if self.config.depth_min_m <= 0 or self.config.depth_max_m <= self.config.depth_min_m:
             raise ValueError("invalid depth range")
@@ -52,14 +65,14 @@ class PlaneSweepAlgorithm:
         self.accepted_points = 0
 
     def start(self):
-        self.frames.clear(); self.processed.clear()
+        self.frames.clear(); self.processed.clear(); self.times.clear()
         self.grid = LogOddsGrid(*self.size); self.accepted_points = 0
 
     @staticmethod
     def _angle_delta(a, b): return (a-b+180) % 360 - 180
 
     def observe(self, frame):
-        if len(self.frames) >= self.config.max_keyframes: return
+        if not self.evidence and len(self.frames) >= self.config.max_keyframes: return
         if self.frames:
             previous = self.frames[-1][1]
             distance = math.hypot(frame.camera_pose.x_m-previous.x_m,
@@ -70,12 +83,36 @@ class PlaneSweepAlgorithm:
             gray = cv2.resize(gray, None, fx=self.config.match_scale,
                               fy=self.config.match_scale, interpolation=cv2.INTER_AREA)
         self.frames.append((gray.astype(np.float32) / 255.0, frame.camera_pose))
+        self.times.append(frame.timestamp_s)
+        if self.evidence:
+            # A sliding window rather than a wall: the oldest keyframe goes,
+            # and this one waits for fuse_available().
+            while len(self.frames) > EVIDENCE_WINDOW:
+                self.frames.pop(0); self.times.pop(0)
+            self._arrived = True
 
-    def _neighbor(self, index):
+    def fuse_available(self):
+        """Fuse the newest keyframe once, against an earlier keyframe only.
+
+        Live evidence cannot use a frame from the future, so the partner is the
+        widest baseline among keyframes already captured, and the cells are
+        stamped with the new keyframe's capture time. A keyframe with no
+        earlier partner is not fused; a later keyframe can still pair with it.
+        """
+        if not self._arrived: return
+        self._arrived = False
+        index = len(self.frames) - 1
+        neighbor = self._neighbor(index, before=index)
+        if neighbor is None: return
+        if hasattr(self.grid, "timestamp_s"): self.grid.timestamp_s = self.times[index]
+        self._fuse(self._depth(index, neighbor), self.frames[index][1])
+
+    def _neighbor(self, index, before=None):
         pose = self.frames[index][1]
         choices = []
         for other_index, (_, other) in enumerate(self.frames):
             if other_index == index: continue
+            if before is not None and other_index >= before: continue
             baseline = math.hypot(other.x_m-pose.x_m, other.y_m-pose.y_m)
             heading_delta = abs(self._angle_delta(other.heading_deg, pose.heading_deg))
             if (self.config.min_baseline_m <= baseline <= self.config.max_baseline_m

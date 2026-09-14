@@ -190,12 +190,17 @@ class Rig:
         return json.loads((self.report_dir / "summary.json").read_text())
 
 
-def write_corridor_tour(path: Path, *, tour_id: str = "maze_012.corridor") -> Path:
+def write_corridor_tour(path: Path, *, tour_id: str = "maze_012.corridor",
+                        heading_deg: float = 90.0) -> Path:
     """A baseline tour flyable straight out of ``maze_012``'s own start pose.
 
     The committed maze_012 tours begin on the far side of a wall from the
     drone start and dway does not avoid obstacles, so anything that launches a
     real simulator flies this instead.
+
+    ``heading_deg`` is held along the whole corridor. The default faces the
+    direction of travel; 180 crabs east facing the wall 2.5 m to the south,
+    which is the sideways motion stereo-from-motion needs to pair frames at all.
     """
     from dway.tour import map_content_sha
 
@@ -210,8 +215,8 @@ def write_corridor_tour(path: Path, *, tour_id: str = "maze_012.corridor") -> Pa
         "waypoint_tolerance_m": 0.15,
         "min_clearance_m": 0.4,
         "waypoints": [
-            {"x": 8.5, "y": 1.5, "z": 1.5, "heading_deg": 90.0, "dwell_s": 0.2},
-            {"x": 14.5, "y": 1.5, "z": 1.5, "heading_deg": 90.0, "dwell_s": 0.2},
+            {"x": 8.5, "y": 1.5, "z": 1.5, "heading_deg": heading_deg, "dwell_s": 0.2},
+            {"x": 14.5, "y": 1.5, "z": 1.5, "heading_deg": heading_deg, "dwell_s": 0.2},
         ],
     }), encoding="utf-8")
     return path

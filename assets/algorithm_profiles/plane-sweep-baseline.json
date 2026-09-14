@@ -1,0 +1,10 @@
+{
+  "name": "plane-sweep-baseline",
+  "sources": [
+    {
+      "sensor": "primary_camera",
+      "algorithm": "plane_sweep",
+      "settings": {}
+    }
+  ]
+}

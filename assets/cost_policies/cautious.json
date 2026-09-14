@@ -1,0 +1,8 @@
+{
+  "schema": "dvision2.cost-policy.v1",
+  "schema_version": 1,
+  "name": "cautious",
+  "occupied_threshold": 0.5,
+  "inflation_m": 1.1,
+  "combine": "max"
+}

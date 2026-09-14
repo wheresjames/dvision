@@ -45,6 +45,24 @@ PLOT_GRID = "#1c2128"      # gridlines on a dark plot, dimmer than MAP_GRID
 PLOT_LEADER = "#2d3340"    # a leader from a mark to the thing it labels
 HIGHLIGHT = "#ffdf5d"      # the outline on a selected or called-out shape
 
+# Evidence grids. A cell nobody has looked at is not free space and must never
+# be painted as though it were: it gets its own colour, distinct from both ends
+# of the occupancy ramp, so an operator can see what has not been observed.
+UNOBSERVED = "#484f58"
+ROUTE = "#f2cc60"          # a planned route, the same yellow as WARN
+GOAL = "#a371f7"           # where a plan is trying to reach
+START = "#3fb950"          # where a plan starts
+
+
+def rgb(colour):
+    """A ``#rrggbb`` palette entry as an ``(r, g, b)`` triple.
+
+    Rasters are built in numpy and drawn through PIL, neither of which reads a
+    Tk colour string, so every module that paints one was about to write this.
+    """
+    value = int(colour[1:], 16)
+    return (value >> 16) & 255, (value >> 8) & 255, value & 255
+
 
 def blend(first, second, fraction):
     """Interpolate two hex colours: a translucent tint without alpha support."""

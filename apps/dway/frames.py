@@ -76,3 +76,33 @@ def map_heading_to_true(heading_deg: float, anchor: GeoAnchor) -> float:
 
 def true_heading_to_map(heading_deg: float, anchor: GeoAnchor) -> float:
     return (heading_deg - anchor.rotation_deg) % 360.0
+
+
+@dataclass(frozen=True)
+class ProviderFrame:
+    """Explicit neutral local-to-NED transform; never derives an origin from a world."""
+    origin: tuple[float, float, float]
+
+    @classmethod
+    def from_context(cls, snapshot):
+        value = snapshot.get('vehicle_transform') or {}
+        if (value.get('schema') != 'dvision2.local-ned-transform.v1'
+                or value.get('frame_id') != snapshot.get('frame_id')
+                or value.get('localization_epoch') != snapshot.get('localization_epoch')):
+            raise ValueError('provider local NED transform missing or invalidated')
+        origin = value.get('origin')
+        if not isinstance(origin, list) or len(origin) != 3 or not all(
+                type(x) in (int, float) and math.isfinite(x) for x in origin):
+            raise ValueError('invalid provider NED origin')
+        frame = snapshot.get('frame', {})
+        if frame.get('axes') != 'x_east,y_south,z_up' or frame.get('units') != 'm':
+            raise ValueError('unsupported provider axes or units')
+        return cls(tuple(origin))
+
+    def map_to_ned(self, x, y, z):
+        ox, oy, oz = self.origin
+        return oy-y, x-ox, oz-z
+
+    def ned_to_map(self, north, east, down):
+        ox, oy, oz = self.origin
+        return east+ox, oy-north, oz-down

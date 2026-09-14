@@ -112,3 +112,60 @@ def fuse_endpoint(grid, pose, point, *, free=-.7, occupied=2.5):
     xs, ys = ray_cells(int(x0), int(y0), int(x1), int(y1))
     grid.update(xs, ys, free)
     grid.update([x1], [y1], occupied)
+
+
+def clear_rays(grid, pose, xs, ys, *, free=-.7):
+    """Mark free every cell between the camera and each point, excluding the point.
+
+    The dense algorithms' counterpart to :func:`fuse_endpoint`, which they
+    never had: a depth map sees along thousands of rays a frame, and each one
+    proves the space it crosses is clear -- the observed-free evidence an
+    occupancy grid exists to carry. Endpoints are merged by cell first, so the
+    cost is one line of sight per distinct endpoint cell rather than per pixel,
+    and ``update`` counts a cell once however many rays cross it.
+
+    A ray proves its column free at the ray's own height, not all the way down;
+    a low obstacle close to the camera can sit under a ray to the floor. The
+    ground-plane algorithm has always made the same approximation.
+    """
+    xs, ys = np.asarray(xs, np.float64), np.asarray(ys, np.float64)
+    if not xs.size: return
+    (camera_x,), (camera_y,) = grid.cells([pose.x_m], [pose.y_m])
+    ends = np.unique(np.stack(grid.cells(xs, ys), axis=1), axis=0)
+    parts = [ray_cells(int(camera_x), int(camera_y), int(x1), int(y1)) for x1, y1 in ends]
+    grid.update(np.concatenate([p[0] for p in parts]),
+                np.concatenate([p[1] for p in parts]), free)
+
+
+def free_space_samples(z, xs, ys, pose, *, max_height_m, min_range_m, max_range_m):
+    """Which samples end a line of sight worth clearing: floor and obstacles.
+
+    Anything below the top of the obstacle band -- floor included -- was seen
+    along a ray that stayed inside the flight band. Sky is left out: a ray to
+    it leaves the band part-way, and clearing its whole length would clear space
+    the ray passed over.
+    """
+    radial = np.hypot(np.asarray(xs)-pose.x_m, np.asarray(ys)-pose.y_m)
+    return ((np.asarray(z) <= max_height_m)
+            & (radial >= min_range_m) & (radial <= max_range_m))
+
+
+class PointObservation:
+    """One frame's measured points in the world, before any grid has seen them.
+
+    What an algorithm that splits ``measure`` from ``fuse`` hands between the
+    two: the camera pose and every sample's position. It lets one expensive
+    measurement -- a depth network's inference -- feed both the scored grid and
+    the evidence grid, instead of each copy running it again.
+    """
+
+    def __init__(self, pose, xs, ys, zs):
+        self.pose, self.xs, self.ys, self.zs = pose, xs, ys, zs
+
+    def __len__(self): return len(self.xs)
+
+    def translated(self, dx: float, dy: float) -> "PointObservation":
+        """The same observation in a grid whose origin sits at ``(dx, dy)``."""
+        from dataclasses import replace
+        return PointObservation(replace(self.pose, x_m=self.pose.x_m - dx, y_m=self.pose.y_m - dy),
+                                self.xs - dx, self.ys - dy, self.zs)

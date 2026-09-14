@@ -37,6 +37,11 @@ OK, WARN, BAD, UNKNOWN = "ok", "warn", "bad", "unknown"
 #: Worst-first, so aggregating a pipeline is a max over this order.
 SEVERITY = {UNKNOWN: 0, OK: 1, WARN: 2, BAD: 3}
 
+#: One glyph per grade, so a status bar in one window reads the same as a tree
+#: row in another. Here rather than beside whichever widget drew one first: a
+#: second copy is how the same grade comes to look like two different things.
+DOTS = {OK: '●', WARN: '◐', BAD: '✕', UNKNOWN: '○'}
+
 
 def grade(achieved_hz: float | None, wanted_hz: float | None) -> str:
     """How well a rate met its intention, as ``ok``/``warn``/``bad``.

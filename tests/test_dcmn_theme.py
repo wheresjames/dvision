@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WINDOW_MODULES = ("apps/dsim/dsim.py", "apps/dctl/dctl.py", "apps/dway/dway.py",
                   "apps/dway/editor.py", "apps/dway/report.py",
                   "apps/daic/daic.py", "apps/daic/run_reporter.py",
-                  "apps/dfgb/dfgb.py", "apps/dalg/report_html.py")
+                  "apps/dfgb/dfgb.py")
 HEX_COLOUR = re.compile(r'"#[0-9a-fA-F]{3,8}"')
 
 

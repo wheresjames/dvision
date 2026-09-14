@@ -9,14 +9,13 @@ from types import SimpleNamespace
 import numpy as np
 from PIL import Image, ImageTk
 
+from dcmn.health import DOTS
 from dcmn.pacing import TEXT_HZ, VIDEO_HZ
 from dcmn import theme, layout
 from dcmn.window import load_state, save_state, save_window_geometry, restore_window_geometry
 from dcmn.series import EnvelopeSeries
 from dcmn.sensors import Sample
 from dcmn.device_export import export_directory, dump_samples, snapshot_png
-
-DOTS = {'ok': '●', 'warn': '◐', 'bad': '✕', 'unknown': '○'}
 
 
 def heatmap(fields, layout):

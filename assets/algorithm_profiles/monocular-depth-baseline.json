@@ -1,0 +1,19 @@
+{
+  "name": "monocular-depth-baseline",
+  "sources": [
+    {
+      "sensor": "primary_camera",
+      "algorithm": "monocular_depth",
+      "settings": {
+        "model_path": ".cache/models/metric-depth.onnx",
+        "input_width": 280,
+        "input_height": 210,
+        "scale": 1.0,
+        "offset_m": 0.0,
+        "min_range_m": 0.3,
+        "max_range_m": 20.0,
+        "stride": 8
+      }
+    }
+  ]
+}

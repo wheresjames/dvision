@@ -1,0 +1,48 @@
+{
+  "schema": "dvision2.navigation.v1",
+  "vehicle_id": "v",
+  "planner": "dnav",
+  "session": "n",
+  "sequence": 2,
+  "time_s": 10.0,
+  "stop_generation": 1,
+  "geometry_revision": 1,
+  "points": [
+    [
+      2.0,
+      2.0,
+      1.5
+    ],
+    [
+      7.0,
+      2.0,
+      1.5
+    ]
+  ],
+  "context": {
+    "provider_id": "p",
+    "frame_id": "local",
+    "localization_epoch": 0,
+    "clock_domain_id": "v",
+    "clock_epoch": 0
+  },
+  "goal": {
+    "authority": "ui",
+    "authority_epoch": 1,
+    "revision": 1,
+    "frame_id": "local",
+    "localization_epoch": 0,
+    "clock_epoch": 0,
+    "position": [
+      7.0,
+      2.0,
+      1.5
+    ]
+  },
+  "planning_status": "ok",
+  "profile": "b71fa06f8c09ab478d899de283777bf716b01e3e34a052aaf9da8e83a029a9d1",
+  "clearance": {
+    "eligible": false,
+    "reason": "evidence unavailable"
+  }
+}

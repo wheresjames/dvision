@@ -21,8 +21,8 @@ against the diagram above, never values produced by a production transform.
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CALIBRATION_MAP = ROOT / "assets/maps/calibration_orientation.txt"
-CALIBRATION_RING_MAP = ROOT / "assets/maps/calibration_orientation_ring.txt"
+CALIBRATION_MAP = ROOT / "tests/assets/maps/calibration_orientation.txt"
+CALIBRATION_RING_MAP = ROOT / "tests/assets/maps/calibration_orientation_ring.txt"
 DIRECT_MAP = ROOT / "assets/maps/test_direct.txt"
 
 # Perception-chain fixtures. The left/right pair are mirror images of one
@@ -30,9 +30,9 @@ DIRECT_MAP = ROOT / "assets/maps/test_direct.txt"
 # a handedness error anywhere in the chain shows up as two answers that fail to
 # change sign. The front fixture puts the same wall squarely ahead, which is the
 # case that carries a range and therefore reaches the occupancy map.
-CHAIN_LEFT_MAP = ROOT / "assets/maps/chain_left_obstacle.txt"
-CHAIN_RIGHT_MAP = ROOT / "assets/maps/chain_right_obstacle.txt"
-CHAIN_FRONT_MAP = ROOT / "assets/maps/chain_front_obstacle.txt"
+CHAIN_LEFT_MAP = ROOT / "tests/assets/maps/chain_left_obstacle.txt"
+CHAIN_RIGHT_MAP = ROOT / "tests/assets/maps/chain_right_obstacle.txt"
+CHAIN_FRONT_MAP = ROOT / "tests/assets/maps/chain_front_obstacle.txt"
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 START_HEADING_DEG = 0.0

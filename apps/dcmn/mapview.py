@@ -60,6 +60,7 @@ class Shape:
     fill: str | None = None
     outline: str | None = None
     width: float = 1.0
+    dash: tuple[int, ...] = ()     # line only: on/off pixel lengths; empty is solid
 
 
 def map_shapes(sim_map, *, grid: bool = True) -> Iterator[Shape]:
@@ -117,6 +118,63 @@ def draw_map_axes(axes, sim_map, *, grid: bool = True, zorder: float = 1.0) -> N
             axes.plot([shape.x0, shape.x1], [shape.y0, shape.y1],
                       color=shape.outline, linewidth=shape.width * 0.5,
                       zorder=zorder + 0.2)
+
+
+def render_map_png(sim_map, *, grid: bool = True, scale: int = 1):
+    """The same map as a PIL image: the reference-imagery surface.
+
+    `dsim` renders its world into PNG bytes on the imagery plane, and this
+    is that rendering -- the identical shapes the window and the report
+    paint, so the picture behind an operator's evidence grid and the map the
+    simulator window shows are one drawing. One image pixel per map cell at
+    ``scale`` 1, row 0 at the top, pixel ``(col, row)`` centred on
+    ``(col + 0.5, row + 0.5)`` map metres; :func:`map_png_affine` states
+    that placement, so the image and its declared transform cannot disagree.
+
+    ``scale`` is supersampling for legibility, not a claim about the world:
+    a scale-4 image of a 1-metre-cell map is still a map of 1-metre cells,
+    and its affine says so. At scale 1 an outline would paint the whole
+    pixel it surrounds, so shapes fill without edges there -- the fill is
+    the information, and a one-pixel edge is not.
+    """
+    from PIL import Image, ImageDraw
+
+    scale = max(1, int(scale))
+    image = Image.new("RGB", (sim_map.width * scale, sim_map.height * scale),
+                      theme.CELL)
+    draw = ImageDraw.Draw(image)
+    for shape in map_shapes(sim_map, grid=grid):
+        x0, y0 = shape.x0 * scale, shape.y0 * scale
+        x1, y1 = shape.x1 * scale, shape.y1 * scale
+        width = max(1, round(shape.width))
+        if shape.kind == "rect":
+            if scale == 1:
+                draw.rectangle((x0, y0, x1 - 1, y1 - 1),
+                               fill=shape.fill or theme.CELL)
+            else:
+                draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=shape.fill,
+                               outline=shape.outline, width=width)
+        elif shape.kind == "oval":
+            draw.ellipse((x0, y0, x1 - 1, y1 - 1), fill=shape.fill,
+                         outline=None if scale == 1 else shape.outline,
+                         width=width)
+        else:
+            draw.line((x0, y0, x1, y1), fill=shape.outline, width=width)
+    return image
+
+
+def map_png_affine(scale: int = 1) -> list[float]:
+    """The image-pixel-to-map-metre affine of :func:`render_map_png`.
+
+    An image pixel ``(col, row)`` is centred on ``((col + 0.5) / scale,
+    (row + 0.5) / scale)`` map metres, so metres-per-image-pixel is
+    ``1 / scale`` in both axes and the offset is zero: the contract in
+    :mod:`dcmn.imagery` maps pixel centres, and the top-left pixel's centre
+    is half an image pixel -- that is, half a map cell -- from the map's
+    origin corner.
+    """
+    step = 1.0 / max(1, int(scale))
+    return [step, 0.0, 0.0, step, 0.0, 0.0]
 
 
 class MapView:

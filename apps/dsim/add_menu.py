@@ -14,7 +14,7 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 from dcmn import theme
-from dsim.scroll import wheel_step
+from dcmn.scroll import wheel_step
 
 #: One item is a name line with a description line beneath it.
 _NAME_Y = 5

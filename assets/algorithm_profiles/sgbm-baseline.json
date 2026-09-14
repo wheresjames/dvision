@@ -1,0 +1,10 @@
+{
+  "name": "sgbm-baseline",
+  "sources": [
+    {
+      "sensor": "primary_camera",
+      "algorithm": "sgbm",
+      "settings": {}
+    }
+  ]
+}

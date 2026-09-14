@@ -1,0 +1,10 @@
+{
+  "name": "ground-plane-baseline",
+  "sources": [
+    {
+      "sensor": "primary_camera",
+      "algorithm": "ground_plane",
+      "settings": {}
+    }
+  ]
+}

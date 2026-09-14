@@ -1,0 +1,52 @@
+{
+  "schema": "dvision2.execution.v1",
+  "vehicle_id": "v",
+  "session": "x",
+  "sequence": 7,
+  "time_s": 10.5,
+  "stop_generation": 1,
+  "planner_session": "n",
+  "planner": "dnav",
+  "state": "HOLDING",
+  "reason": "stop generation 1 confirmed: speed below dwell limit",
+  "dry_run": false,
+  "owns_control": true,
+  "lease_state": "held",
+  "goal": {
+    "authority": "ui",
+    "authority_epoch": 1,
+    "revision": 1,
+    "frame_id": "local",
+    "localization_epoch": 0,
+    "clock_epoch": 0,
+    "position": [
+      7.0,
+      2.0,
+      1.5
+    ]
+  },
+  "disposition": {
+    "value": "stopped",
+    "geometry_revision": 1,
+    "navigation_sequence": 3
+  },
+  "geometry_revision": 1,
+  "navigation_sequence": 3,
+  "pose": null,
+  "commanded_target": null,
+  "progress": [
+    0,
+    0.25
+  ],
+  "tracking_error_m": 0.02,
+  "remaining_permitted_m": null,
+  "stopping_margin_m": null,
+  "validity_remaining_s": null,
+  "speed_mps": 0.01,
+  "unavailable": {
+    "remaining_permitted_m": "no permitted interval while stopped"
+  },
+  "profile": "b71fa06f8c09ab478d899de283777bf716b01e3e34a052aaf9da8e83a029a9d1",
+  "profile_calibrated": false,
+  "recording_error": ""
+}

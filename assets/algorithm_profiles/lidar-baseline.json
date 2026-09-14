@@ -1,0 +1,10 @@
+{
+  "name": "lidar-baseline",
+  "sources": [
+    {
+      "sensor": "scan",
+      "algorithm": "lidar_inverse",
+      "settings": {}
+    }
+  ]
+}

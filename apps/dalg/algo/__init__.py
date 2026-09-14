@@ -1,4 +1,3 @@
-from dalg.algo.controls import ConstantAlgorithm, ExactRangeAlgorithm
 from dalg.algo.sgbm import SGBMAlgorithm, SGBMConfig
 from dalg.algo.plane_sweep import PlaneSweepAlgorithm, PlaneSweepConfig
 from dalg.algo.features import FeatureConfig, FeatureTriangulationAlgorithm
@@ -6,8 +5,9 @@ from dalg.algo.optical_flow import OpticalFlowConfig, OpticalFlowTriangulationAl
 from dalg.algo.ground_plane import GroundPlaneAlgorithm, GroundPlaneConfig
 from dalg.algo.monocular_depth import MonocularDepthAlgorithm, MonocularDepthConfig
 
-ALGORITHMS = {"sgbm": SGBMAlgorithm, "constant": ConstantAlgorithm,
-              "exact_range": ExactRangeAlgorithm,
+#: Camera evidence algorithms. The oracle/constant controls are evaluation-only
+#: and live in dtest.evaluation, never here.
+ALGORITHMS = {"sgbm": SGBMAlgorithm,
               "plane_sweep": PlaneSweepAlgorithm,
               "feature_triangulation": FeatureTriangulationAlgorithm,
               "optical_flow_triangulation": OpticalFlowTriangulationAlgorithm,

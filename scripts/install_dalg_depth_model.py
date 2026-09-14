@@ -119,7 +119,7 @@ def normal_mode(args: argparse.Namespace) -> None:
     environment = cache / "venv"
     checkpoint = cache / "checkpoints" / CHECKPOINT_NAME
     destination = Path(args.output).expanduser().resolve() if args.output else (
-        root / "assets" / "models" / "depth" / "metric-depth.onnx"
+        root / ".cache" / "models" / "metric-depth.onnx"
     )
 
     cache.mkdir(parents=True, exist_ok=True)
@@ -166,7 +166,7 @@ def normal_mode(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", help="model destination (defaults to assets/models/depth)")
+    parser.add_argument("--output", help="model destination (defaults to .cache/models)")
     parser.add_argument(
         "--force-download", action="store_true",
         help="download the checkpoint again instead of using the cached copy",

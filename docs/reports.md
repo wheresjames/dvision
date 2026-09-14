@@ -14,7 +14,8 @@ reports/<id>/<run>/
   dsim/        the simulator's own artifacts
   daic/        the AI controller's artifacts
   dway/        the tour follower's artifacts
-  dalg/        the algorithm demonstrator's artifacts
+  dalg/        the evidence producer's summary, images and archive/
+  dnav/        the route planner's summary, events, route image and archive/
   <module>/    any other attached client, named after itself
 ```
 
@@ -183,8 +184,42 @@ battery and geofence -- so a run flown in wind or on a degraded fix is never
 read as a clean one. Additive fields are allowed; changing what a field means
 increments `schema_version`.
 
-Beyond that one there is no shared schema, and deliberately so: each module
-reports what it measured. What *is* fixed is the file name and the location, which is what lets
+`dnav` writes a versioned one too, because a plan is only meaningful against
+the evidence, the pose, the goal and the policy it was made from:
+
+```json
+{"schema_version": 2, "module": "dnav", "session_id": "…", "instance": "area1",
+ "partial": false, "pose_provider": "ideal-simulation", "planner": "astar",
+ "plans": 70, "attempts": 94, "health": "warn",
+ "policy": {"name": "default", "inflation_m": 0.6, "occupied_threshold": 0.5,
+            "combine": "max", "digest": "…"},
+ "goal": {"position": [15.5, 10.0], "frame_id": "local", "localization_epoch": 0,
+          "revision": 3, "authority_epoch": 1, "role": "ui"},
+ "route": {"status": "no_route", "reason": "…", "waypoints": [], "cost": null,
+           "diagnostics": {"coverage_exhausted": false}},
+ "control_route": {"status": "ok", "cost": null, "length_m": 16.38},
+ "control_note": "straight-line diagnostic on the same evidence-derived cost; not an oracle",
+ "statuses": [], "status_counts": {"ok": 1, "no_route": 1},
+ "reference_display": null, "reference_image": null,
+ "generation_transitions": 0, "map": {}, "recording": {"complete": true},
+ "archive": "archive"}
+```
+
+`statuses` is every status the run passed through with the data-clock time it
+changed, because a report holding only the last route says nothing about a run
+that spent most of it stale. `reference_display` records the operator's display
+decision (`reference-on`/`reference-off`, with its source or opacity) and
+`reference_image` the exact revision the final picture displayed; both are
+`null` in a headless or unassisted run, which is what keeps an assisted
+session visible rather than quietly comparable to an unassisted one.
+`route.png` is the map pane's own rendering of
+the final route over evidence-derived cost -- composed with the reference
+background the operator displayed, when one was displayed, whose exact
+revision the archive also holds; never a world file.
+`dalg/summary.json` (schema 3) is truth-free: state, resolved geometry
+and how it was chosen, omitted sources, counters, recording status and one
+evidence image per source. Neither carries a score. Beyond these there is no shared schema, and deliberately
+so: each module reports what it measured. What *is* fixed is the file name and the location, which is what lets
 a tool find every module's numbers for a run without knowing what they mean.
 
 ### Conventional, where they apply
@@ -195,6 +230,73 @@ a tool find every module's numbers for a run without knowing what they mean.
 | `<name>_NNN.png` | Periodic image snapshots, zero-padded so they sort. |
 | `frames/` | Individual captured frames, kept in their own subdirectory so the top level stays readable. |
 | `report.html` | Optional human-readable rollup, generated at close from the files above. Never the authority — anything it shows must exist in `summary.json` or a log first. |
+
+---
+
+### Numeric archives (dalg, dnav)
+
+Screenshots and summaries lose the numbers. dalg and dnav therefore also keep
+an `archive/` (`apps/dcmn/archive.py`, schema `dvision2.archive.v2`) of what
+they actually published or consumed:
+
+```text
+archive/
+  archive.json   manifest: module, provenance metadata, state (recording |
+                 finalized | unfinished), counters, drops and errors, complete
+  chunks/        chunk-NNNNNN.npz: numeric arrays only, loaded with allow_pickle=False
+  chunks.jsonl   one line per committed chunk: file, sha256, bytes, contents
+  index.jsonl    one event per line, in recording-sequence order
+```
+
+- **dalg** records every evidence publication (including unchanged content,
+  which is stored once and referenced by content digest), every admitted and
+  rejected sample with its capture-associated pose, mapping initialisations
+  with geometry, sizing basis, sources, model digests and allocation estimate,
+  every reset with its cause, and mission/lifecycle bus events.
+- **dnav** records every planning attempt, successful or not: trigger, exact
+  pose, goal descriptor and authority, policy and planner, route, the
+  straight-line diagnostic, and the exact evidence revisions used (with their
+  arrival order and the stale set), with the grids themselves.
+- A run that displayed a reference image also records a **`report.background`**
+  event -- image id, revision, checksum, opacity, label and source category --
+  with the exact PNG bytes stored in its chunk as a uint8 blob and verified
+  against both its declared checksum and its content digest. It is filed after
+  the report's picture is rendered and before the recorder seals, so the
+  archived revision is the one in the picture by construction. Imagery is
+  optional in the archive too: a missing or corrupt blob is a warning, never an
+  incomplete event -- it costs the background, never the numbers. The newest
+  `report.background` event wins, even when its bytes did not survive, because
+  an older revision's picture would misregister.
+
+Chunks commit every second or 32 MiB, whichever comes first; a chunk file is
+fsynced and renamed before its `chunks.jsonl` line, and an index line is written
+only after the payload it references. At most 64 MiB of copied payload waits in
+memory (`--recording-queue-mib`); beyond that a record is dropped without
+blocking the module and an `archive.gap` marker names the missing sequences. At
+4 GiB per module per session (`--recording-disk-mib`) payloads stop, keeping a
+1 MiB reserve for the final manifest. Clean shutdown drains within 5 s. An
+archive with any drop, error or unclean end is never labelled complete.
+
+`python3 apps/dcmn/archive.py DIR` validates an archive -- checksums, content
+digests, gaps, truncation -- and recovers committed chunks from an interrupted
+one. `--attempt N` resolves a dnav planning attempt to its grids, pose, goal
+and policy; `dnav.plan.replay_attempt` plans it again, and the route must match.
+`--render N` (with `--out PATH`) draws one attempt to a PNG from the archive
+alone -- grids, route, pose and goal from the numbers, optionally over the
+exact reference revision the report displayed, all through the same renderer
+the live pane used, and with no dsim and no world file.
+Output archives support evaluating what happened; they are not a raw sensor
+recording and cannot rerun a perception algorithm.
+
+A module that finds an `archive/` already present (a restart within one
+session) writes `archive-2/` and so on; archives are append-once.
+
+### Evaluator-only truth (dsim)
+
+`dsim/truth/` holds `world.txt` (a copy of the world file), `world.json` (its
+digest and frame) and `trajectory.jsonl` (the true pose and collision state
+every tick). They exist for a later offline evaluator. No operational module
+reads them; the dalg/dnav process tests forbid it with an audit hook.
 
 ---
 
@@ -238,9 +340,13 @@ correctness.
 
 1. Take `--id` and open the shared buffers by `shared_names(id)`, retrying
    until they exist.
-2. On first successful status read, take `sim.report_dir`. If it is empty, keep
-   waiting; do not construct a path.
-3. Create `<sim.report_dir>/<yourname>/` and write only there.
+2. Read the session context (`dcmn.context.Context(id).read()`) and take its
+   `report_root` and `session_id`. If there is no context yet, keep waiting; do
+   not construct a path. (Status-plane clients such as `daic` and `dway` still
+   read `sim.report_dir`, which dsim publishes with the same value.)
+3. Create `<report_root>/<yourname>/` and write only there. When `session_id`
+   changes (a rollover), start a new archive under the new root and write a
+   full baseline of any state you retain.
 4. Write `summary.json` on shutdown. Append to `flight.jsonl` as you go if the
    run has per-tick state worth keeping.
 5. Wrap every write; never raise out of reporting code.
@@ -256,8 +362,30 @@ publishes the result the same way, so its clients need no special case.
 | Thing | Where |
 |---|---|
 | `new_run_id`, `report_root`, `DEFAULT_REPORT_ID` | `dvision2_common.py` |
-| Root creation and `sim.report_dir` publication | `apps/dsim/dsim.py` |
+| Root creation, session context and `sim.report_dir` publication | `apps/dsim/dsim.py` |
+| The neutral session context (session, frame, epochs, pose, goal, resets) | `apps/dcmn/context.py` |
+| A provider without dsim (tests, replay) | `dtest/provider.py` |
+| Numeric archives: writer, reader, validator | `apps/dcmn/archive.py` |
+| Optional reference imagery: publisher, session, display host | `apps/dcmn/imagery.py`, `apps/dcmn/map_pane.py` |
+| Reference-image archiving and the standalone render | `apps/dcmn/archive.py` |
 | A worked reporter (images, logs, summary, HTML) | `apps/daic/run_reporter.py` |
 | A worked JSONL logger | `apps/daic/flight_log.py` |
 | A versioned summary and event log | `apps/dway/report.py` |
 | Pinning a run to a fixed directory | `dtest/process_harness.py` |
+
+## Dynamic dway segments
+
+Dynamic dway (dry run and flight) records under `dway/archive`, `archive-2`, etc., with
+an append-once segment per restart/rollover; it never overwrites static-tour flight
+logs. Dry-run segments contain exact consumed navigation records, context and evidence
+references, plus a segment summary, recent event view, HTML and map PNG. Flight
+segments add controls, transitions, holds, lease/health events, targets with the
+permission they were checked against, 10 Hz vehicle samples and the shutdown result;
+their report (`summary.json`, CSV tables, `map.png`, `timeline.png`, `report.html`,
+`manifest.json`) is written under `<archive>/report/` by `apps/dway/flightlog.py`,
+which may read sibling `dnav/` archives but writes only under dway. dnav adds
+`navigation.snapshot` events with exact validation inputs and persistent veto state,
+and writes a dark `dnav/report.html` built from its summary: route outcome, route image,
+execution permission beside the strict evidence check, status history and evidence sources.
+See [navigation reporting](navigation.md#reports-replay-and-comparison) for metrics,
+replay, comparison and sharing a run.

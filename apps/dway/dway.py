@@ -39,14 +39,20 @@ from dcmn.tktheme import apply_theme
 from dcmn.window import (disable_input_method, restore_window_pos,
                           save_window_pos)
 from dvision2_common import validate_id
-from dway.follower import PositionStrategy, Sample
-from dway.link import DsimLink
-from dway.mission import (
-    FINISH_ACTIONS, TERMINAL_STATES, Mission, MissionConfig, MissionState,
-    mission_report_dir,
-)
-from dway.report import FlightRecorder
-from dway.tour import TourError, load_tour
+# Tour-only imports are lazy: the dynamic dry-run must not even import the
+# world/tour-dependent mission preflight path.
+FINISH_ACTIONS = ("hold", "land", "rtl")
+
+
+def _tour_runtime():
+    global PositionStrategy, Sample, DsimLink, TERMINAL_STATES, Mission
+    global MissionConfig, MissionState, mission_report_dir, FlightRecorder, TourError, load_tour
+    from dway.follower import PositionStrategy, Sample
+    from dway.link import DsimLink
+    from dway.mission import TERMINAL_STATES, Mission, MissionConfig, MissionState, mission_report_dir
+    from dway.report import FlightRecorder
+    from dway.tour import TourError, load_tour
+
 
 def _describe_waypoint(waypoint) -> str:
     """A waypoint as a line to read, not a dict to decode."""
@@ -80,7 +86,10 @@ class Flight:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.tour = load_tour(args.tour)
+        _tour_runtime()
+        from dway.route_source import TourRouteSource
+        self.route_source = TourRouteSource(args.tour)
+        self.tour = self.route_source.tour
         self.link = DsimLink(args.id, client_id=args.client_id or f"dway-{args.id}",
                              ack_timeout_s=args.ack_timeout)
         self.mission = Mission(
@@ -639,6 +648,18 @@ class EditorWindow:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="dvision2 waypoint follower")
+    parser.add_argument("--mode", choices=("tour", "dynamic", "target"), default="tour",
+                        help="tour: fly a tour file; dynamic: fly dnav routes after an explicit Start; "
+                             "target: take off and fly dnav's route to its goal automatically")
+    parser.add_argument("--dry-run", action="store_true", help="observe dynamic routes without vehicle commands")
+    parser.add_argument("--planner", default="dnav", help="selected navigation publisher name")
+    parser.add_argument("--execution-profile",
+                        help="the execution profile dnav uses; flight requires a calibrated one")
+    parser.add_argument("--profile-set", action="append", default=[], metavar="KEY=VALUE",
+                        help="override one execution profile field (repeatable; pass the same to dnav)")
+    parser.add_argument("--start", action="store_true",
+                        help="dynamic --no-ui flight: request Start once a route is admitted "
+                             "(the headless equivalent of pressing Start)")
     parser.add_argument("--edit", action="store_true",
                         help="open the tour editor without connecting to a vehicle")
     parser.add_argument("--id", help="vehicle instance id (required for flight)")
@@ -673,6 +694,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-ui", action="store_true",
                         help="run headless, for scripted flights")
     args = parser.parse_args(argv)
+    if args.mode == "target" and args.dry_run:
+        parser.error("target mode flies; use --mode dynamic --dry-run to observe")
+    if args.mode in ("dynamic", "target"):
+        # Real dynamic flight (no --dry-run) additionally requires a
+        # calibrated execution profile; flightui enforces that itself so the
+        # refusal carries the reason rather than a CLI usage error.
+        if args.edit or args.tour or args.edit_map: parser.error("dynamic mode does not load tours or world maps")
+    elif args.dry_run:
+        parser.error("--dry-run requires --mode dynamic")
     if args.edit:
         if args.no_ui:
             parser.error("--edit cannot be combined with --no-ui")
@@ -681,7 +711,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     else:
         if not args.id:
             parser.error("--id is required unless --edit is used")
-        if not args.tour:
+        if not args.tour and args.mode == "tour":
             parser.error("--tour is required unless --edit is used")
         if args.edit_map:
             parser.error("--map is only available with --edit")
@@ -698,6 +728,42 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     disable_input_method()
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.mode in ("dynamic", "target"):
+        try:
+            if args.dry_run:
+                from dway.dynamic import run_cli
+                return run_cli(args)
+            # Real flight: an explicitly started executor that commands motion.
+            if args.no_ui:
+                from dway.flightui import run_flight
+                return run_flight(args)
+            import tkinter as tk
+            from dway.link import DsimLink
+            from dcmn.maps import MapSession
+            from dway.executor import DynamicExecutor
+            from dway.flightui import executor_options, load_flight_profile
+            profile = load_flight_profile(args)
+            link = DsimLink(args.id, client_id=args.client_id or f"dway-{args.id}",
+                            ack_timeout_s=args.ack_timeout)
+            executor = DynamicExecutor(args.id, link, profile, planner=args.planner,
+                                       maps=MapSession(args.id), **executor_options(args))
+
+            def stop(_signum, _frame):
+                executor.request("pause", "signal")
+
+            signal.signal(signal.SIGINT, stop)
+            signal.signal(signal.SIGTERM, stop)
+            try:
+                from dway.flightui import FlightWindow
+                window = FlightWindow(executor)
+            except tk.TclError as exc:
+                print(f"dway: no display available; use --no-ui: {exc}", file=sys.stderr)
+                return 2
+            return window.run()
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"dway {args.mode}: {exc}", file=sys.stderr)
+            return 2
+    _tour_runtime()
     if args.edit:
         try:
             import tkinter as tk

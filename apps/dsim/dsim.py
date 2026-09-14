@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import io
 import json
 import math
 import random
@@ -890,6 +891,24 @@ class DroneSimulator:
                                            self.run_id, root=ROOT / "reports")
         self.dsim_report_dir = self.report_root / "dsim"
         self.dsim_report_dir.mkdir(parents=True, exist_ok=True)
+        # The neutral session: this process is the provider, so it owns the
+        # session id, the report root every module writes under, the data
+        # clock and the ideal pose. Consumers read that registry, never the
+        # status plane's sim.report_dir or drone.* fields.
+        # It is started in open_ipc, once the sensor publisher -- and so the
+        # clock epoch every sample carries -- exists: a context declared with
+        # a placeholder epoch and corrected on the first pose would announce a
+        # clock discontinuity at startup and withdraw any goal set meanwhile.
+        self.context = None
+        # The reference-imagery plane: created in open_ipc, closed in close.
+        # An optional channel from the first byte -- a run that publishes no
+        # image is not a degraded run, and no consumer may notice.
+        self.imagery = None
+        # Announced localization discontinuities only. An ideal simulator has
+        # none of its own: a reset teleports the vehicle within one frame.
+        self.localization_epoch = 0
+        self._export_truth(Path(args.map))
+
         print(f"dsim: report directory → {self.report_root}", file=sys.stderr)
 
         self.health = SimulationHealth(self.dsim_report_dir)
@@ -960,6 +979,13 @@ class DroneSimulator:
             seed=int(getattr(self.args, "realism_seed", 0) or 0))
         self._fit_sensors()
         self._write_sensor_profile()
+        from dcmn.context import Context
+        self.context = Context(self.args.id)
+        self.context.start(self.report_root, provider_kind='ideal-simulation',
+                           clock_epoch=self.sensors.publisher.clock_epoch,
+                           localization_epoch=self.localization_epoch,
+                           local_ned_origin=(self.map.width/2, self.map.height/2, 0.))
+        self._publish_reference_image()
 
         self.command = pm.memcmd()
         if not self.command.open(self.names["command"], self.args.cmd_size, True, True):
@@ -998,6 +1024,46 @@ class DroneSimulator:
         self.module_bus.publish("module.hello", payload={
             "state": "ready", "capabilities": ["vehicle", "video", "status"]})
         self.publish_status(force=True)
+
+    def _publish_reference_image(self) -> None:
+        """Render the world once and publish it as optional reference imagery.
+
+        A rendering of truth on a plane no algorithm reads (DV-MAPPING §7):
+        it exists so an operator's display and a report can show what the
+        world looked like without any consumer opening the world file, and
+        it is published *after* the context plane exists because its metadata
+        carries this session's frame and epochs -- the information a display
+        uses to refuse the image the moment it stops describing the frame
+        the vehicle is in. Publishing is a best effort wrapped in its own
+        try: imagery is decoration, and a simulator that could not draw its
+        map is not a simulator that cannot fly.
+        """
+        if getattr(self.args, "no_imagery", False):
+            return
+        try:
+            from dcmn.imagery import SIMULATION_TRUTH, ImagePublisher
+            from dcmn.mapview import map_png_affine, render_map_png
+            scale = 4
+            image = render_map_png(self.map, grid=True, scale=scale)
+            buffer = io.BytesIO()
+            image.save(buffer, "PNG")
+            publisher = ImagePublisher(self.args.id, producer="dsim")
+            publisher.publish(
+                "world", buffer.getvalue(), map_png_affine(scale),
+                source_category=SIMULATION_TRUTH,
+                frame_id=self.context.value.get("frame_id", "local"),
+                localization_epoch=self.localization_epoch,
+                clock_domain_id=self.args.id,
+                clock_epoch=self.sensors.publisher.clock_epoch,
+                capture_s=0.0,
+                registration=dict(method="world-file-render", scale=scale))
+            self.imagery = publisher
+            if self.args.verbose:
+                print(f"dsim: reference image published "
+                      f"({image.size[0]}x{image.size[1]} px)", file=sys.stderr)
+        except Exception as exc:
+            self.imagery = None
+            print(f"dsim: reference image not published: {exc}", file=sys.stderr)
 
     #: The speeds the monitor offers. ``None`` is real time, which is not the
     #: same as 1.0: real time also measures its timestep instead of fixing it.
@@ -1141,6 +1207,11 @@ class DroneSimulator:
         if getattr(self, "module_bus", None) is not None:
             self.module_bus.publish("module.goodbye", payload={"state": "stopped"})
             self.module_bus.close()
+        if getattr(self, 'context', None) is not None: self.context.close()
+        if getattr(self, 'imagery', None) is not None:
+            self.imagery.close(); self.imagery = None
+        if getattr(self, '_truth_log', None) is not None:
+            self._truth_log.close(); self._truth_log = None
         if self.sensors is not None:
             self.sensors.close()
         for handle in (self.status, self.command):
@@ -1803,14 +1874,22 @@ class DroneSimulator:
                                      -_MAX_POSITION_TRIM_MPS, _MAX_POSITION_TRIM_MPS)
             st.target_trim_y = clamp(st.target_trim_y + dy * _POSITION_TRIM_GAIN * dt,
                                      -_MAX_POSITION_TRIM_MPS, _MAX_POSITION_TRIM_MPS)
-        vx = clamp(dx + st.target_trim_x,
-                   -st.target_max_speed_mps, st.target_max_speed_mps)
-        vy = clamp(dy + st.target_trim_y,
-                   -st.target_max_speed_mps, st.target_max_speed_mps)
+        # The cruise limit is on the vector the remaining error asks for, not
+        # on each axis: clamping x and y separately steers a diagonal approach
+        # toward the 45-degree diagonal (both axes saturate) instead of toward
+        # the target. The trim term is added after that limit, not folded into
+        # it: trim is the airspeed the vehicle must spend to cancel a steady
+        # wind, and diluting it under the cruise cap leaves every crosswind
+        # leg drifting downwind without bound while the along-track error
+        # keeps the cap busy. In still air trim is zero and this is a plain
+        # capped approach along the direct line.
+        vx, vy = dx, dy
         mag = math.hypot(vx, vy)
         if mag > st.target_max_speed_mps:
             vx *= st.target_max_speed_mps / mag
             vy *= st.target_max_speed_mps / mag
+        vx += st.target_trim_x
+        vy += st.target_trim_y
         yaw_rad = math.radians(st.yaw_deg)
         fwd_x, fwd_y = -math.cos(yaw_rad), math.sin(yaw_rad)
         right_x, right_y = -math.sin(yaw_rad), -math.cos(yaw_rad)
@@ -1867,12 +1946,62 @@ class DroneSimulator:
                 return True
         return False
 
+    def _export_truth(self, world_path: Path) -> None:
+        """Evaluator-only truth, filed under this module's own report directory.
+
+        The world artifact and the true trajectory are for a later offline
+        evaluator. No operational module reads anything under ``dsim/truth``:
+        dalg and dnav see only sensor samples, the labelled ideal pose and the
+        session context.
+        """
+        truth = self.dsim_report_dir / "truth"
+        truth.mkdir(parents=True, exist_ok=True)
+        self._truth_log = (truth / "trajectory.jsonl").open("a", encoding="utf-8")
+        self._truth_flushed = -1e9
+        if world_path.is_file():
+            raw = world_path.read_bytes()
+            (truth / "world.txt").write_bytes(raw)
+            (truth / "world.json").write_text(json.dumps(dict(
+                schema="dvision2.truth-world.v1", source=str(world_path),
+                sha256=hashlib.sha256(raw).hexdigest(), frame="local",
+                note="evaluator-only; operational modules must not read this"), indent=2) + "\n")
+
+    def publish_pose(self) -> None:
+        """Publish the ideal pose estimate through the neutral session registry.
+
+        Labelled ``ideal``: numerically the true state, exactly as the sensor
+        samples' capture poses are. Telemetry noise and delay on the status
+        plane are a link model for flight clients and are not applied here.
+        """
+        context = getattr(self, "context", None)
+        if context is None or self.sensors is None:
+            return
+        st = self.state
+        body = dict(x_m=st.x, y_m=st.y, z_m=st.z,
+                    heading_deg=sim_yaw_to_compass_heading(st.yaw_deg),
+                    roll_deg=st.roll_deg, pitch_deg=st.pitch_deg)
+        publisher = self.sensors.publisher
+        publisher.localization_epoch = self.localization_epoch
+        context.publish_pose(body, self.sim_time_s,
+                             localization_epoch=self.localization_epoch,
+                             clock_epoch=publisher.clock_epoch)
+        log = getattr(self, "_truth_log", None)
+        if log is not None:
+            log.write(json.dumps(dict(time_s=round(self.sim_time_s, 6), pose=body,
+                                      collided=bool(st.crashed),
+                                      sensor_reset_epoch=self.sensors.reset_epoch)) + "\n")
+            wall = time.monotonic()
+            if wall - self._truth_flushed >= 1.0:
+                log.flush(); self._truth_flushed = wall
+
     def publish_status(self, *, force: bool = False) -> None:
         if self.status is None:
             return
         values = self.published_fields(force=force)
         if values is not None:
             self.status.setAll(values)
+        self.publish_pose()
+
         if (getattr(self, "module_bus", None) is not None
                 and self.clock() - self._last_module_heartbeat >= 1.0):
             self.module_bus.publish("module.heartbeat", payload={
@@ -2611,6 +2740,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="write run artifacts to this exact directory")
     parser.add_argument("--no-ui",    action="store_true",
                         help="disable the top-down simulator UI")
+    parser.add_argument("--no-imagery", action="store_true",
+                        help="do not publish the reference-imagery plane; "
+                             "the channel is optional and nothing depends on it")
     parser.add_argument("--verbose",  action="store_true")
     args = parser.parse_args(argv)
     validate_id(args.id)

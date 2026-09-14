@@ -37,7 +37,7 @@ pytestmark = [
 
 ROOT = Path(__file__).resolve().parents[1]
 MAP = ROOT / "assets/maps/maze_001.txt"
-TOUR = ROOT / "assets/tours/maze_001.default.v1.json"
+TOUR = ROOT / "tests/assets/tours/maze_001.default.v1.json"
 
 
 def _await_simulator(instance_id: str, timeout: float = 40.0) -> None:

@@ -111,6 +111,7 @@ Concrete, current, and the reference for anything new.
 | `dalg` | frame capture interval (`capture_fps`), coordinator-silence watchdog, scheduled start instant |
 | `daic` | planner state timers (arming, target loss, search legs), the optical-flow frame interval, and the SLAM frame timestamp |
 | `dctl` | measurement-run scheduling, bus event timestamps |
+| `dway` dynamic | target stream, HOLD dwell/timeout, route validity deadline, evidence and route ages, report metrics |
 
 **Wall time:**
 
@@ -118,6 +119,7 @@ Concrete, current, and the reference for anything new.
 |---|---|
 | all | `module.hello` / `module.heartbeat` / `module.sensor_health` cadence and `PipelineView` expiry |
 | `dway` | command-acknowledgement deadline (stretched for a slow-motion vehicle), vehicle-state staleness, the `--timeout` abort |
+| `dway` dynamic | vehicle-state staleness (`max_state_age_s`), route/pose stream stall (1 s), control-loop overrun (braking when a step gap exceeds max(0.5 s, 3 periods)), shutdown HOLD wait |
 | `dalg` | presence heartbeat, coordinator-silence wall backstop |
 | `daic`, `dctl` | status staleness ("is the simulator still publishing?") |
 | all UIs | repaint pacing -- 30 Hz video, 10 Hz maps, 4 Hz text, from `dcmn.pacing` |

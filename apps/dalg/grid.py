@@ -87,3 +87,31 @@ class LogOddsGrid:
     def result(self) -> OccupancyGrid:
         probabilities = 1.0 / (1.0 + np.exp(-self.log_odds))
         return OccupancyGrid(probabilities, self.observed.copy(), self.cell_m)
+
+
+class ObservedGrid(LogOddsGrid):
+    """Log odds with the capture time of each actual cell update.
+
+    ``timestamp_s`` is the capture time of the observation being written, set
+    by whoever is feeding the grid -- per frame for an algorithm that fuses as
+    it observes, per fused frame for one that fuses later. Every write stamps:
+    a cell marked observed with no time on it is one the evidence format
+    forbids, and the consumer rejects the whole record it arrives in.
+    """
+    def __init__(self, geometry):
+        super().__init__(*geometry.extent_m, geometry.cell_m)
+        self.observed_ms = np.zeros(self.observed.shape, np.uint32)
+        self.timestamp_s = 0.0
+
+    def _stamp(self, xs, ys):
+        from dcmn.maps import stamp_ms
+        xs, ys = self._inside(xs, ys)
+        self.observed_ms[ys, xs] = stamp_ms(self.timestamp_s)
+
+    def update(self, xs, ys, delta):
+        super().update(xs, ys, delta)
+        self._stamp(xs, ys)
+
+    def accumulate(self, xs, ys, delta):
+        super().accumulate(xs, ys, delta)
+        self._stamp(xs, ys)

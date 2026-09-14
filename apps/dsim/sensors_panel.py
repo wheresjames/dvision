@@ -18,7 +18,7 @@ from tkinter import filedialog, ttk
 
 from dcmn import theme
 from dsim.add_menu import AddMenu
-from dsim.scroll import Scrollable
+from dcmn.scroll import Scrollable
 from dsim.profiles import (ARRAY_TYPES, CHOICE_FIELDS, INTEGER_FIELDS,
                            MOUNT_TYPES, PTZ_AXES, POSE_KEYS, SENSOR_TYPES,
                            DroneProfile, model_fields, new_component,

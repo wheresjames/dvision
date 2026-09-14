@@ -166,14 +166,15 @@ def test_stronger_wind_takes_longer_to_settle_and_says_so_when_it_cannot(
         monkeypatch, tmp_path) -> None:
     """Trim settles, but not instantly, and the leg timeout is what notices.
 
-    At 0.8 m/s the committed tour's default leg timeout expires before the
-    vehicle has trimmed the wind out. That is a stated failure with a reason,
-    not a flight that quietly continues -- and a tour that expects to be flown
-    in wind widens its own ``leg_timeout_s``, which the follower never does
-    for it.
+    Flown against a headwind the vehicle's ground speed is its cruise minus
+    the wind, so the committed tour's default leg timeout -- three times the
+    still-air leg time -- expires before the first waypoint is reached. That
+    is a stated failure with a reason, not a flight that quietly continues --
+    and a tour that expects to be flown in wind widens its own
+    ``leg_timeout_s``, which the follower never does for it.
     """
     impatient = Rig(monkeypatch, tmp_path, finish_action="hold",
-                    realism={"wind_mps": 0.8, "wind_dir_deg": 270.0})
+                    realism={"wind_mps": 0.8, "wind_dir_deg": 90.0})
     assert impatient.fly(limit_s=120.0) is MissionState.FAILED
     assert "leg timeout" in impatient.mission.reason
     assert impatient.sim.state.mode == "HOLD"
@@ -184,7 +185,7 @@ def test_stronger_wind_takes_longer_to_settle_and_says_so_when_it_cannot(
     patient_tour.write_text(json.dumps(payload))
     patient = Rig(monkeypatch, tmp_path, tour_path=patient_tour,
                   finish_action="hold",
-                  realism={"wind_mps": 0.8, "wind_dir_deg": 270.0})
+                  realism={"wind_mps": 0.8, "wind_dir_deg": 90.0})
     assert patient.fly(limit_s=400.0) is MissionState.COMPLETE, patient.mission.reason
     last = patient.tour.waypoints[-1]
     assert patient.sim.state.x == pytest.approx(last.x, abs=0.05)

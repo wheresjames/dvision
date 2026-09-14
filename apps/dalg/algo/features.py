@@ -2,11 +2,19 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import math
+from collections import deque
 import cv2
 import numpy as np
 from dalg.grid import LogOddsGrid
 from dalg.model import Result
 from dalg.algo.spatial import fuse_endpoint, triangulate_xy
+
+
+#: How many recent keyframes a new one is matched against. Older keyframes are
+#: never looked at again, so they are not kept: over a long run -- and the
+#: evidence copy runs for as long as dalg does -- keeping them was unbounded
+#: memory spent on nothing.
+MATCH_WINDOW = 8
 
 
 @dataclass(frozen=True)
@@ -27,7 +35,11 @@ class FeatureTriangulationAlgorithm:
         self.size, self.intrinsics = (width_m, height_m), intrinsics
         self.config = FeatureConfig(**(settings or {})); self.start()
     def start(self):
-        self.grid = LogOddsGrid(*self.size); self.frames = []; self.matches = self.points = 0
+        # Only the newest keyframes are ever matched against, so only they are
+        # kept; the count survives separately because it is what the run
+        # reports, and a capped list would quietly cap the reported number too.
+        self.grid = LogOddsGrid(*self.size); self.frames = deque(maxlen=MATCH_WINDOW)
+        self.keyframes = self.matches = self.points = 0
         self.orb = cv2.ORB_create(nfeatures=self.config.max_features)
     @staticmethod
     def _delta(a, b): return (a-b+180)%360-180
@@ -38,7 +50,7 @@ class FeatureTriangulationAlgorithm:
             if math.hypot(frame.camera_pose.x_m-old.x_m, frame.camera_pose.y_m-old.y_m) < self.config.keyframe_distance_m: return
         keypoints, descriptors = self.orb.detectAndCompute(gray, None)
         if descriptors is None: return
-        for old_points, old_descriptors, old_pose in reversed(self.frames[-8:]):
+        for old_points, old_descriptors, old_pose in reversed(self.frames):
             baseline = math.hypot(frame.camera_pose.x_m-old_pose.x_m, frame.camera_pose.y_m-old_pose.y_m)
             if not self.config.min_baseline_m <= baseline <= self.config.max_baseline_m: continue
             if abs(self._delta(frame.camera_pose.heading_deg, old_pose.heading_deg)) > self.config.max_heading_delta_deg: continue
@@ -60,6 +72,7 @@ class FeatureTriangulationAlgorithm:
                     fuse_endpoint(self.grid, frame.camera_pose, point); self.points += 1
             break
         self.frames.append((keypoints, descriptors, frame.camera_pose))
-    def _result(self): return Result(self.grid.result(), {"keyframes": len(self.frames), "matches": self.matches, "triangulated_points": self.points})
+        self.keyframes += 1
+    def _result(self): return Result(self.grid.result(), {"keyframes": self.keyframes, "matches": self.matches, "triangulated_points": self.points})
     def preview(self): return self._result()
     def finish(self): return self._result()

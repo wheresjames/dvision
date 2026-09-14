@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Compare DALG summaries offline; deliberately no discovery or database."""
+"""Compare historical, scored DALG summaries offline; no discovery or database.
+
+dalg no longer scores anything (DV-MAPPING): current summaries are truth-free
+and their numbers live in the dalg archive for a later offline evaluator. This
+tool still reads the historical schema-1 summaries that carried scores.
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +18,9 @@ def rows(paths):
     result = []
     for path in paths:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
+        if "scores" not in value:
+            raise SystemExit(f"{path}: a truth-free dalg summary carries no scores; "
+                             "evaluate its archive offline instead")
         algorithm = value["algorithm"]
         score = value["scores"][algorithm]
         result.append((value.get("profile", algorithm), algorithm, score))

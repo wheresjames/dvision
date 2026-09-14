@@ -20,7 +20,7 @@ from dcmn import theme
 from dsim.realism import (
     GEOFENCE_ACTIONS, GPS_MODES, REALISM_DEFAULTS, SENSOR_NOISE_PROFILES,
 )
-from dsim.scroll import Scrollable
+from dcmn.scroll import Scrollable
 
 #: One row of the form: setting name, label, and how it is edited.
 #: ``choices`` makes a combobox, ``None`` an entry.

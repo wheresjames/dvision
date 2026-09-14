@@ -1,0 +1,10 @@
+{
+  "name": "optical-flow-baseline",
+  "sources": [
+    {
+      "sensor": "primary_camera",
+      "algorithm": "optical_flow_triangulation",
+      "settings": {}
+    }
+  ]
+}

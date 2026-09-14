@@ -1,0 +1,55 @@
+{
+  "schema": "dvision2.execution-profile.v1",
+  "calibrated": true,
+  "slab_assumption": "vertical-extrusion",
+  "note": "dsim position-target vehicle, ideal pose, no wind, <=50 ms telemetry latency. Stops by HOLD before each corner/endpoint; never by converging on a target.",
+  "speed_mps": 0.5,
+  "body_radius_m": 0.15,
+  "half_height_m": 0.15,
+  "tracking_m": 0.25,
+  "stopping_m": 0.2,
+  "stopping_s": 0.5,
+  "max_age_s": 3.0,
+  "altitude_m": 1.5,
+  "join_m": 0.3,
+  "free_threshold": 0.35,
+  "occupied_threshold": 0.5,
+  "required_sources": [],
+  "stream_hz": 10.0,
+  "reaction_s": 0.2,
+  "hold_speed_mps": 0.05,
+  "hold_dwell_s": 0.5,
+  "hold_timeout_s": 5.0,
+  "arrival_m": 0.3,
+  "max_state_age_s": 0.5,
+  "max_wind_mps": 0.0,
+  "max_telemetry_latency_ms": 50.0,
+  "calibration": {
+    "method": "dtest/flight_calibration.py measure_all (re-measured by tests/test_flight_profile.py)",
+    "vehicle": "dsim DroneSimulator via DsimLink loopback, fixed 0.05 s step; HOLD zeroes commanded and actual velocity immediately",
+    "date": "2026-09-14",
+    "conditions": {
+      "speeds_mps": [0.25, 0.5],
+      "latencies_ms": [0.0, 50.0],
+      "winds_mps": [0.0],
+      "seeds": [1234, 4321],
+      "stream_hz": 10.0,
+      "hold_speed_mps": 0.05,
+      "hold_dwell_s": 0.5
+    },
+    "envelope": {
+      "stop_distance_m": 0.0248,
+      "stop_time_s": 0.055,
+      "lateral_m": 0.0,
+      "cruise_cross_track_m": 0.0,
+      "hold_drift_5s_m": 0.0,
+      "overshoot_m": 0.6204,
+      "settle_time_s": 23.19
+    },
+    "margins": {
+      "stop_m": 0.1,
+      "tracking_m": 0.25
+    },
+    "limits": "No wind was measured, so none is supported: dsim HOLD does not hold position against wind. Position-target overshoot (0.62 m) exceeds stopping_m, which is why the executor stops by HOLD before targets. Real vehicles decelerate; these numbers do not transfer."
+  }
+}

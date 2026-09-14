@@ -139,3 +139,17 @@ rollover during opening, missing recent samples, and clock discontinuities.
 Control recovery tests must cover stale leases, expired/repeated commands, and
 a crash between vehicle execution and acknowledgment. Verify that rejoining
 does not itself cancel a mission, replay motion, or claim recovered authority.
+
+## Dynamic route execution
+
+The dynamic executor (`apps/dway/executor.py`) applies these rules without any
+persisted mission state. A planner, provider or executor restart, or a frame/clock
+epoch change, discards permission: a moving vehicle is stopped by HOLD and the next
+flight needs an explicit Start. Neither a restarted dway nor a reopened window resumes
+an old flight; the new process begins in WAITING without a lease. Lease loss fails the
+mission without reacquisition, and Start never takes a lease another client holds. A
+rejected HOLD or link loss is a failure, not a confirmed hover; targets cease and the
+vehicle's own failsafe applies. Process death relies on the vehicle's setpoint and
+lease watchdogs. Shutdown requests HOLD, waits a bounded time for measured low speed,
+records whether it was confirmed and releases control. See
+[dynamic navigation](navigation.md#execution-lifecycle).

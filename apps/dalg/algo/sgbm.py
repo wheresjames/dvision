@@ -7,7 +7,15 @@ import numpy as np
 
 from dalg.grid import LogOddsGrid
 from dalg.model import Result
-from dalg.algo.spatial import obstacle_band, project_pixels, project_ranges
+from dalg.algo.spatial import (clear_rays, free_space_samples, obstacle_band,
+                                project_pixels, project_ranges)
+
+
+#: Recent frames the evidence copy keeps as candidate partners. At a capture
+#: rate of a few frames a second, a partner as far as max_baseline_m away is
+#: well inside this many frames; the scored copy keeps every frame, because
+#: finish() rebuilds from all of them.
+EVIDENCE_WINDOW = 64
 
 
 @dataclass(frozen=True)
@@ -33,7 +41,12 @@ class SGBMAlgorithm:
     name = "sgbm"
     sensors = ("rgb",)
 
-    def __init__(self, width_m, height_m, intrinsics, settings=None, **_):
+    def __init__(self, width_m, height_m, intrinsics, settings=None, *, evidence=False, **_):
+        # The evidence copy pairs each frame causally in a bounded window and
+        # marks free space; finish() below rebuilds from the whole capture,
+        # future partners included, which a live source cannot. Everything
+        # that differs is behind this flag, so the scored copy is unchanged.
+        self.evidence = bool(evidence)
         self.grid_size = (width_m, height_m)
         self.intrinsics = intrinsics
         self.config = SGBMConfig(**(settings or {}))
@@ -47,6 +60,8 @@ class SGBMAlgorithm:
     def start(self):
         self.frames = []
         self.range_frames = []
+        self.times = []
+        self._arrived = False
         self._reset_fusion()
 
     def _reset_fusion(self):
@@ -61,9 +76,14 @@ class SGBMAlgorithm:
     def observe(self, frame):
         gray = cv2.cvtColor(np.asarray(frame.rgb, np.uint8), cv2.COLOR_RGB2GRAY)
         self.frames.append((gray, frame.camera_pose))
+        self.times.append(frame.timestamp_s)
         if frame.range_m is not None:
             self.range_frames.append((np.asarray(frame.range_m, np.float64),
                                       frame.camera_pose))
+        if self.evidence:
+            while len(self.frames) > EVIDENCE_WINDOW:
+                self.frames.pop(0); self.times.pop(0)
+            self._arrived = True
 
     def _matcher_for(self):
         """One matcher, reused. Rebuilding it per pair dominated the run."""
@@ -76,7 +96,33 @@ class SGBMAlgorithm:
                 speckleWindowSize=50, speckleRange=2, disp12MaxDiff=1)
         return self._matcher
 
-    def _pair(self, i, poses):
+    def fuse_available(self):
+        """Fuse the newest frame once, paired only with frames already captured.
+
+        The widest valid baseline wins, whichever side the newest frame is on:
+        as the reference with an earlier frame to its right, or as the
+        right-hand partner of an earlier reference. Stamped with the newest
+        frame's capture time, because that is when the pair first existed.
+        """
+        if not self._arrived: return
+        self._arrived = False
+        newest = len(self.frames) - 1
+        if newest < 1: return
+        poses = np.array([(p.x_m, p.y_m, p.heading_deg) for _, p in self.frames])
+        indices = np.arange(len(self.frames))
+        best = None
+        found = self._pair(newest, poses, among=indices < newest)
+        if found is not None: best = (found[0], newest, found[1])
+        for index in range(newest):
+            found = self._pair(index, poses, among=indices == newest)
+            if found is not None and (best is None or found[0] > best[0]):
+                best = (found[0], index, found[1])
+        if best is None: return
+        if hasattr(self.grid, "timestamp_s"): self.grid.timestamp_s = self.times[newest]
+        self._fuse_stereo(best[1], best[2], best[0])
+        self.pairs += 1
+
+    def _pair(self, i, poses, among=None):
         """The widest baseline to the right of frame ``i``, or None.
 
         OpenCV expects the second image to be the right-hand camera, so only
@@ -98,6 +144,9 @@ class SGBMAlgorithm:
                            <= self.config.max_forward_fraction*baseline)
                         & (delta @ right > 0))
         eligible[i] = False
+        # Which frames may partner this one. None is every frame -- the scored
+        # path's rule -- and the evidence path narrows it to the past.
+        if among is not None: eligible &= among
         if not eligible.any(): return None
         candidates = np.flatnonzero(eligible)
         best = candidates[np.argmax(baseline[candidates])]
@@ -119,6 +168,11 @@ class SGBMAlgorithm:
                              max_height_m=self.config.max_height_m,
                              min_range_m=self.config.min_range_m,
                              max_range_m=self.config.max_range_m)
+        if self.evidence:
+            seen = free_space_samples(z, x, y, pose, max_height_m=self.config.max_height_m,
+                                      min_range_m=self.config.min_range_m,
+                                      max_range_m=self.config.max_range_m)
+            clear_rays(self.grid, pose, x[seen], y[seen])
         if not keep.any(): return
         cells = self.grid.cells(x[keep], y[keep])
         self.grid.accumulate(*cells, self.config.occupied_log_odds)

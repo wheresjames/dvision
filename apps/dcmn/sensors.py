@@ -145,6 +145,9 @@ class SensorPublisher:
         self.session = session or uuid.uuid4().hex
         self.clock_epoch = uuid.uuid4().int & ((1 << 63) - 1)
         self.generation = 0; self.reset_epoch = 0
+        # Pose labelling is the provider's, kept apart from sensor resets: a
+        # sensor restart is not a localization correction (DV-MAPPING §4).
+        self.localization_epoch = 0; self.pose_valid = True; self.pose_kind = 'ideal'
         self.channels = _Channels(self.pm); self.sequences = {}
         self.profile = None; self.manifest = {}
         self.registry = self.pm.memkv()
@@ -262,6 +265,13 @@ class SensorPublisher:
 
     def write_compact(self, sensor_id, sequence, capture_id, sim_us, payload_type, payload,
                       *, status=STATUS_VALID):
+        if isinstance(payload, dict) and 'pose_world' in payload:
+            # Capture association: the pose this sample was taken at, labelled
+            # with the provider's frame and epochs. Its validity is the pose's,
+            # not the sample's -- a scan with no returns has a perfectly good pose.
+            from dcmn.context import pose_context
+            payload = dict(payload, pose_context=pose_context(self.instance, self.clock_epoch,
+                self.localization_epoch, sim_us/1e6, valid=self.pose_valid, kind=self.pose_kind))
         raw = self._record(sensor_id, sequence, capture_id, sim_us, payload_type, payload, status)
         if len(raw) > MAX_RECORD:
             raise ValueError(f'{sensor_id}: compact record exceeds {MAX_RECORD} bytes')

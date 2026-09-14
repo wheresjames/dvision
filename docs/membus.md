@@ -2,8 +2,15 @@
 
 DSIM creates and owns all named shared-memory areas in the current simulator
 workflow. Clients open those areas; they do not create private reply queues or
-publish their own video/status areas. The exception in *writing authority* is
-`.events`: DSIM creates the ring, but every module publishes its own events.
+publish their own video/status areas. There are two exceptions. In *writing
+authority*, `.events`: DSIM creates the ring, but every module publishes its own
+events. In *ownership*, the evidence plane (`.maps` and its per-source rings) and
+the optional imagery plane (`.imagery` and its per-image rings): their producer
+creates and owns each, because a producer owns its plane and DSIM has
+nothing to say about what a module believes. The imagery plane is a third
+exception in *consumption*: nothing operational reads it at all -- it is
+display decoration for UI hosts and report rendering (see
+[DV-MAPPING.md](../DV-MAPPING.md) §7 and §9).
 
 This guide describes the implemented transport, including names, contents,
 readers, writers, buffering, and recovery. [modcom.md](modcom.md) provides the
@@ -22,23 +29,63 @@ repository file used as a message transport.
 | Name | pymembus type | Created/written by | Read by | Contents |
 |---|---|---|---|---|
 | `/dvision2.I.control` | `memcmd` | DSIM creates; DCTL, DAIC, DWAY and command test clients write | DSIM only | Vehicle commands and control-lease requests |
-| `/dvision2.I.status` | `memkv` | DSIM | DCTL, DAIC, DALG, DWAY and test clients | Retained vehicle telemetry, capabilities, command outcomes, simulator diagnostics |
+| `/dvision2.I.status` | `memkv` | DSIM | DCTL, DAIC, DWAY and test clients (not DALG or DNAV) | Retained vehicle telemetry, capabilities, command outcomes, simulator diagnostics |
+| `/dvision2.I.context` | `memkv`, one JSON snapshot | The session provider (DSIM, or `dtest/provider.py`) creates and owns it; goal authorities and mapping-reset requesters write their fields under a host `flock` | DALG, DNAV, `dcmn.context show` | Session id and report root, frame and localization/clock epochs, data clock, labelled ideal pose, goal and its authority, mapping-reset request, recent transition history |
 | `/dvision2.I.events` | `memmsg`, text | DSIM creates; all participating modules write | All participating modules | Module presence, health, run coordination and instance shutdown |
 | `/dvision2.I.sensors` | `memkv` | DSIM's `SensorPublisher` | Camera/numeric consumers and inspection tools | Atomic sensor manifest, profile digest and transport identities |
 | `/dvision2.I.sS.gG.sensor.samples` | `memmsg`, bytes | DSIM's `SensorPublisher` | Camera consumers and `SensorSamples` readers | Multiplexed compact measurements and camera/LiDAR capture metadata |
 | `/dvision2.I.sS.gG.sensor.ID.video` | `memvid`, RGB24 | DSIM, one per enabled RGB camera | Consumers selecting that camera | Image pixels, frame sequence and presentation timestamps |
 | `/dvision2.I.sS.gG.sensor.ID.array` | `memmsg`, bytes | DSIM, one per enabled LiDAR sensor | `SensorSamples` or a future LiDAR consumer | Packed ranges and confidence arrays |
+| `/dvision2.I.maps` | `memkv` | DALG's `MapPublisher` | DNAV and `dcmn.maps --dump` | Atomic evidence-grid manifest (schema v2): runtime geometry, the generation's frame, localization/clock/mapping epochs and geometry revision, cadence and staleness horizon |
+| `/dvision2.I.mS.gG.map.SRC` | `memmsg`, bytes | DALG, one per evidence source | DNAV and map-pane consumers | Complete occupancy-evidence grids, payload type 110 |
+| `/dvision2.I.imagery` | `memkv` | The imagery publisher (DSIM's, or `dtest/provider.py`'s, `ImagePublisher`) | `dcmn.imagery.ImageSession` readers: UI hosts and report rendering only, never DALG or DNAV | Atomic imagery manifest (schema `dvision2.imagery-manifest.v1`): provider session, generation, the size limits, and one entry per published image |
+| `/dvision2.I.iS.gG.image.ID` | `memmsg`, bytes | The imagery publisher, one ring per published image (at most 16) | `ImageSession` readers | Immutable reference-image revisions, payload type 120: a length-prefixed metadata JSON envelope plus the exact PNG bytes |
 
-There are **`5 + C + A` named areas** in a steady-state instance, where `C` is
-the number of enabled RGB cameras and `A` the number of enabled LiDAR sensors.
-Four names are stable; the compact ring and camera/array rings are qualified
-by session and generation. Old and new sensor areas coexist briefly during
-Apply. Disabled sensors and mount/rig/PTZ nodes allocate no individual area.
+Routes travel on `.events` rather than on a plane of their own. A route is a
+few kilobytes published about once a second, its consumers are the same modules
+already reading that ring, and `route.planned` carries the map revision and
+policy digest it was planned against so a follower can judge its freshness
+without a second discovery mechanism. It is republished on every re-plan even
+when the plan is unchanged, which is what lets a consumer tell "still endorsed
+against current evidence" from "the planner stopped".
 
-For the default profile, this is **6 areas**: the four stable names, one shared
+The context registry is durable latest state: a module that starts late reads
+the current goal, session and epochs there rather than relying on having heard
+an event. Its schema is `dvision2.context.v1`; a reader refuses any other. The
+frame is `local` (x east, y south, z up, metres; compass heading clockwise from
+north; altitude datum the provider's ground plane). A pose carries frame,
+localization epoch, clock domain and epoch, capture time, sequence, provider,
+validity and `uncertainty_state: unknown`; its validity is the pose's, never a
+sensor sample's status. Capture-associated sensor records carry the same fields
+in a `pose_context` payload entry. Each map record's header `reset_epoch` and
+`clock_epoch` carry the generation's mapping and clock epochs, and a consumer
+rejects a record that disagrees with its manifest.
+
+There are **`6 + C + A` named areas** in a steady-state instance with no
+evidence producer (the sixth is the context registry), where `C` is the number of enabled RGB cameras and `A` the
+number of enabled LiDAR sensors; a running producer adds `1 + M` more, one
+registry and one ring per published source. Six names are stable; the compact
+ring, the camera/array rings and the map rings are qualified by session and
+generation. Old and new sensor areas coexist briefly during Apply. Disabled
+sensors and mount/rig/PTZ nodes allocate no individual area.
+
+The maps plane uses `m` where the sensor plane uses `s` in its session prefix,
+so the two cannot collide even when a sensor and an evidence source share an
+id. Its rings **do not inherit the 8192-byte compact-record cap**: each declares
+its own `record_bytes` from the profile's declared extent, which for a 200x200
+grid is about 200 KB.
+
+The imagery plane uses `i` in its session prefix, so its rings cannot collide
+with either. A dsim that publishes reference imagery adds `1 + R` more areas --
+one registry and one ring per image, at most 16 images -- and `--no-imagery`
+adds none. Each image ring is sized from that image's first revision and never
+grows: a producer whose image outgrew its own staging is told to withdraw and
+publish again rather than the plane inventing a second, quieter bound.
+
+For the default profile, this is **7 areas**: the five stable names, one shared
 sample ring and the `front` video ring. Its GNSS, IMU, barometer, compass and
 temperature sensors all use that one sample ring. The committed
-`stereo-nav-and-proximity` profile has **9 areas**: four stable names, one compact
+`stereo-nav-and-proximity` profile has **10 areas**: five stable names, one compact
 ring, two video rings and two LiDAR rings. Its three rangefinders add records,
 not areas. Profiles may change these counts.
 
@@ -72,6 +119,11 @@ flowchart LR
     ARRAYS --> NUMERIC
     DSIM <--> EVENTS[".events — broadcast coordination"]
     CLIENTS <--> EVENTS
+    DALG[DALG] --> MAPREG[".maps — evidence discovery"]
+    DALG --> MAPS["per-source .map.SRC — evidence grids"]
+    MAPREG --> DNAV[DNAV]
+    MAPS --> DNAV
+    DNAV --> EVENTS
 ```
 
 | Module | Reads | Writes | Role on `.events` |
@@ -79,15 +131,20 @@ flowchart LR
 | DSIM | Control queue; module events | All status, discovery, pixels, measurements; its own events | `simulator` |
 | DCTL | Status; registry; primary RGB and its compact metadata; events | Manual commands, lease maintenance, manual-measurement coordination, intake health | `controller` |
 | DAIC, UI and headless | Status; registry; primary RGB and its compact metadata; events | Flight commands, lease maintenance, presence and intake health | `controller` |
-| DALG | Status; registry; primary RGB and its compact metadata; events | Algorithm readiness, run outcomes, presence and intake health; **no vehicle commands** | `algorithm` |
+| DALG | Status; registry; primary RGB and its compact metadata; events | Algorithm readiness, run outcomes, presence and intake health; **the evidence plane it owns**; **no vehicle commands** | `algorithm` |
+| DNAV | Status; the evidence plane; events | Routes, planner presence and health; **no vehicle commands and no control lease** | `planner` |
 | DWAY | Status and events; **no camera or numeric sensor rings** | Navigation commands, lease maintenance, tour coordination and presence | `navigator` |
 | Test harnesses | Channels needed by each test | Commands and/or coordination events when exercising those contracts | Depends on the test |
 
 DAIC perception, SLAM, planning and avoidance run within DAIC; they do not
-exchange additional named pymembus areas. DALG's exact-range oracle is a local
-algorithm call into the shared geometry code, not a subscription to published
-LiDAR. Current production RGB consumers filter the compact ring for their
-camera metadata; seeing that ring open does not mean they use its IMU or GPS.
+exchange additional named pymembus areas. DALG holds no exact-range oracle:
+simulated range arrives through the same sensor interface as real range, and
+the truth rasters and oracle controls live in the evaluation tooling
+(`dtest/evaluation.py`), never in a running module. The imagery plane is the one
+area DALG and DNAV never open -- a reference image reaches them only as pixels
+in a window or a report, never as an input. Current production RGB consumers
+filter the compact ring for their camera metadata; seeing that ring open does
+not mean they use its IMU or GPS.
 
 ## Buffering and capacity
 
@@ -403,6 +460,60 @@ use `unpack_array()` or `SensorSamples.drain_array()` to interpret it.
 The manifest also records material-independent LiDAR, no multiple returns and
 no scan motion distortion. No point-cloud buffer is created in this version.
 
+## Optional reference imagery: `.imagery`
+
+An optional plane for decoration a human looks at: a surveyed plan, a floor
+plan, a simulator's rendering of its own world. DSIM publishes one such image
+of the loaded map (`--no-imagery` skips the plane entirely), `dtest/provider.py`
+publishes its fixture scene, and a hardware provider would publish its own
+surveyed imagery the same way -- the publisher is the extension point, and
+nothing else in the stack has to change. Consumers are UI hosts and report
+rendering, and nobody else: DALG and DNAV never open this plane, an image is
+never converted into occupancy or cost, and its presence or absence is not a
+readiness input to anything. Satellite projection and tile streaming remain
+deferred; a published image is one whole PNG with one placement.
+
+A producer owns an `ImagePublisher`, which commits an atomic manifest to
+`.imagery` and writes each image's revisions to that image's ring, payload
+type 120: a 4-byte little-endian length, the metadata JSON, then the exact PNG
+bytes. A revision is immutable once published; republishing the same image and
+placement is a heartbeat, and a changed one advances the revision. Images
+attach and withdraw within a producer's lifetime, and a new producer session
+or generation is a wholesale rediscovery -- a reader abandons the old images
+rather than trusting a departed producer's placement. Discovery is late by
+design: a consumer that attached before the first publish finds it on its next
+probe.
+
+The metadata is derived by the publisher, never asserted by the caller, and a
+consumer re-verifies every record: schema, encoding, dimensions, checksum
+(sha256 of the PNG bytes), a non-singular full 2D affine, and the frame
+identity. Placement is `[a,b,c,d,e,f]` with `x = a·col + b·row + e`,
+`y = c·col + d·row + f` -- pixel (0,0) is the top-left pixel *centre*,
+columns run right, rows run down, and a reflection (negative determinant) is
+legitimate and is never silently un-mirrored. A cell whose centre falls
+outside the image's footprint -- the affine applied to the rectangle
+`(-0.5, -0.5)` to `(width-0.5, height-0.5)` -- keeps its ground colour: an
+image is clipped, never stretched. An image is retained only while its frame
+id, localization epoch and clock epoch still match the session context; after
+a discontinuity there is no background, and an unchecked context matches
+nothing.
+
+The budgets are part of the contract: at most 16 MiB encoded and 64 MiB
+decoded per image, at most 16 images per plane, and a consumer caches at most
+the current revision plus one staged predecessor of each image -- accounted
+separately from the mapping memory budget. A record that fails any check is
+rejected with a message and displaces nothing; an invalid replacement never
+evicts the revision it was trying to replace, and the only things that remove
+a good image are withdrawal, a producer restart, or the frame moving on.
+Reference images are archived with the report that displayed them, referenced
+by checksum (see [reports.md](reports.md)).
+
+Verification: [imagery contract](../tests/test_dcmn_imagery.py) -- the affine
+under translate/rotate/reflect/unequal scale, malformed and lying records,
+budget exhaustion, frame epochs, provider restarts, and the three-background
+numeric-identity run (no image, a correct one and a misleading one produce
+the same evidence and the same routes).
+
 ## Module coordination: `.events`
 
 Each `PymembusModuleBus` endpoint opens the same 256 KiB broadcast ring with its
@@ -420,7 +531,7 @@ broker nor the sole event writer. Messages are compact JSON with this envelope:
   "sim_time_s": 12.0,
   "type": "run.ready",
   "run_id": "shared-run-id",
-  "payload": {"profile": "sgbm-default", "algorithm": "sgbm"}
+  "payload": {"profile": "sgbm-baseline", "algorithm": "sgbm"}
 }
 ```
 
@@ -544,9 +655,10 @@ These have independent broadcast cursors. Close handles when finished.
 Never use `create=True`, `remove()`, or drain `.control` merely to inspect a run.
 
 DSIM writes `drone-profile.json`, `sensor-manifest.json`, `sensor-plan.json`,
-`summary.json` and health artifacts under its report directory. These are useful
-post-run evidence but are not live IPC. `sim.report_dir` lets other modules
-place their own artifacts in the same run tree. Profile/map/tour files and
+`summary.json`, health artifacts and evaluator-only `truth/` under its report
+directory. These are useful post-run evidence but are not live IPC. The
+context's `report_root` (and, for status-plane clients, `sim.report_dir`) lets
+other modules place their own artifacts in the same run tree. Profile/map/tour files and
 renderer's local buffers are likewise not additional pymembus channels.
 
 ## Dormant provider and absent channels
@@ -580,7 +692,19 @@ names based on absent historical interfaces.
 | Broadcast events and presence projection | [module_bus.py](../apps/dcmn/module_bus.py) | [module bus](../tests/test_module_bus.py) |
 | Intake health and aggregation | [health.py](../apps/dcmn/health.py), [DSIM health](../apps/dsim/health.py) | [sensor health](../tests/test_sensor_health.py) |
 | Tour/manual coordination and algorithm participation | [DWAY](../apps/dway/dway.py), [DCTL](../apps/dctl/dctl.py), [DALG](../apps/dalg/run.py) | [DWAY process](../tests/test_dway_process.py), [DALG process](../tests/test_dalg_process.py) |
+| Session context: provider ownership, pose, goal authority, resets | [context.py](../apps/dcmn/context.py) | [context](../tests/test_dcmn_context.py), [dalg runtime](../tests/test_dalg_runtime.py) |
+| Optional reference imagery: publisher, manifest, records, display session | [imagery.py](../apps/dcmn/imagery.py), [map_pane.py](../apps/dcmn/map_pane.py) | [imagery contract](../tests/test_dcmn_imagery.py) |
+| Reference-image archiving and standalone report rendering | [archive.py](../apps/dcmn/archive.py) | [imagery contract](../tests/test_dcmn_imagery.py), [archive](../tests/test_dcmn_archive.py) |
 
-This inventory describes the implementation as inspected on 2026-09-07. Wire
+This inventory describes the implementation as inspected on 2026-09-11. Wire
 changes should update this guide together with `STATUS_KEYS`, the registry/
 envelope constants, and the corresponding contract tests.
+
+## Navigation observation endpoints
+
+Dynamic routes use the single-writer `navigation.<planner-name>` (dnav) and
+`execution` (dway, in dry run or flight) retained JSON endpoints under `/dvision2.<id>`. Each uses one atomic 64 KiB snapshot;
+complete executable proposals are bounded to 256 points and never truncated.
+See [navigation protocol](navigation.md) for ownership, sessions, stop generations,
+examples, dry-run and flight semantics. These endpoints do not carry vehicle
+commands: dway flies through its own `.control` lease like any other client.

@@ -4,15 +4,10 @@ import math
 import time
 import numpy as np
 import pytest
-from PIL import Image
 from pathlib import Path
 
-import dalg.run as run_module
-from dalg.algo.controls import ExactRangeAlgorithm
 from dalg.grid import LogOddsGrid, OccupancyGrid
-from dalg.overlay import FALSE_NEGATIVE, FALSE_POSITIVE, TRUE_POSITIVE, verdict_raster
 from dalg.profiles import load_profile, profile_dir
-from dvision2_common import load_map
 from dalg.algo import ALGORITHMS
 from dalg.algo.plane_sweep import PlaneSweepAlgorithm
 from dalg.algo.features import FeatureTriangulationAlgorithm
@@ -22,56 +17,25 @@ from dalg.algo.optical_flow import OpticalFlowTriangulationAlgorithm
 from dalg.algo.spatial import triangulate_xy
 from dalg.model import Frame, Intrinsics, Pose
 from dcmn.module_bus import ModuleEvent, PipelineView
-from dalg.run import (DalgRun, algorithm_settings, copy_video_frame,
-                      matches_prepare)
-from dalg.visibility import observable_mask
-from dalg.score import score_occupancy
+from dalg.run import DalgRun, matches_prepare
+from dtest.evaluation import (FALSE_NEGATIVE, FALSE_POSITIVE, TRUE_POSITIVE,
+                              observable_mask, score_occupancy, verdict_raster)
 
 
-def test_default_profile_loads():
+def test_the_registry_holds_evidence_algorithms_and_no_controls():
+    """The oracle and constant controls are evaluation tooling, never sources."""
+    assert set(ALGORITHMS) == {"sgbm", "plane_sweep", "feature_triangulation",
+                               "optical_flow_triangulation", "ground_plane", "monocular_depth"}
+    assert "exact_range" not in ALGORITHMS and "constant" not in ALGORITHMS
+
+
+def test_readiness_selectors_match_profile_names_and_algorithms():
     root = Path(__file__).resolve().parents[1]
-    profile = load_profile("sgbm-default", root)
-    assert profile.algorithm == "sgbm"
-    assert profile.tour.exists()
-    assert "plane_sweep" in ALGORITHMS
-    assert {"feature_triangulation", "optical_flow_triangulation",
-            "ground_plane", "monocular_depth"} <= set(ALGORITHMS)
-
-
-def test_range_profile_preserves_configuration():
-    root = Path(__file__).resolve().parents[1]
-    profile = load_profile("sgbm-flash", root)
-    assert profile.sensors == ("rgb", "range")
-    assert profile.sensor_config["range"] == "lidar_flash_short"
-    assert matches_prepare(profile, ["algorithm:sgbm-flash"])
+    profile = load_profile("sgbm-baseline", root)
+    assert matches_prepare(profile, ["algorithm:sgbm-baseline"])
     assert matches_prepare(profile, ["algorithm:sgbm"])
     assert not matches_prepare(profile, ["algorithm:plane_sweep"])
     assert matches_prepare(profile, [])
-
-
-def test_manual_profile_has_no_tour_constraint():
-    root = Path(__file__).resolve().parents[1]
-    profile = load_profile("sgbm-manual", root)
-    assert profile.tour is None
-    assert matches_prepare(profile, ["algorithm:sgbm-manual"])
-
-
-def test_every_algorithm_has_a_maze020_profile():
-    root = Path(__file__).resolve().parents[1]
-    expected = {
-        "sgbm": "sgbm-maze020", "constant": "constant-maze020",
-        "exact_range": "exact-range-maze020",
-        "plane_sweep": "plane-sweep-maze020",
-        "feature_triangulation": "features-maze020",
-        "optical_flow_triangulation": "optical-flow-maze020",
-        "ground_plane": "ground-plane-maze020",
-        "monocular_depth": "monocular-depth-maze020",
-    }
-    assert set(expected) == set(ALGORITHMS)
-    for algorithm, profile_name in expected.items():
-        profile = load_profile(profile_name, root)
-        assert profile.algorithm == algorithm
-        assert profile.tour.name == "maze_020.default.v1.json"
 
 
 def test_pipeline_members_expire_and_goodbye_removes():
@@ -97,14 +61,6 @@ def test_scoring_and_verdict_colours():
     assert tuple(raster[0, 0]) == TRUE_POSITIVE
     assert tuple(raster[0, 1]) == FALSE_POSITIVE
     assert tuple(raster[1, 1]) == FALSE_NEGATIVE
-
-
-def test_video_frame_keeps_shared_memory_orientation():
-    frame = np.array([[[1, 2, 3]], [[4, 5, 6]]], dtype=np.uint8)
-    copied = copy_video_frame(frame)
-    assert copied.tolist() == frame.tolist()
-    copied[0, 0, 0] = 99
-    assert frame[0, 0, 0] == 1
 
 
 def test_plane_sweep_downsamples_and_keeps_spaced_keyframes():
@@ -156,32 +112,25 @@ def test_monocular_depth_requires_an_explicit_model_file():
                                 Intrinsics(64, 48, 45, 45, 32, 24))
 
 
-def test_every_profile_constructs_through_the_run_call_path():
-    """The constant profile shipped broken: run.py passes intrinsics
-    positionally, and ConstantAlgorithm did not accept a third argument. A
-    profile that only loads is not a profile that runs."""
+def test_every_camera_baseline_constructs_through_the_run_call_path():
+    """A profile that only loads is not a profile that runs."""
+    from dalg.profiles import camera_evidence_algorithms
     root = Path(__file__).resolve().parents[1]
     intrinsics = Intrinsics(640, 480, 554.3, 554.3, 320.0, 240.0)
-    truth = OccupancyGrid(np.full((8, 8), .05, np.float32), np.ones((8, 8), bool))
     for path in sorted(profile_dir(root).glob("*.json")):
-        profile = load_profile(path.stem, root)
-        settings = algorithm_settings(profile.algorithm, profile.settings)
-        if profile.algorithm == "exact_range":
-            ExactRangeAlgorithm(truth).finish()
-            continue
-        if profile.algorithm == "monocular_depth":
-            continue  # needs a downloaded ONNX model; covered separately
-        ALGORITHMS[profile.algorithm](40, 30, intrinsics, settings=settings)
+        source = load_profile(path.stem, root).sources[0]
+        if source.algorithm not in camera_evidence_algorithms(): continue
+        if source.algorithm == "monocular_depth":
+            continue  # needs the installed ONNX model; covered by preflight tests
+        ALGORITHMS[source.algorithm](40, 30, intrinsics, settings=source.settings, evidence=True)
 
 
-def test_sensor_settings_do_not_reach_the_algorithm_configuration():
-    root = Path(__file__).resolve().parents[1]
-    profile = load_profile("sgbm-tof", root)
-    assert profile.settings["range_stride"] == 8
-    settings = algorithm_settings(profile.algorithm, profile.settings)
-    assert "range_stride" not in settings
-    with pytest.raises(ValueError, match="unknown settings"):
-        algorithm_settings("sgbm", {"not_a_real_setting": 1})
+def test_settings_an_algorithm_does_not_declare_are_refused():
+    from dalg.profiles import Source, validate_sources
+    with pytest.raises(ValueError, match="source 1"):
+        validate_sources([Source("front", "sgbm", {"not_a_real_setting": 1})])
+    with pytest.raises(ValueError, match="source 1"):
+        validate_sources([Source("front", "sgbm", {"range_stride": 8})])
 
 
 def test_cells_floor_so_points_outside_the_map_are_rejected():
@@ -243,93 +192,24 @@ def test_visibility_mask_stops_at_the_first_wall():
     assert not mask[1, 2] and not mask[0, 2]             # nothing behind it
 
 
-def test_report_lands_in_the_module_directory_like_every_other_module(tmp_path):
-    """``<report_root>/dalg/``, with no run directory nested inside it.
-
-    dalg used to add a ``<run_id>-<profile>`` level so a second run in one
-    simulator session could not overwrite the first. Every other module
-    overwrites in that case, so the extra level only made the path opaque.
-    """
-    out = _report_fixture(tmp_path)
-
-    assert out == tmp_path / "dalg"
-    assert (out / "summary.json").is_file()
-    assert not [child for child in out.iterdir() if child.is_dir()]
-
-
-def test_report_html_still_finds_the_sibling_module_reports(tmp_path):
-    """The flight images live one level up, and flattening moved that level.
-
-    report.html embeds dsim's flight path and dway's track from the run root
-    the modules share. That root was ``out.parent.parent`` while dalg nested a
-    run directory; it is ``out.parent`` now, and getting it wrong loses the
-    images silently rather than raising.
-    """
-    for relative in ("dsim/flight_path.png", "dway/track.png"):
-        target = tmp_path / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (4, 4), (7, 8, 9)).save(target)
-
-    html = (_report_fixture(tmp_path) / "report.html").read_text(encoding="utf-8")
-
-    assert "Flight Path (dsim)" in html
-    assert "Navigator Track (dway)" in html
-    assert html.count("data:image/png;base64,") >= 2
-
-
-def test_coordinator_watchdog_follows_the_clock_the_coordinator_paces_on():
-    """Coordinators heartbeat on simulated time. Timing their silence on the
-    wall clock aborted every run whose simulator lagged real time."""
-    run = object.__new__(DalgRun)
-    run._coordinator_seen = time.monotonic()-30.0
-    run._coordinator_seen_sim = 10.0
-    assert not run._coordinator_silent(11.0)
-    assert run._coordinator_silent(10.0+run_module.COORDINATOR_SILENCE_SIM_S+.1)
-    run._coordinator_seen = time.monotonic()-run_module.COORDINATOR_SILENCE_WALL_S-1
-    assert run._coordinator_silent(10.0)
-
-
-def _report_fixture(tmp_path, partial=False):
-    """One finished report on disk, written the way a real run writes it."""
-    from types import SimpleNamespace
-    from dalg.model import Result
+def test_report_lands_in_the_module_directory_with_numbers_and_no_scores(tmp_path):
+    """``<report_root>/dalg/``: a summary, one evidence image per source, no truth."""
+    import json
     from dalg.report import write_report
+    from dcmn.maps import EvidenceGrid, GridGeometry
 
-    truth = OccupancyGrid(np.full((6, 6), .05, np.float32), np.ones((6, 6), bool), 1.0)
-    truth.probabilities[2, :] = .95
-    predicted = OccupancyGrid(truth.probabilities.copy(), np.ones((6, 6), bool), 1.0)
-    predicted.probabilities[2, 4:] = .05           # two walls missed
-    empty = OccupancyGrid(np.full((6, 6), .05, np.float32), np.ones((6, 6), bool), 1.0)
-    profile = SimpleNamespace(name="p", digest="d" * 64, algorithm="sgbm",
-                              sensors=("rgb",))
-    return write_report(
-        tmp_path, run_id="r1", profile=profile, truth=truth,
-        results={"sgbm": Result(predicted, {"frames": 3}),
-                 "constant": Result(empty, {})},
-        provenance={"frames": 3, "observable_cells": 30, "map_cells": 36},
-        partial=partial, reason="operator requested shutdown" if partial else "",
-        events=[{"type": "module.heartbeat", "role": "navigator", "sim_time_s": 0.0,
-                 "payload": {}},
-                {"type": "run.started", "role": "navigator", "sim_time_s": 1.0,
-                 "payload": {"state": "FLYING"}}])
-
-
-def test_report_writes_a_readable_html_summary(tmp_path):
-    """summary.json is the record; report.html is how anyone reads it."""
-    out = _report_fixture(tmp_path)
-    html = (out / "report.html").read_text(encoding="utf-8")
-    assert (out / "scored-region.png").exists()          # what the scores cover
-    assert "overlay-sgbm.png" in html and "scored-region.png" in html
-    assert "COMPLETE" in html and "sgbm" in html
-    assert "0.667" in html                               # 4 of 6 walls found
-    assert "run.started" in html                         # lifecycle survives
-    assert "module.heartbeat" not in html                # liveness noise does not
-
-
-def test_report_html_flags_an_aborted_run(tmp_path):
-    html = (_report_fixture(tmp_path, partial=True) / "report.html").read_text()
-    assert "ABORTED" in html
-    assert "operator requested shutdown" in html
+    geometry = GridGeometry.from_extent(6, 6, 1., origin_x_m=-3, origin_y_m=-3)
+    grid = EvidenceGrid.blank(geometry, "scan-lidar_inverse")
+    grid.occupancy[0, 2, 2] = 254; grid.observed_ms[0, 2, 2] = 1500
+    out = write_report(tmp_path / "dalg", summary=dict(state="RUNNING", archive="archive"),
+                       evidence={"scan-lidar_inverse": grid})
+    assert out == tmp_path / "dalg"
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["archive"] == "archive"
+    entry = summary["evidence"]["scan-lidar_inverse"]
+    assert (out / entry["image"]).is_file()
+    assert entry["geometry"]["origin_m"] == [-3.0, -3.0]
+    assert "scores" not in summary and "scores" not in entry
 
 
 def _stereo_frames(count: int, spacing_m: float = 0.5) -> list[Frame]:
@@ -444,11 +324,12 @@ def test_prediction_image_ramps_black_through_blue_to_white():
 def test_undecided_neutral_stays_clear_of_free_and_occupied():
     """The neutral has to be legible against both ends of the ramp.
 
-    The verdict overlay's own BACKGROUND shares the palette but sits at
+    The evaluation verdict overlay's BACKGROUND shares the palette but sits at
     luminance 38, inside the range a prediction grid paints confident free
     space -- so using it directly hides the free space a run actually carved.
     """
-    from dalg.overlay import BACKGROUND, UNDECIDED
+    from dalg.overlay import UNDECIDED
+    from dtest.evaluation import BACKGROUND
 
     def luminance(colour):
         return 0.2126 * colour[0] + 0.7152 * colour[1] + 0.0722 * colour[2]
@@ -458,40 +339,6 @@ def test_undecided_neutral_stays_clear_of_free_and_occupied():
     scale = luminance(UNDECIDED) / luminance(BACKGROUND)
     for channel, reference in zip(UNDECIDED, BACKGROUND):
         assert channel == pytest.approx(reference * scale, abs=1.0)
-
-
-def test_report_publishes_a_prediction_grid_per_algorithm(tmp_path):
-    """The picture that was on screen belongs beside the score it earned."""
-    from dalg.report import write_report
-    from dalg.report_html import _rgb as _rgb_css
-    from dalg.overlay import UNDECIDED
-    from dalg.truth import ground_truth
-    from dalg.model import Result
-    from types import SimpleNamespace
-
-    sim_map = load_map(Path(__file__).resolve().parents[1]
-                       / "assets/maps/maze_001.txt")
-    truth = ground_truth(sim_map)
-    grid = LogOddsGrid(sim_map.width, sim_map.height)
-    grid.update([4, 5], [4, 4], 2.5)
-    profile = SimpleNamespace(name="p", digest="d", sensors=("rgb",),
-                              algorithm="optical_flow_triangulation")
-
-    out = write_report(
-        tmp_path, run_id="r1", profile=profile, truth=truth,
-        results={"optical_flow_triangulation": Result(grid.result(), {}),
-                 "constant": Result(truth, {})},
-        provenance={}, partial=False, reason="", events=[], observable=None)
-
-    for name in ("optical_flow_triangulation", "constant"):
-        assert (out / f"prediction-{name}.png").is_file()
-    html = (out / "report.html").read_text()
-    assert "Prediction Grids" in html
-    assert html.count("prediction-") == 2
-    # The legend has to say what the greyscale means, and that scoring is a
-    # threshold rather than the gradient the eye reads.
-    assert "no opinion" in html and "undecided" in html
-    assert _rgb_css(UNDECIDED) in html   # legend swatch matches the raster
 
 
 class _FakeBus:
@@ -532,126 +379,70 @@ def _shutdown_event(run_id: str = ""):
         payload={"reason": "operator requested shutdown", "scope": "instance"})
 
 
-def _finished_run():
-    """A DalgRun that has completed and written its report.
-
-    Built through the real constructor rather than field by field: every time
-    presence gained a dependency, a hand-assembled object grew another
-    attribute the production path already had. The constructor opens no shared
-    memory -- attaching is lazy -- so only the transports and the bus need
-    standing in for.
-    """
-    from types import SimpleNamespace
-
-    class _Unavailable:
-        """The simulator has gone; every attach fails and connect() says so."""
-        def open_existing(self, name): return False
-        def open(self, name): return False
-
+def _idle_run():
+    """A DalgRun with no provider at all, and a bus that records what it says."""
     root = Path(__file__).resolve().parents[1]
-    run = DalgRun("area1", load_profile("optical-flow-maze020", root), root)
+    run = DalgRun("area1-" + str(time.monotonic_ns()), load_profile("optical-flow-baseline", root), root)
     run.bus = _FakeBus()
-    run.pm = SimpleNamespace(memvid=_Unavailable, memkv=_Unavailable)
-
-    # Wind it forward to a run that has finished and been reported.
-    run.state = "COMPLETE"
-    run.reason = "landed"
-    run.run_id = "r1"
-    run.done = True
-    run.active = False
-    run.provenance = {"coordinator_outcome": "complete"}
-    run.start_sim_time = 3.0
-    run._coordinator_process_id = "dway-1"
-    run._coordinator_seen_sim = 100.0
-    run._hello_sent = True
     return run
 
 
-def test_shutdown_is_still_heard_after_the_run_has_finished():
-    """The kill-all signal has to reach a window left open on a result.
-
-    main() used to skip step() once the run was done, and step() is the only
-    thing that drains the bus -- so a finished dalg sat with its window open
-    and never saw system.shutdown again.
-    """
-    run = _finished_run()
-    run.bus.inbox = [_shutdown_event()]
-
-    run.step()
-
-    assert run.shutdown_requested is True
+def test_shutdown_is_heard_while_waiting_for_a_provider():
+    run = _idle_run()
+    try:
+        run.bus.inbox = [_shutdown_event()]
+        run.step()
+        assert run.shutdown_requested is True and run.done
+    finally:
+        run.close()
 
 
-def test_shutdown_after_a_finished_run_keeps_its_outcome():
-    """Stopping the process must not relabel a measurement that succeeded."""
-    run = _finished_run()
-    run.bus.inbox = [_shutdown_event()]
-
-    run.step()
-
-    assert run.provenance["coordinator_outcome"] == "complete"
-    assert run.state == "COMPLETE"
-    assert run.reason == "landed"
-
-
-def test_a_finished_run_keeps_publishing_presence():
-    """Otherwise it ages out of every PipelineView while its window is open."""
-    run = _finished_run()
-
-    run.step()
-    run._last_heartbeat = -1e9      # let the next one through the 1 Hz gate
-    run.step()
-
-    assert run.bus.types().count("module.heartbeat") == 2
-    # Sensor health rides beside the heartbeat rather than inside it, so a
-    # finished run keeps reporting both.
-    assert run.bus.types().count("module.sensor_health") == 2
-    for kind, _, payload in run.bus.published:
-        assert payload["state"] == "COMPLETE"
-        if kind == "module.heartbeat":
-            assert payload["ready"] is False
-        else:
-            assert payload["sensor_inputs"] == {}
+def test_a_waiting_run_keeps_publishing_presence_and_says_why():
+    """Waiting is a state an operator can see, not silence."""
+    run = _idle_run()
+    try:
+        run.step()
+        run._last_presence = -1e9
+        run.step()
+        assert run.bus.types().count("module.heartbeat") == 2
+        assert run.bus.types().count("module.sensor_health") == 2
+        beats = [payload for kind, _, payload in run.bus.published if kind == "module.heartbeat"]
+        assert beats[-1]["state"] == "WAITING_PROVIDER"
+        assert beats[-1]["ready"] is False and beats[-1]["capabilities"]["maps"] is False
+    finally:
+        run.close()
 
 
-def test_late_lifecycle_traffic_cannot_reopen_a_finished_run():
-    """A coordinator repeating itself must not restart a closed measurement."""
+def test_mission_lifecycle_traffic_never_starts_or_stops_perception():
+    """A coordinator's run.* events are recorded; they are not dalg's lifecycle."""
     from dcmn.module_bus import ModuleEvent
+    run = _idle_run()
+    try:
+        for kind in ("run.prepare", "run.start_scheduled", "run.completed"):
+            run.bus.inbox = [ModuleEvent(event_id=kind, instance_id="area1", role="navigator",
+                implementation="dway", process_id="dway-1", sequence=9, sim_time_s=9.0,
+                type=kind, run_id="r1", payload={"outcome": "complete"})]
+            run.step()
+        assert not run.done and run.state == "WAITING_PROVIDER"
+        # Not active, so no readiness claim either.
+        assert "run.ready" not in run.bus.types()
+    finally:
+        run.close()
 
-    run = _finished_run()
-    run.bus.inbox = [ModuleEvent(
-        event_id="e2", instance_id="area1", role="navigator",
-        implementation="dway", process_id="dway-1", sequence=9,
-        sim_time_s=99.0, type="run.start_scheduled", run_id="r1",
-        payload={"start_sim_time_s": 120.0})]
 
-    run.step()
-
-    assert run.state == "COMPLETE"
-    assert run.start_sim_time == 3.0          # the finished run's own start
-    assert run.provenance["coordinator_outcome"] == "complete"
-
-
-def test_main_keeps_stepping_a_finished_run_while_its_window_is_open(monkeypatch):
-    """The window outlives the tour, and so must the bus drain behind it.
-
-    main() used to guard the step with ``if not run.done``, which stopped the
-    only call that drains the bus and publishes presence. The window stayed on
-    screen showing the result and quietly ignored system.shutdown.
-    """
+def test_main_keeps_stepping_a_stopped_run_while_its_window_is_open(monkeypatch):
+    """The window outlives observation, and so must the bus drain behind it."""
     import dalg.dalg as dalg_module
 
     class _Run:
-        """Finishes on the third step, then reports a shutdown on the sixth."""
+        """Stops on the third step, then reports a shutdown three steps later."""
         def __init__(self, *args, **kwargs):
             self.steps = 0
             self.steps_after_done = 0
             self.done = False
-            self.active = False
             self.shutdown_requested = False
-            self.reason = ""
             self.report_dir = None
-            self.provenance = {}
+            self.state = "RUNNING"
             self.closed = False
 
         def step(self):
@@ -660,20 +451,18 @@ def test_main_keeps_stepping_a_finished_run_while_its_window_is_open(monkeypatch
                 self.steps_after_done += 1
             if self.steps == 3:
                 self.done = True
-                self.provenance["coordinator_outcome"] = "complete"
             if self.steps_after_done == 3:
                 self.shutdown_requested = True
 
+        def poll_delay(self): return 0.
+        def finish(self, partial=False): self.done = True
         def close(self):
             self.closed = True
 
     class _Window:
-        # update() runs every iteration whether or not step() does, so it is
-        # also the safety valve: without it a regression here hangs the suite
-        # instead of failing it, which is exactly what the bug did to dalg.
         BUDGET = 200
 
-        def __init__(self, run):
+        def __init__(self, run, *, show_reference=False):
             self.run = run
             self.running = True
             self.updates = 0
@@ -693,13 +482,10 @@ def test_main_keeps_stepping_a_finished_run_while_its_window_is_open(monkeypatch
     monkeypatch.setattr(dalg_module, "Window", _Window)
     monkeypatch.setattr(dalg_module.time, "sleep", lambda _s: None)
 
-    code = dalg_module.main(["--id", "area1",
-                             "--profile", "optical-flow-maze020"])
+    code = dalg_module.main(["--id", "area1", "--profile", "optical-flow-baseline"])
     run = created["run"]
 
-    assert run.steps_after_done == 3, (
-        "the bus stopped being drained once the run finished")
+    assert run.steps_after_done == 3, "the bus stopped being drained once the run stopped"
     assert run.shutdown_requested is True
     assert run.closed is True
-    # A completed run that was then shut down is still a completed run.
     assert code == 0

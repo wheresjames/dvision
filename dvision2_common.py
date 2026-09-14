@@ -196,6 +196,17 @@ def shared_names(instance_id: str) -> dict[str, str]:
         "command": f"{base}.control",
         "status": f"{base}.status",
         "events": f"{base}.events",
+        # The evidence plane's registry. Owned by whichever module publishes
+        # beliefs about the world -- dalg -- rather than by the simulator: a
+        # producer owns its plane, and the simulator is not involved. The name
+        # is stable so a consumer can probe it before any producer exists.
+        "maps": f"{base}.maps",
+        # The reference-imagery plane's registry (DV-MAPPING §7): optional PNG
+        # backgrounds for display and reports, never planning input. The
+        # simulator is the producer here, because what it publishes is a
+        # rendering of truth rather than a belief about it; the name is stable
+        # for the same reason every plane's is.
+        "imagery": f"{base}.imagery",
     }
 
 
@@ -421,6 +432,13 @@ def local_to_gps(x_m: float, y_m: float, z_m: float, lat0: float, lon0: float, a
     lon_scale = 111_320.0 * max(0.01, math.cos(math.radians(lat0)))
     lon = lon0 + x_m / lon_scale
     return lat, lon, alt0 + z_m
+
+
+def gps_to_local(lat: float, lon: float, alt: float, lat0: float, lon0: float,
+                 alt0: float) -> tuple[float, float, float]:
+    """The exact inverse of :func:`local_to_gps`: (east, north, up) metres from the origin."""
+    lon_scale = 111_320.0 * max(0.01, math.cos(math.radians(lat0)))
+    return (lon - lon0) * lon_scale, (lat - lat0) * 111_320.0, alt - alt0
 
 
 def clamp(value: float, low: float, high: float) -> float:

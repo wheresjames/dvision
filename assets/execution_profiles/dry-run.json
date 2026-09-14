@@ -1,0 +1,18 @@
+{
+  "schema": "dvision2.execution-profile.v1",
+  "calibrated": false,
+  "slab_assumption": "vertical-extrusion",
+  "note": "SYNTHETIC dry-run limits, not measured. max_age_s covers ~1 Hz evidence publication plus stopping_s and transport lag.",
+  "speed_mps": 0.25,
+  "body_radius_m": 0.15,
+  "half_height_m": 0.15,
+  "tracking_m": 0.1,
+  "stopping_m": 0.25,
+  "stopping_s": 1.0,
+  "max_age_s": 3.0,
+  "altitude_m": 1.5,
+  "join_m": 0.25,
+  "free_threshold": 0.35,
+  "occupied_threshold": 0.5,
+  "required_sources": []
+}
