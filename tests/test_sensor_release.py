@@ -26,7 +26,7 @@ from dsim.sensor_manager import SensorManager
 from dtest.artifacts import artifact_directory
 from dtest.process_harness import DsimProcessHarness
 
-#: The gate from DV-SENSORS: pace, publisher overruns, and delivered samples.
+#: The release gate: pace, publisher overruns, and delivered samples.
 MIN_SPEED_RATIO = 0.90
 MIN_SAMPLE_RATIO = 0.90
 

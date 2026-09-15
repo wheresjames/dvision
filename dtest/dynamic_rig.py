@@ -144,7 +144,8 @@ class PlannerRun:
 class DynamicRig:
     def __init__(self, tmp_path, *, width=30, height=12, walls=(), start=(3.5, 6.0), goal=(12.5, 6.0),
                  heading_deg=90.0, sensor_range_m=None, profile=FLIGHT_PROFILE, realism=None,
-                 nav_archive=False, sources=('scan',), fixed_route=None, executor_options=None):
+                 nav_archive=False, sources=('scan',), fixed_route=None, executor_options=None,
+                 profile_overrides=None):
         self.tmp = Path(tmp_path)
         self.tmp.mkdir(parents=True, exist_ok=True)
         self.id = 'fly-' + uuid.uuid4().hex[:8]
@@ -152,7 +153,7 @@ class DynamicRig:
         import dsim.dsim as dsim_module
         self._patch = mock.patch.object(dsim_module.time, 'monotonic', self.clock.read)
         self._patch.start()
-        self.profile = ExecutionProfile.load(profile)
+        self.profile = ExecutionProfile.load(profile, profile_overrides)
         self.map_path = open_map(self.tmp / 'open.txt', width=width, height=height,
                                  start=(int(start[0]), int(start[1])), walls=walls)
         self.sim = build_sim(self.clock, start=start, heading_deg=heading_deg, map_path=self.map_path,
@@ -182,7 +183,7 @@ class DynamicRig:
                                                        clock_domain_id=self.id, clock_epoch=0))
         self.active_sources = set(self.sources[:1])
         self.grids = {}
-        self.planner = GridPlanner(self.profile.body_radius_m + self.profile.tracking_m + self.profile.stopping_m)
+        self.planner = GridPlanner(self.profile.clearance_radius_m)
         self.fixed_route = fixed_route
         self.run = PlannerRun(self)
         self.nav_recorder = None

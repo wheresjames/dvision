@@ -105,10 +105,10 @@ GOLDEN = {
     'ground_plane': {
         'diagnostics': {'frames': 16, 'projected_boundaries': 640},
         'scores': {
-            'brier': 0.14845,
-            'coverage': 0.048194,
-            'free_iou': 0.040948,
-            'hallucination_rate': 0.008908,
+            'brier': 0.124008,
+            'coverage': 0.043819,
+            'free_iou': 0.039009,
+            'hallucination_rate': 0.006322,
             'occupied_iou': 0.0,
             'occupied_precision': 0.0,
             'occupied_recall': 0.0,
@@ -139,12 +139,12 @@ GOLDEN = {
         },
     },
     'plane_sweep': {
-        'diagnostics': {'accepted_points': 728, 'depth_hypotheses': 16, 'frames': 8, 'frames_with_depth': 8},
+        'diagnostics': {'accepted_points': 321, 'depth_hypotheses': 16, 'frames': 8, 'frames_with_depth': 8},
         'scores': {
-            'brier': 0.147502,
-            'coverage': 0.089375,
-            'free_iou': 0.075368,
-            'hallucination_rate': 0.006968,
+            'brier': 0.127193,
+            'coverage': 0.056875,
+            'free_iou': 0.049975,
+            'hallucination_rate': 0.003807,
             'occupied_iou': 0.0,
             'occupied_precision': 0.0,
             'occupied_recall': 0.0,

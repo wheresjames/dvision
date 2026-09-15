@@ -102,8 +102,8 @@ set.
 - Body frame: +X forward, +Y right, +Z up; roll about +X, pitch about +Y,
   yaw about +Z. `pose_parent` is the transform **from the named parent to
   this sensor**, composed as `T_world_child = T_world_parent · T_parent_child`
-  with `R = Rz(yaw)·Ry(pitch)·Rx(roll)`. See `DV-SENSORS.md` "Frames, pose,
-  and misalignment" and `apps/dsim/transforms.py`.
+  with `R = Rz(yaw)·Ry(pitch)·Rx(roll)`. See [`mounts.md`](mounts.md) and
+  `apps/dsim/transforms.py`.
 - Camera optical axes (+X right, +Y down, +Z forward) map to sensor-body
   `(z, x, −y)` before the sensor pose is applied. The delivered image is
   row-major RGB24 with row 0 at the top and +X right, matching the published
@@ -140,8 +140,8 @@ Rendered pixels read scene geometry truth (map walls/trees/ground) only;
 lighting/scene presets change appearance, never geometry. No noise, bias,
 quantization, dropout, or confidence model is applied to RGB in v1 — pixels are
 deterministic given pose and scene, so there is no per-frame randomness to
-seed. (Deterministic measurement noise rules for later numeric sensors are
-specified in `DV-SENSORS.md` "Internal dsim architecture".)
+seed. (Later numeric sensors add their own deterministic measurement noise,
+specified per sensor in its document in this directory.)
 
 ## Transport
 

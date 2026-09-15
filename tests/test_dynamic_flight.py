@@ -118,8 +118,10 @@ def test_unknown_space_prefix_stop_waits_honestly(rig) -> None:
     assert rig.fly_to_state('HOLDING', *COMPLETE_HOLD_STATES), 'no stop at the interval end'
     ex = rig.executor
     assert ex.state == 'HOLDING', ex.reason
-    assert ex.hold_kind == 'prefix', ex.hold_kind
-    assert 'permitted interval' in ex.reason
+    # Conservative swept clearance may be withdrawn just before the executor
+    # reaches its prefix endpoint; both paths must confirm a stop.
+    assert ex.hold_kind in ('prefix', 'unavailable'), ex.hold_kind
+    assert holds(rig), 'no measured stop before unknown space'
     assert goal_distance(rig) > ex.profile.arrival_m
     stopped_pose = ex.pose
     sent_at_stop = ex.targets_sent
@@ -139,7 +141,7 @@ def test_prefix_wait_resumes_only_with_fresh_clearance(rig) -> None:
     rig.never_observe((row, band) for row in range(g.height))
     rig.start()
     assert rig.fly_to_state('HOLDING', *COMPLETE_HOLD_STATES)
-    assert rig.executor.hold_kind == 'prefix'
+    assert rig.executor.hold_kind in ('prefix', 'unavailable')
     # The unknown band is never observed on its own; the wait is honest.
     for _ in range(int(5.0 / DT_S)):
         rig.step()
@@ -318,6 +320,26 @@ def test_crossing_route_does_not_skip_ahead(rig) -> None:
     # flew the first pass before the second, rather than cutting the corner.
     segments = [entry['segment'] for entry in rig.executor.sent]
     assert segments == sorted(segments), f'progress jumped at the crossing: {segments}'
+
+
+def test_corner_waits_for_permission_from_the_confirmed_stop(rig) -> None:
+    rig.fixed_route = [[3.5, 6., 1.5], [8., 6., 1.5], [8., 9., 1.5]]
+    rig.context.set_goal('fixture', [8., 9., 1.5], role='mission')
+    rig.start()
+    assert rig.fly(limit_s=80., until=lambda r: r.executor.state == 'HOLDING'
+                   and r.executor.hold_kind == 'corner')
+    ex = rig.executor
+    assert not ex.source.value['clearance'].get('corner_departure')
+    rig.planner_alive = False
+    sent, segment = ex.targets_sent, ex.segment
+    for _ in range(4):
+        rig.step()
+    assert ex.state == 'HOLDING' and ex.segment == segment
+    assert ex.targets_sent == sent, 'departed using permission issued before the measured stop'
+    rig.planner_alive = True
+    assert rig.fly_to_state(*COMPLETE_HOLD_STATES, limit_s=80.), ex.reason
+    assert ex.state == 'COMPLETE'
+    assert not rig.targets_outside_permission()
 
 
 def test_coincident_goal_is_an_arrival_only_flight(rig) -> None:
@@ -739,3 +761,74 @@ def test_instance_shutdown_on_the_bus_stops_a_target_executor(tmp_path) -> None:
     finally:
         run.close()
         bus.remove()
+
+
+def test_blocked_goal_holds_short_on_the_retained_route_and_completes_once_clear(rig) -> None:
+    rig.start()
+    assert rig.fly(limit_s=30.0, until=lambda r: r.executor.state == 'EXECUTING')
+    goal = rig.context.read()['goal']['position']
+    rig.block(goal[0], goal[1], radius_m=0.4)  # an errant obstacle on the goal itself
+    ex, modes = rig.executor, set()
+    for _ in range(int(60.0 / DT_S)):
+        rig.step()
+        last = rig.publisher.last
+        modes.add(last.get('route_mode'))
+        if ex.state in COMPLETE_HOLD_STATES: break
+        if ex.state == 'HOLDING' and last.get('route_mode') == 'retained' and not last['clearance']['eligible']:
+            break
+    # The planner cannot reach the goal, yet the route it last planned is kept
+    # (not an empty, unplanned snapshot) and flown as far as it is permitted.
+    assert ex.state == 'HOLDING', ex.reason
+    assert 'retained' in modes and goal_distance(rig) > ex.profile.arrival_m
+    rig.extra.clear()
+    rig._publish_evidence()
+    rig._next_evidence = rig.sim.sim_time_s + 1.0
+    next_request = rig.sim.sim_time_s
+    for _ in range(int(120.0 / DT_S)):
+        rig.step()
+        if ex.state in COMPLETE_HOLD_STATES: break
+        if ex.state == 'HOLDING' and ex.source.state == 'READY' and rig.sim.sim_time_s >= next_request:
+            ex.request('resume')
+            next_request = rig.sim.sim_time_s + 1.0
+    assert ex.state == 'COMPLETE', ex.reason
+    assert rig.publisher.last['route_mode'] == 'planned'
+    assert not rig.targets_outside_permission()
+
+
+def test_route_blocked_ahead_is_replaced_while_moving(tmp_path) -> None:
+    rig = DynamicRig(tmp_path, width=30, goal=(20.5, 6.0),
+                     profile_overrides={'handoff_m': 0.3, 'turn_tolerance_deg': 30.0})
+    try:
+        rig.start()
+        assert rig.fly(limit_s=30.0, until=lambda r: r.executor.state == 'EXECUTING' and r.executor.pose[0] > 5.0)
+        rig.block(rig.executor.pose[0] + 6.0, 6.0, radius_m=0.5)
+        assert rig.fly_to_state(*COMPLETE_HOLD_STATES, limit_s=120.0), rig.executor.reason
+        ex = rig.executor
+        assert ex.state == 'COMPLETE', ex.reason
+        kinds = [e['data'].get('kind') for e in holds(rig, phase='requested')]
+        # Replaced without the stop a route change used to cost.
+        assert not {'replacement', 'unavailable'} & set(kinds), kinds
+        assert any(e['kind'] == 'execution.handoff' for e in ex.events)
+        assert not rig.targets_outside_permission()
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(('route', 'blend'), [
+    (((3.5, 6.0), (8.0, 6.0), (12.0, 8.25)), True),  # a 29° turn is flown through
+    (((3.5, 6.0), (8.0, 6.0), (8.0, 10.0)), False),  # a 90° turn still stops
+])
+def test_shallow_corners_are_flown_through(tmp_path, route, blend) -> None:
+    rig = DynamicRig(tmp_path, goal=route[-1], fixed_route=[(x, y, 1.5) for x, y in route],
+                     profile_overrides={'corner_blend_deg': 45.0})
+    try:
+        rig.start()
+        assert rig.fly_to_state(*COMPLETE_HOLD_STATES, limit_s=120.0), rig.executor.reason
+        ex = rig.executor
+        assert ex.state == 'COMPLETE', ex.reason
+        blends = [e for e in ex.events if e['kind'] == 'execution.corner_blend']
+        corners = holds(rig, kind='corner', phase='requested')
+        assert (bool(blends), bool(corners)) == (blend, not blend), (blends, corners)
+        assert not rig.targets_outside_permission()
+    finally:
+        rig.close()

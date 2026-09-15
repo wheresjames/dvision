@@ -1028,7 +1028,7 @@ class DroneSimulator:
     def _publish_reference_image(self) -> None:
         """Render the world once and publish it as optional reference imagery.
 
-        A rendering of truth on a plane no algorithm reads (DV-MAPPING §7):
+        A rendering of truth on a plane no algorithm reads:
         it exists so an operator's display and a report can show what the
         world looked like without any consumer opening the world file, and
         it is published *after* the context plane exists because its metadata

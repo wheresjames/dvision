@@ -273,7 +273,7 @@ def test_repeated_front_flow_promotes_to_hard_occupancy() -> None:
     pose = Pose2(0.0, 0.0, 0.0)
 
     # Three hits make a soft cell; sustained same-cell hits beyond the hard
-    # threshold promote it to an impassable A* obstacle (Phase 6.7).
+    # threshold promote it to an impassable A* obstacle.
     for _ in range(8):
         local_map.update(
             pose,
@@ -295,7 +295,7 @@ def test_hard_confirmed_flow_decays_at_normal_rate() -> None:
 
     # Range placed beyond the free-fan band (dist <= 2.0 m) so the decay rate is
     # isolated from the per-tick free-space marking directly ahead. Front risk is
-    # kept below the Phase 6.8 sustained-front threshold (0.6) so the nearer
+    # kept below the sustained-front threshold (0.6) so the nearer
     # sustained barrier does not form and this isolates confirmed-flow decay.
     for _ in range(8):
         local_map.update(
@@ -332,7 +332,7 @@ def test_sustained_front_risk_while_yaw_scanning_stays_reactive_only() -> None:
     local_map = LocalOccupancyMap(cell_m=0.5, half_width_m=8.0)
     # Same strong rangeless front risk, but the drone is yaw-scanning (heading
     # changing every tick), so it must not paint a phantom 2 m halo as obstacles
-    # sweep through the front sector (the Phase 6.2 failure mode).
+    # sweep through the front sector (the scanning-halo failure mode).
     sectors = _sectors(front=1.0, method="mini_slam:ok+flow:persist")
     for i in range(12):
         local_map.update(Pose2(0.0, 0.0, float(i) * 5.0), sectors)
@@ -390,10 +390,10 @@ def test_rangeless_mini_slam_risk_does_not_seed_local_map() -> None:
     local_map = LocalOccupancyMap(cell_m=0.5, half_width_m=8.0)
     pose = Pose2(0.0, 0.0, 0.0)
 
-    # Transient rangeless mini-SLAM risk (fewer ticks than the Phase 6.8
+    # Transient rangeless mini-SLAM risk (fewer ticks than the
     # sustained-front confirmation) stays reactive-only — the normal admission
     # path still bars rangeless evidence. (Sustained steady-heading rangeless
-    # front risk is the Phase 6.8 exception, covered by
+    # front risk is the sustained-front exception, covered by
     # test_sustained_rangeless_front_risk_with_steady_heading_maps_hard.)
     for _ in range(4):
         local_map.update(pose, _sectors(front=1.0, method="mini_slam:ok"))

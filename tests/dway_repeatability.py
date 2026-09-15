@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Fly one baseline tour N times and publish the spread.
 
-`DV-DWAY.md` D7 asks how repeatable closed-loop following actually is, because
-`dalg`'s premise -- that a tour is a predictable stimulus -- depends on the
-answer. This is the measurement: the same tour, the same map, realism off,
-flown end to end through real `dsim` and `dway` processes, aggregated into one
-`repeatability.json`.
+How repeatable closed-loop following actually is had to be measured rather
+than assumed, because `dalg`'s premise -- that a tour is a predictable
+stimulus -- depends on the answer. This is the measurement: the same tour,
+the same map, realism off, flown end to end through real `dsim` and `dway`
+processes, aggregated into one `repeatability.json`.
 
 Real processes, not the deterministic rig: a fixed-timestep in-process flight
 would answer a question nobody asked, since it is repeatable by construction.

@@ -1,6 +1,6 @@
 """The evidence-plane test fixture: a known room, published on the real plane.
 
-A fixture, kept in test tooling rather than in dalg (DV-MAPPING §3). It exists
+A fixture, kept in test tooling rather than in dalg. It exists
 so that everything downstream of perception -- the
 transport, the map pane, the cost policy, the planner, the whole `dnav` window
 -- can be built and reviewed before any camera algorithm is known to be

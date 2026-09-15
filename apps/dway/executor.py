@@ -51,9 +51,23 @@ AUTO_CONTINUE = ('corner', 'replacement')
 START_REQUIRED = ('restart', 'goal')
 #: Every other stop reason needs an explicit Resume with fresh validation.
 HISTORY_S = 60.0
+#: Least fraction of ``speed_mps`` commanded where obstacle clearance narrows
+#: the tracking allowance. Chosen, not measured: slower flight should track
+#: closer, but no profile field states by how much.
+NARROW_SPEED_FRACTION = 0.25
+#: Growth in cross-track tolerated while moving off from a stop that left the
+#: vehicle outside its allowance; more than this is real divergence.
+DEPARTURE_SLACK_M = 0.02
 NOTABLE = ('execution.shutdown_requested', 'execution.control', 'execution.transition', 'execution.hold', 'execution.lease',
            'execution.health', 'execution.route', 'execution.shutdown', 'execution.launch', 'execution.readiness',
-           'execution.coverage', 'execution.turn')
+           'execution.coverage', 'execution.turn', 'execution.handoff', 'execution.corner_blend')
+
+
+def _turn_deg(a, b, c, d):
+    """Angle between directions ``a``->``b`` and ``c``->``d``; 0 when either is degenerate."""
+    if math.dist(a[:2], b[:2]) < 1e-6 or math.dist(c[:2], d[:2]) < 1e-6: return 0.
+    first, second = math.atan2(b[1]-a[1], b[0]-a[0]), math.atan2(d[1]-c[1], d[0]-c[0])
+    return abs((math.degrees(second - first) + 180.) % 360. - 180.)
 
 
 def course_deg(a, b):
@@ -130,6 +144,11 @@ class DynamicExecutor:
         self.pose = None
         self.speed = None
         self.cross_track = self.remaining = self.margin = self.validity = None
+        self.tracking_allowance = None
+        #: Cross-track the vehicle moved off with, while still outside its allowance.
+        self.departure_cross = None
+        #: Fraction of ``speed_mps`` for the shallow corner about to be flown through.
+        self.corner_factor = 1.
         self.violated_margin_m = None
         self.target = None
         self.vehicle = None
@@ -367,6 +386,8 @@ class DynamicExecutor:
     def _transition(self, state, reason, kind=None):
         if state != self.state or reason != self.reason or kind != self.hold_kind:
             self._record('execution.transition', dict(previous=self.state, state=state, reason=reason, hold_kind=kind))
+        if state == 'EXECUTING' and self.state != 'EXECUTING':
+            self.departure_cross = math.inf  # measured on the first executing step
         self.state, self.reason, self.hold_kind = state, reason, kind
 
     def _fail(self, now, reason, *, send_hold=True):
@@ -734,7 +755,7 @@ class DynamicExecutor:
             return self._brake(now, kind, src.reason)
         if src.state != 'READY': return self._brake(now, self._kind_for(src.reason), src.reason)
         value = src.value
-        if value['geometry_revision'] != self.active['geometry_revision']:
+        if value['geometry_revision'] != self.active['geometry_revision'] and not self._take_handoff(value):
             return self._brake(now, 'replacement', 'route geometry changed while executing')
         self.active = value
         if _goal_key(self.snapshot.get('goal')) != self.authorized_goal:
@@ -749,8 +770,10 @@ class DynamicExecutor:
         self.margin = self.remaining - required
         self.validity = clearance['valid_until_s'] - self.snapshot.get('time_s', now)
         tolerance = self.speed / p.stream_hz + 0.01
-        if cross > p.tracking_m:
-            return self._brake(now, 'tracking', f'cross-track {cross:.2f} m exceeds the {p.tracking_m:g} m allowance')
+        self.tracking_allowance = self._tracking_allowance(value, progress)
+        limit = self._cross_limit(cross, self.tracking_allowance)
+        if cross > limit:
+            return self._brake(now, 'tracking', f'cross-track {cross:.2f} m exceeds the {limit:.2f} m allowance')
         if self.validity <= p.stopping_s + p.reaction_s:
             return self._brake(now, 'expired', f'permission deadline in {self.validity:.2f} s leaves too little '
                                                f'time to stop ({p.stopping_s + p.reaction_s:g} s)')
@@ -758,6 +781,9 @@ class DynamicExecutor:
             return self._brake(now, 'prefix', 'vehicle is at or beyond the permitted endpoint; stopping margin violated',
                                violated=self.margin)
         target, final, _ = self._target(value, self.pose, progress)
+        if math.dist(self.pose, target) <= p.stopping_m and not final and self._blend_corner(value, progress):
+            target, final, _ = self._target(value, self.pose, progress)
+        self.corner_factor = self._corner_factor(value, progress, target, final)
         if math.dist(self.pose, target) <= p.stopping_m:
             violated = self.margin if self.margin < -tolerance else None
             if not final: return self._brake(now, 'corner', f'stopping at corner {self.segment + 1}')
@@ -792,6 +818,110 @@ class DynamicExecutor:
             self._send(now, value, [anchor[0], anchor[1], anchor[2]])  # hold on the route while turning
         return True
 
+    def _tracking_allowance(self, value, progress):
+        """Cross-track allowance here: ``tracking_m``, narrowed by the segment's published clearance.
+
+        The projected segment and the one being flown toward both count, so
+        the allowance cannot widen across a corner before the vehicle is past it.
+        """
+        p, points = self.profile, value['points']
+        if len(points) < 2: return p.tracking_m
+        lateral = value['clearance'].get('lateral_m') or []
+        segments = {progress[0], max(self.segment, progress[0])}
+        if max(segments) >= len(lateral): return 0.
+        return min(p.tracking_allowance_m(lateral[i]) for i in segments)
+
+    def _speed_cap(self):
+        """Fly slower where obstacle clearance narrows the tracking allowance, and into shallow corners."""
+        p = self.profile
+        fraction = self.corner_factor
+        if self.tracking_allowance is not None and p.tracking_m:
+            fraction = min(fraction, self.tracking_allowance / p.tracking_m)
+        return p.speed_mps * max(NARROW_SPEED_FRACTION, min(1., fraction))
+
+    def _cross_limit(self, cross, allowance):
+        """The cross-track at which to brake.
+
+        A stop can leave the vehicle further off the route than the allowance
+        (a corner stop overshoots), and braking again before it moves would hold
+        it there for good. dnav checked the departure from that pose, so the
+        vehicle may keep the offset it moved off with, but not grow it, until it
+        is back within the allowance.
+        """
+        if self.departure_cross == math.inf: self.departure_cross = cross
+        if self.departure_cross is not None and cross <= allowance: self.departure_cross = None
+        if self.departure_cross is None: return allowance
+        return max(allowance, self.departure_cross + DEPARTURE_SLACK_M)
+
+    def _take_handoff(self, value):
+        """Take up a replacement while moving, when dnav offered it from the route being flown.
+
+        dway checks the offer itself: the vehicle is on the new route within
+        ``handoff_m`` and its tracking allowance, the new permission leaves
+        stopping distance, and the new route heads within ``turn_tolerance_deg``
+        of the segment being flown. Route directions, as dnav compares them: the
+        vehicle's own heading lags a corner just flown through, and travel
+        heading never turns in place while moving.
+        """
+        p, handoff = self.profile, value.get('handoff') or {}
+        points, clearance = value['points'], value['clearance']
+        if (p.handoff_m <= 0 or self.pose is None or len(points) < 2
+                or handoff.get('from_revision') != self.active['geometry_revision']):
+            return False
+        progress, cross = project_progress(points, self.pose, handoff['start'])
+        previous = self.segment
+        self.segment = progress[0]
+        allowance = self._tracking_allowance(value, progress)
+        remaining = distance_along(points, progress, clearance['end'])
+        current = self.active['points']
+        flown = min(max(previous, (self.progress or [0])[0]), len(current) - 2)
+        facing = flown < 0 or _turn_deg(current[flown], current[flown + 1],
+                                        points[progress[0]], points[progress[0] + 1]) <= p.turn_tolerance_deg
+        if cross > min(p.handoff_m, allowance) or remaining < p.stopping_m or not facing:
+            self.segment = previous
+            return False
+        self._record('execution.handoff', dict(from_revision=self.active['geometry_revision'],
+                                               to_revision=value['geometry_revision'], pose=self.pose,
+                                               cross_track_m=cross, progress=list(progress)))
+        self.active, self.progress = value, list(progress)
+        self.reason = f"took up route revision {value['geometry_revision']} while moving"
+        return True
+
+    @staticmethod
+    def _turn_deg(points, vertex):
+        a, v, b = points[vertex - 1], points[vertex], points[vertex + 1]
+        first, second = math.atan2(v[1]-a[1], v[0]-a[0]), math.atan2(b[1]-v[1], b[0]-v[0])
+        return abs((math.degrees(second - first) + 180.) % 360. - 180.)
+
+    def _blendable(self, value, segment):
+        """The turn at the vertex ending ``segment``, when dnav cleared flying through it; else None."""
+        p, corners = self.profile, value['clearance'].get('corners') or []
+        if p.corner_blend_deg <= 0 or segment >= len(corners) or not corners[segment]: return None
+        angle = self._turn_deg(value['points'], segment + 1)
+        return angle if angle <= p.corner_blend_deg else None
+
+    def _blend_corner(self, value, progress):
+        """Fly through the corner ahead instead of stopping at it. True when the target advanced."""
+        p, points, clearance = self.profile, value['points'], value['clearance']
+        segment = max(self.segment, progress[0])
+        angle = self._blendable(value, segment)
+        if angle is None or distance_along(points, (segment + 1, 0.), clearance['end']) <= p.stopping_m:
+            return False
+        previous = self.segment
+        self.segment = segment + 1
+        # Cutting the corner puts the vehicle off the next segment by up to this much.
+        if p.stopping_m * math.sin(math.radians(angle)) >= self._tracking_allowance(value, (segment + 1, 0.)):
+            self.segment = previous
+            return False
+        self._record('execution.corner_blend', dict(vertex=segment + 1, turn_deg=angle, pose=self.pose))
+        return True
+
+    def _corner_factor(self, value, progress, target, final):
+        """Slow toward a corner that will be flown through: ``cos(turn)``, within 1 m of it."""
+        if final or math.dist(self.pose, target) > 1.: return 1.
+        angle = self._blendable(value, max(self.segment, progress[0]))
+        return 1. if angle is None else max(NARROW_SPEED_FRACTION, math.cos(math.radians(angle)))
+
     def _send(self, now, value, target):
         order = self._position_target(target)
         try: result = self.link.send_position_target(order)
@@ -809,16 +939,15 @@ class DynamicExecutor:
         if not result.accepted: self._fail(now, f'position target rejected: {result.reason}')
 
     def _position_target(self, target):
-        p = self.profile
         frames = ()
         try: frames = self.link.capabilities().frames
         except Exception: pass
         x, y, z = target
         if 'map' in frames or not frames:
-            return PositionTarget(frame='map', x=x, y=y, z=z, heading_deg=self.heading_deg, max_speed_mps=p.speed_mps)
+            return PositionTarget(frame='map', x=x, y=y, z=z, heading_deg=self.heading_deg, max_speed_mps=self._speed_cap())
         north, east, down = ProviderFrame.from_context(self.snapshot).map_to_ned(x, y, z)
         return PositionTarget(frame='local_ned', north_m=north, east_m=east, down_m=down,
-                              heading_deg=self.heading_deg, max_speed_mps=p.speed_mps)
+                              heading_deg=self.heading_deg, max_speed_mps=self._speed_cap())
 
     def _step_braking(self, now):
         p, state = self.profile, self.vehicle
@@ -888,26 +1017,21 @@ class DynamicExecutor:
             if src.active: src.release('stopped')
             return self._transition('HOLDING', self._holding_reason('goal'), 'goal')
         if self.hold_kind == 'corner' and not src.active:
-            # The route was released while stopped here; a validated route from
-            # this pose continues exactly like a planned replacement.
             self._transition('HOLDING', self._holding_reason('replacement'), 'replacement')
         if self.hold_kind == 'corner':
             if not (src.state == 'READY' and src.active
                     and src.value['geometry_revision'] == self.active['geometry_revision']):
                 return
-            corner = self.active['points'][self.segment + 1]
-            if math.dist(self.pose, corner) > p.join_m:
-                # Too far from the corner to continue segment by segment: the
-                # route cannot be resumed as it is, so release it and wait for
-                # the route dnav plans from this stopped pose.
-                if src.active: src.release('stopped')
-                return self._transition('HOLDING', f'stopped {math.dist(self.pose, corner):.2f} m from the corner, '
-                                                   f'beyond the {p.join_m:g} m join allowance; Resume after validation',
-                                        'tracking')
+            departure = src.value['clearance'].get('corner_departure') or {}
+            if (departure.get('segment') != self.segment + 1 or not departure.get('eligible')
+                    or departure.get('executor_session') != self.session
+                    or math.dist(self.pose, departure.get('pose', self.pose)) > 0.01):
+                self.reason = 'waiting for clearance from the actual corner stop'
+                return
             self.segment += 1
             self.active = src.value
             self._stream.reset(now)
-            return self._transition('EXECUTING', f'continuing along segment {self.segment}')
+            return self._transition('EXECUTING', f'continuing along validated segment {self.segment}')
         if self.hold_kind == 'replacement' and src.state == 'READY' and not src.active and not src.start_required:
             src.activate()
             self._activate(now, src.value)
@@ -938,20 +1062,25 @@ class DynamicExecutor:
         pose = None
         try: pose = validate_pose(self.snapshot.get('pose'), self.snapshot)
         except (ValueError, KeyError, TypeError): pose = None
+        allowance = (self.tracking_allowance if active and self.tracking_allowance is not None
+                     else p.tracking_m)
+        speed_cap = self._speed_cap() if active else p.speed_mps
+        route = active or src.value or {}
+        route_mode, substitute_goal = route.get('route_mode', 'planned'), route.get('substitute_goal')
         self.sequence += 1
         self.status = dict(
             schema=STATUS_SCHEMA, vehicle_id=self.id, session=self.session, sequence=self.sequence,
             time_s=float(self.snapshot.get('time_s', now)), stop_generation=src.handled_stop,
             planner_session=src.session, planner=src.planner, state=self.state, reason=self.reason or self.state,
-            hold_kind=self.hold_kind, dry_run=False, owns_control=self.owns_control, lease_state=self.lease_state,
+            hold_kind=self.hold_kind, segment=self.segment, dry_run=False, owns_control=self.owns_control, lease_state=self.lease_state,
             goal=self.snapshot.get('goal'), authorized_goal=None if self.authorized_goal is None else list(self.authorized_goal[:3]),
             start_required=bool(src.start_required or self.hold_kind in START_REQUIRED),
             disposition=src.disposition,
             geometry_revision=active['geometry_revision'] if active else src.revision,
             navigation_sequence=src.sequence, progress=list(self.progress) if active and self.progress else None,
-            pose=pose, vehicle_pose=self.pose, speed_mps=self.speed, speed_cap_mps=p.speed_mps,
+            pose=pose, vehicle_pose=self.pose, speed_mps=self.speed, speed_cap_mps=speed_cap,
             commanded_target=self.target,
-            tracking_error_m=self.cross_track if active else None, tracking_allowance_m=p.tracking_m,
+            tracking_error_m=self.cross_track if active else None, tracking_allowance_m=allowance,
             remaining_permitted_m=self.remaining if active else None,
             stopping_margin_m=self.margin if active else None,
             validity_remaining_s=self.validity if active else None,
@@ -962,7 +1091,8 @@ class DynamicExecutor:
             controls=dict(self.control_results), unavailable=unavailable, auto=self.auto,
             launch_phase=self.launch_phase, waiting_for=self.missing_roles(), permission=p.permission,
             bus_error=self.bus_error, coverage_request=self.coverage_request, profile=p.digest, profile_calibrated=p.calibrated,
-            recording_error=self.report_error, vehicle_fault=self.vehicle_fault)
+            recording_error=self.report_error, vehicle_fault=self.vehicle_fault,
+            route_mode=route_mode, substitute_goal=substitute_goal)
         try: self.output.write(self.status)
         except (ValueError, RuntimeError) as exc: self.report_error = f'status not published: {exc}'
         if self._samples.due(now):
@@ -970,14 +1100,14 @@ class DynamicExecutor:
             # The display timeline shares the sample cadence, so its length is
             # bounded by HISTORY_S * stream_hz however fast the loop polls.
             t = self.status['time_s']
-            self.history.append((t, self.speed, p.speed_mps, self.cross_track if active else None, p.tracking_m,
+            self.history.append((t, self.speed, speed_cap, self.cross_track if active else None, allowance,
                                  self.margin if active else None, self.state))
             while self.history and (t - self.history[0][0] > HISTORY_S or t < self.history[0][0]):
                 self.history.popleft()
             self._record('execution.sample', dict(
                 state=self.state, hold_kind=self.hold_kind, pose=self.pose, speed_mps=self.speed,
-                speed_cap_mps=p.speed_mps, cross_track_m=self.cross_track if active else None,
-                tracking_allowance_m=p.tracking_m, remaining_permitted_m=self.remaining if active else None,
+                speed_cap_mps=speed_cap, cross_track_m=self.cross_track if active else None,
+                tracking_allowance_m=allowance, remaining_permitted_m=self.remaining if active else None,
                 stopping_margin_m=self.margin if active else None,
                 validity_remaining_s=self.validity if active else None,
                 geometry_revision=active['geometry_revision'] if active else None,
@@ -986,6 +1116,7 @@ class DynamicExecutor:
                 mode=self.vehicle.mode if self.vehicle else None, owns_control=self.owns_control,
                 heading_deg=None if self.vehicle is None else self.vehicle.heading_deg,
                 commanded_heading_deg=self.heading_deg, turning=self.turning,
+                route_mode=route_mode, substitute_goal=substitute_goal,
                 epoch=[self.snapshot.get('provider_id'), self.snapshot.get('localization_epoch'),
                        self.snapshot.get('clock_epoch')]))
         self._view = self._make_view()

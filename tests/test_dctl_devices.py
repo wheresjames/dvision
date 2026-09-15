@@ -243,6 +243,50 @@ def stereo_controller(monkeypatch, sensors, *extra):
     return ctl
 
 
+def test_control_panel_observes_then_requires_explicit_handoff(monkeypatch):
+    if not mapped_root_available():
+        assert not parse_args(['--id', 'headless']).take_control
+        return
+    from types import SimpleNamespace
+    sensors = manager(numeric_profile(), vehicle=_Vehicle())
+    ctl = stereo_controller(monkeypatch, sensors)
+    values, sent = {'control.owner': ''}, []
+    status, command = ctl.status, ctl.command
+    ctl.status = SimpleNamespace(getAll=lambda: values)
+    ctl.command = SimpleNamespace(write=lambda raw: sent.append(json.loads(raw)) or True)
+    try:
+        ctl._maintain_control()
+        assert ctl.control_status.get() == 'Observing — available'
+        assert str(ctl.release_control_button['state']) == 'disabled'
+        assert not sent
+        values['control.owner'] = 'dway-area1'
+        ctl._maintain_control()
+        assert ctl.control_status.get() == 'Observing — controlled by dway-area1'
+        assert str(ctl.take_control_button['state']) == 'disabled'
+        ctl.send_command('land')
+        assert not sent
+        values['control.owner'] = ''
+        ctl._maintain_control()
+        ctl.take_control_button.invoke()
+        assert [p['type'] for p in sent] == ['acquire_control']
+        # Sending a request is not ownership: wait for vehicle confirmation.
+        ctl.send_command('velocity', forward_mps=1.)
+        assert len(sent) == 1
+        values['control.owner'] = ctl.control_source
+        ctl._maintain_control()
+        assert ctl.control_status.get() == 'Manual control active'
+        assert str(ctl.release_control_button['state']) == 'normal'
+        ctl.release_control_button.invoke()
+        assert sent[-1]['type'] == 'release_control'
+        values['control.owner'] = ''
+        count = len(sent)
+        ctl._maintain_control()
+        assert len(sent) == count and ctl.control_status.get() == 'Observing — available'
+    finally:
+        ctl.status, ctl.command = status, command
+        ctl.close(); sensors.close()
+
+
 def test_flight_source_offers_the_stereo_pair(monkeypatch):
     from dcmn.device_view import ImageRenderer, StereoRenderer, StereoStream
     profile = DroneProfile.load(Path('assets/drone_profiles/stereo-nav-and-proximity.json'))
@@ -283,6 +327,9 @@ def test_popped_out_pane_cannot_fly_the_drone(monkeypatch):
         return
     sensors = manager(numeric_profile(), vehicle=_Vehicle())
     ctl = stereo_controller(monkeypatch, sensors, '--devices', 'beam')
+    # Exercise focus isolation while manual control is enabled; passive mode
+    # would otherwise mask an incorrectly bound flight shortcut.
+    monkeypatch.setattr(ctl, '_owns_control', lambda: True)
     try:
         ctl.notebook.select(ctl.devices_view.page)
         sensors.tick(DroneState(0, 0, 1), .1)

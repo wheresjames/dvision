@@ -9,7 +9,7 @@ simulator's world/raycast modules. A dalg or dnav that passes under it did not
 read privileged knowledge, whatever its helpers do internally.
 
 The deterministic provider is exempt: it is the one component allowed to hold
-truth-equivalent state (DV-MAPPING §11).
+truth-equivalent state.
 """
 from __future__ import annotations
 

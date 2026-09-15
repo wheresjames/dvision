@@ -146,7 +146,7 @@ class SensorPublisher:
         self.clock_epoch = uuid.uuid4().int & ((1 << 63) - 1)
         self.generation = 0; self.reset_epoch = 0
         # Pose labelling is the provider's, kept apart from sensor resets: a
-        # sensor restart is not a localization correction (DV-MAPPING §4).
+        # sensor restart is not a localization correction.
         self.localization_epoch = 0; self.pose_valid = True; self.pose_kind = 'ideal'
         self.channels = _Channels(self.pm); self.sequences = {}
         self.profile = None; self.manifest = {}

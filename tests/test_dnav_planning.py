@@ -440,10 +440,8 @@ def test_a_vehicle_stopped_inside_a_margin_is_routed_out_of_it(policy):
     assert build('astar').plan(cost_map(grid, strict), (x, y, 1.5), (5., 10., 1.5), strict).status == R.START_BLOCKED
 
 
-def test_an_obstacle_marked_on_the_vehicles_own_observed_cell_is_escaped(policy):
-    """Seen live: optical-flow triangulation marked the drone's own cell occupied
-    while lidar saw it free. The vehicle is physically there, so the route out
-    is planned and the reason names the source that disagreed."""
+def test_an_obstacle_marked_on_the_vehicles_own_observed_cell_is_rejected(policy):
+    """Occupancy at the start cannot be dismissed as a false sensor reading."""
     grid = swept_room()
     x, y = _margin_start(cost_map(grid, policy))
     col, row = grid.geometry.to_cell(x, y)
@@ -451,5 +449,5 @@ def test_an_obstacle_marked_on_the_vehicles_own_observed_cell_is_escaped(policy)
     occupancy[0, row, col] = 254
     marked = EvidenceGrid(grid.geometry, occupancy, observed, grid.source, grid.revision + 1, grid.sim_time_s)
     plan = build('astar').plan(cost_map(marked, policy), (x, y, 1.5), (5., 10., 1.5), policy)
-    assert plan.status == R.OK, plan.reason
-    assert 'false obstacle' in plan.reason
+    assert plan.status == R.START_BLOCKED, plan.reason
+    assert 'observed occupied' in plan.reason

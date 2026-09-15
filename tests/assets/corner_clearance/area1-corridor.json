@@ -1,0 +1,27 @@
+{
+  "note": "dalg lidar_inverse evidence from reports/area1/20260915-123000-1d464a83 at t=89.8 s: the 3 m top corridor of maze_020 is mapped 2 m wide with phantom cells near the goal",
+  "geometry": {
+    "origin_m": [
+      11.5,
+      -2.5
+    ],
+    "cell_m": 0.5,
+    "width": 80,
+    "height": 100,
+    "layers": 1,
+    "z0_m": 0.0,
+    "dz_m": 3.0
+  },
+  "source": "scan-lidar_inverse",
+  "time_s": 89.76333333328418,
+  "pose": [
+    30.469709876208597,
+    2.8265644497885054,
+    1.5
+  ],
+  "goal": [
+    45.50290603107615,
+    2.50519600036597,
+    1.5
+  ]
+}

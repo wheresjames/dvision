@@ -273,6 +273,12 @@ class SimulationHealth:
              f'{speed["min"]:.2f}x'),
             ("Samples", summary["samples"]),
         )))]
+        # dsim saves the overhead track beside this report before writing it;
+        # figure() leaves the section out when there was no flight to draw.
+        flight = report_html.figure(report_dir / "flight_path.png",
+                                    "Overhead flight path over the truth map.")
+        if flight:
+            blocks.append(report_html.section("Flight path", flight))
         if chart is not None:
             blocks.append(report_html.section(
                 "Timeline", report_html.figure(chart,

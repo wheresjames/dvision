@@ -40,7 +40,7 @@
     ]
   },
   "planning_status": "ok",
-  "profile": "b71fa06f8c09ab478d899de283777bf716b01e3e34a052aaf9da8e83a029a9d1",
+  "profile": "23ffe5fd63e5e96a8e901c14052f26601b66236a4a062100286a83a1d11bcfef",
   "clearance": {
     "eligible": true,
     "reason": "observed interval (synthetic dry-run profile)",
@@ -59,6 +59,9 @@
     "tracking_m": 0.1,
     "calibrated": false,
     "altitude_m": 1.5,
-    "stopping_m": 0.25
+    "stopping_m": 0.25,
+    "lateral_m": [
+      0.35
+    ]
   }
 }

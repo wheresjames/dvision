@@ -11,8 +11,11 @@ Version 1 is deliberately three rules:
 
 * occupancy at or above ``occupied_threshold`` marks an obstacle;
 * obstacles inflate by ``inflation_m`` -- the vehicle's footprint plus its
-  margin -- which is what turns "an obstacle is in this cell" into "stay this
-  far away from it";
+  least margin -- which is what turns "an obstacle is in this cell" into "never
+  come closer than this";
+* a band ``clearance_preference_m`` wide outside that hard margin costs up to
+  ``clearance_cost`` more, rising toward the wall, so routes keep their distance
+  where there is room and centre themselves where there is not;
 * layers combine by **max**, because a cell is as bad as its worst witness.
   Never by sum: summing two sensors' opinions of the same wall counts that wall
   twice, which is the exact mistake publishing evidence instead of cost exists
@@ -28,12 +31,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
 
+from dcmn.clearance import solid_cells
 from dcmn.maps import EvidenceGrid, GridGeometry
 
 SCHEMA = 'dvision2.cost-policy.v1'
@@ -59,7 +63,9 @@ UNOBSERVED_COST = 1.5
 BLOCKED = math.inf
 
 DEFAULT_OCCUPIED_THRESHOLD = 0.5
-DEFAULT_INFLATION_M = 0.6
+DEFAULT_INFLATION_M = 0.35
+DEFAULT_CLEARANCE_PREFERENCE_M = 0.75
+DEFAULT_CLEARANCE_COST = 3.0
 COMBINERS = ('max',)
 
 
@@ -71,6 +77,12 @@ class CostPolicy:
     occupied_threshold: float = DEFAULT_OCCUPIED_THRESHOLD
     inflation_m: float = DEFAULT_INFLATION_M
     combine: str = 'max'
+    body_radius_m: float = 0.0
+    #: Width of the finite-cost band outside the hard margin.
+    clearance_preference_m: float = DEFAULT_CLEARANCE_PREFERENCE_M
+    #: Extra per-cell cost at the hard margin's edge, falling quadratically to
+    #: zero at the band's outer edge. Zero disables the band.
+    clearance_cost: float = DEFAULT_CLEARANCE_COST
     #: A vehicle that stopped inside an obstacle's margin (never inside the
     #: obstacle) may be routed out of it, through that margin only, at a high
     #: cost. Off, such a start is ``start_blocked`` and nothing is planned.
@@ -86,31 +98,31 @@ class CostPolicy:
             raise ValueError('occupied_threshold must be within (0, 1]')
         if self.inflation_m < 0.0 or not math.isfinite(self.inflation_m):
             raise ValueError('inflation_m must be a finite, nonnegative distance')
+        for key in ('body_radius_m', 'clearance_preference_m', 'clearance_cost'):
+            if not math.isfinite(getattr(self, key)) or getattr(self, key) < 0:
+                raise ValueError(f'{key} must be finite and nonnegative')
         if self.combine not in COMBINERS:
             raise ValueError(f'unknown layer combiner {self.combine!r}; '
                              f'this version implements {", ".join(COMBINERS)}')
 
     def inflation_radius_cells(self, cell_m: float) -> float:
-        """The margin as a radius in cells, measured centre to centre.
-
-        Deliberately not rounded up to a whole cell. A cell is inside the
-        margin when its centre is within ``inflation_m`` of an obstacle cell's
-        centre, which is a rule that can be stated exactly; rounding the radius
-        up to the next cell instead turns a 0.6 m margin into a 1.0 m one on a
-        0.5 m grid, and 0.4 m of invented clearance on each side is enough to
-        close a two-metre doorway that a drone of the declared size fits
-        through comfortably. Quantisation still costs something -- an obstacle
-        cell is half a cell wide, so the clearance from the obstacle's face is
-        a little more than the radius -- and that error is in the safe
-        direction without being large enough to seal a gap.
-        """
+        """Distance from an occupied cell's full square, expressed in cells."""
         return self.inflation_m / float(cell_m)
+
+    def for_execution(self, profile):
+        """Record the effective policy so planning, admission and replay agree."""
+        policy = replace(self, inflation_m=max(self.inflation_m, profile.clearance_radius_m),
+                         occupied_threshold=min(self.occupied_threshold, profile.occupied_threshold),
+                         body_radius_m=max(self.body_radius_m, profile.body_radius_m))
+        digest = hashlib.sha256(json.dumps(policy.as_dict(), sort_keys=True).encode()).hexdigest()
+        return replace(policy, digest=digest)
 
     def values(self) -> dict[str, Any]:
         """What the Cost tab lists beside the layers it is drawing."""
         return {'occupied_threshold': self.occupied_threshold,
                 'inflation_m': self.inflation_m, 'combine': self.combine,
-                'escape_margin': self.escape_margin,
+                'body_radius_m': self.body_radius_m, 'clearance_preference_m': self.clearance_preference_m,
+                'clearance_cost': self.clearance_cost, 'escape_margin': self.escape_margin,
                 'free_cost': FREE_COST, 'unobserved_cost': UNOBSERVED_COST}
 
     def as_dict(self) -> dict[str, Any]:
@@ -118,7 +130,8 @@ class CostPolicy:
                 'schema_version': self.schema_version,
                 'occupied_threshold': self.occupied_threshold,
                 'inflation_m': self.inflation_m, 'combine': self.combine,
-                'escape_margin': self.escape_margin}
+                'body_radius_m': self.body_radius_m, 'clearance_preference_m': self.clearance_preference_m,
+                'clearance_cost': self.clearance_cost, 'escape_margin': self.escape_margin}
 
 
 def policy_dir(root: Path) -> Path:
@@ -145,6 +158,9 @@ def parse_policy(raw: bytes, *, path: Path | None = None) -> CostPolicy:
         occupied_threshold=value.get('occupied_threshold', DEFAULT_OCCUPIED_THRESHOLD),
         inflation_m=value.get('inflation_m', DEFAULT_INFLATION_M),
         combine=str(value.get('combine', 'max')), escape_margin=bool(value.get('escape_margin', True)),
+        body_radius_m=value.get('body_radius_m', 0.0),
+        clearance_preference_m=value.get('clearance_preference_m', DEFAULT_CLEARANCE_PREFERENCE_M),
+        clearance_cost=value.get('clearance_cost', DEFAULT_CLEARANCE_COST),
         schema_version=version,
         digest=hashlib.sha256(raw).hexdigest(), path=path)
 
@@ -174,7 +190,7 @@ def disc_offsets(radius_cells: float) -> list[tuple[int, int]]:
             if dx * dx + dy * dy <= radius * radius + 1e-9]
 
 
-def inflate(mask: np.ndarray, radius_cells: float) -> np.ndarray:
+def inflate(mask: np.ndarray, radius_cells: float, *, full_cells=False) -> np.ndarray:
     """Grow a boolean obstacle mask by a disc of ``radius_cells``.
 
     Shifts and ORs rather than a convolution, because the radius is a couple of
@@ -184,13 +200,41 @@ def inflate(mask: np.ndarray, radius_cells: float) -> np.ndarray:
     if radius_cells <= 0.0 or not mask.any(): return mask.copy()
     height, width = mask.shape
     grown = np.zeros_like(mask)
-    for dx, dy in disc_offsets(radius_cells):
+    offsets = disc_offsets(radius_cells)
+    if full_cells:
+        span = range(-math.ceil(radius_cells + .5), math.ceil(radius_cells + .5) + 1)
+        offsets = [(dx, dy) for dy in span for dx in span
+                   if math.hypot(max(abs(dx)-.5, 0), max(abs(dy)-.5, 0)) <= radius_cells + 1e-9]
+    for dx, dy in offsets:
+        if abs(dx) >= width or abs(dy) >= height: continue
         source_rows = slice(max(0, -dy), height - max(0, dy))
         source_cols = slice(max(0, -dx), width - max(0, dx))
         target_rows = slice(max(0, dy), height - max(0, -dy))
         target_cols = slice(max(0, dx), width - max(0, -dx))
         grown[target_rows, target_cols] |= mask[source_rows, source_cols]
     return grown
+
+
+def obstacle_distance(mask: np.ndarray, limit_cells: float) -> np.ndarray:
+    """Distance in cells from each cell centre to the nearest full obstacle square.
+
+    Zero on an obstacle and infinite beyond ``limit_cells``. The same full-cell
+    rule as ``inflate(..., full_cells=True)``, but keeping the distance so a
+    band outside the hard margin can be graded instead of flat.
+    """
+    mask = np.asarray(mask, bool)
+    height, width = mask.shape
+    distance = np.full(mask.shape, np.inf)
+    if not mask.any(): return distance
+    reach = math.ceil(limit_cells + .5)
+    for dy in range(-reach, reach + 1):
+        for dx in range(-reach, reach + 1):
+            d = math.hypot(max(abs(dx)-.5, 0), max(abs(dy)-.5, 0))
+            if d > limit_cells + 1e-9 or abs(dx) >= width or abs(dy) >= height: continue
+            source = mask[max(0, -dy):height - max(0, dy), max(0, -dx):width - max(0, dx)]
+            target = distance[max(0, dy):height - max(0, -dy), max(0, dx):width - max(0, -dx)]
+            np.minimum(target, np.where(source, d, np.inf), out=target)
+    return distance
 
 
 # -- the cost map ------------------------------------------------------------
@@ -265,8 +309,18 @@ def layer_cost(grid: EvidenceGrid, policy: CostPolicy, *, layer: int = 0) -> Cos
     never = occupancy == 255
     probability = occupancy.astype(np.float32) / 254.0
     obstacles = ~never & (probability >= policy.occupied_threshold)
-    inflated = inflate(obstacles, policy.inflation_radius_cells(grid.geometry.cell_m))
+    hard = policy.inflation_radius_cells(grid.geometry.cell_m)
+    band = policy.clearance_preference_m / grid.geometry.cell_m if policy.clearance_cost else 0.
+    distance = obstacle_distance(solid_cells(obstacles, never), hard + band)
+    inflated = distance <= hard + 1e-9
     cost = np.where(never, np.float32(UNOBSERVED_COST), np.float32(FREE_COST))
+    # A finite band prefers space around walls without forbidding a corridor
+    # that meets the hard clearance. Rising toward the wall, it also centres a
+    # route in a corridor too narrow to leave the band entirely.
+    if band:
+        preferred = ~inflated & (distance < hard + band)
+        cost[preferred] += (policy.clearance_cost *
+                            ((hard + band - distance[preferred]) / band) ** 2).astype(np.float32)
     cost[inflated] = np.float32(BLOCKED)
     return CostLayer(grid.source, obstacles, inflated, never, cost,
                      grid.revision, grid.sim_time_s)

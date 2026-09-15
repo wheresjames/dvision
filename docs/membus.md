@@ -9,8 +9,8 @@ the optional imagery plane (`.imagery` and its per-image rings): their producer
 creates and owns each, because a producer owns its plane and DSIM has
 nothing to say about what a module believes. The imagery plane is a third
 exception in *consumption*: nothing operational reads it at all -- it is
-display decoration for UI hosts and report rendering (see
-[DV-MAPPING.md](../DV-MAPPING.md) §7 and §9).
+display decoration for UI hosts and report rendering, never an algorithm's
+input.
 
 This guide describes the implemented transport, including names, contents,
 readers, writers, buffering, and recovery. [modcom.md](modcom.md) provides the

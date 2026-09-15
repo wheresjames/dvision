@@ -133,8 +133,8 @@ class Window:
         notebook.add(grids, text="Grids")
         self.grids = grids
         # The reference background is opt-in and its every change recorded:
-        # a truth map behind live evidence marks the session as assisted
-        # (DV-MAPPING §7), and the provenance entry is how that marking
+        # a truth map behind live evidence marks the session as assisted,
+        # and the provenance entry is how that marking
         # survives past the window.
         self.reference = ReferenceBackgroundHost(
             grids, run.id, enabled=show_reference, on_change=self._reference_changed)

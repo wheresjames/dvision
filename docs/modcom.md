@@ -52,8 +52,8 @@ or a restarted provider; they are transport facts, not experiment run identity.
 
 `dfgb` is currently **not** a sensor-contract provider: it still creates the
 old `/dvision2.<id>.video` area that this migration removed, so it no longer
-interoperates with the current clients. It is set aside (see `DV-SENSORS.md`)
-and is not part of the acceptance gate for the sensor work.
+interoperates with the current clients. It is set aside and is not part of the
+acceptance gate for the sensor work.
 
 ## Current topology
 
@@ -83,8 +83,7 @@ The areas have deliberately different semantics:
 ## Sensors: registry, channels, and the sample record
 
 This section is the **frozen v1 wire contract** for sensor discovery and
-transport ([`DV-SENSORS.md`](../DV-SENSORS.md) is the design; this section is
-what the code implements). Producers and consumers are implemented against
+transport. Producers and consumers are implemented against
 this text; changing any of it requires a schema-version increment and a
 contract-test update.
 
@@ -610,7 +609,7 @@ The event plane is separate for semantic and mechanical reasons:
 | Vehicle status | `memkv` | vehicle provider | one writer, retained latest values |
 | Module coordination | proposed `memmsg` | each module speaks for itself | broadcast events to every subscriber |
 
-The envelope and vocabulary are normative in `DV-DWAY.md` §2.2.
+The envelope and vocabulary are normative.
 Briefly, modules publish `module.hello`, heartbeats, readiness, and goodbye;
 the navigator publishes `run.prepare` and an absolute simulator-time start;
 required participants reply for that exact run; and all modules publish run

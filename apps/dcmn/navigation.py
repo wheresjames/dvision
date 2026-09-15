@@ -28,6 +28,11 @@ EXECUTION_STATES = ('WAITING', 'READY', 'REJECTED', 'STOP_REQUIRED', 'CLOSED', '
 DRY_RUN_STATES = ('WAITING', 'READY', 'REJECTED', 'STOP_REQUIRED', 'CLOSED')
 CALIBRATION_ENVELOPE = ('stop_distance_m', 'stop_time_s', 'lateral_m', 'cruise_cross_track_m')
 DISPOSITIONS = ('accepted', 'active', 'rejected', 'stopped', 'completed')
+#: What a published route is. ``planned``: dnav's plan to the goal.
+#: ``retained``: the last planned route, kept while replanning fails, as far as
+#: it is still clear. ``substitute``: a route to a reachable point near a goal
+#: that cannot be reached.
+ROUTE_MODES = ('planned', 'retained', 'substitute')
 #: How dnav grants permission. ``evidence``: only swept cells with fresh free
 #: evidence. ``plan``: trust the planned route through unknown space (a
 #: simulation research assumption) and withdraw it only where observed
@@ -69,7 +74,12 @@ class ExecutionProfile:
     speed_mps: float = 0.25
     body_radius_m: float = 0.15
     half_height_m: float = 0.15
+    mapping_margin_m: float = 0.1
     tracking_m: float = 0.1
+    #: The least cross-track allowance a route may leave the executor. Between
+    #: this and ``tracking_m`` the allowance narrows with the obstacle clearance
+    #: dnav publishes per segment, instead of the corridor closing.
+    min_tracking_m: float = 0.1
     stopping_m: float = 0.25
     stopping_s: float = 1.0
     max_age_s: float = 2.0
@@ -91,13 +101,45 @@ class ExecutionProfile:
     calibration: dict | None = None
     permission: str = 'evidence'
     #: Plan permission only: an observed obstacle this close to the remaining
-    #: route withdraws it. Independent of the planner's own inflation.
+    #: route withdraws it. A floor on the shared physical clearance envelope.
     plan_clearance_m: float = 0.3
     #: Executor heading: ``fixed`` holds the heading at Start; ``travel`` faces
     #: each segment, turning in place on the route before flying it.
     heading: str = 'fixed'
     #: With ``travel``: the largest heading error at which a segment may begin.
     turn_tolerance_deg: float = 15.0
+    #: When the goal cannot be reached (an errant obstacle on it, say) and the
+    #: last planned route is used up, dnav routes to the reachable point nearest
+    #: the goal within this radius. 0 disables. Never an arrival.
+    goal_substitute_m: float = 2.0
+    #: The largest offset between the vehicle and a replacement route at which
+    #: dway takes it up while moving. With it, plan permission also shortens a
+    #: route blocked ahead instead of withdrawing it. 0 keeps route changes
+    #: stop-first.
+    handoff_m: float = 0.0
+    #: The largest turn dway flies through without stopping at the vertex, where
+    #: dnav cleared the shortcut. 0 stops at every corner.
+    corner_blend_deg: float = 0.0
+
+    @property
+    def clearance_radius_m(self):
+        """Hard lateral clearance: body, mapping error and the least tracking allowance.
+
+        Braking distance is reserved along the route by dway. The rest of
+        ``tracking_m`` is not reserved here: dway narrows its cross-track
+        allowance where a segment's published clearance is smaller.
+        """
+        return max(self.plan_clearance_m, self.body_radius_m + self.mapping_margin_m +
+                   min(self.min_tracking_m, self.tracking_m))
+
+    @property
+    def lateral_search_m(self):
+        """Obstacle clearance at which a segment grants the full ``tracking_m``."""
+        return max(self.clearance_radius_m, self.body_radius_m + self.mapping_margin_m + self.tracking_m)
+
+    def tracking_allowance_m(self, lateral_m):
+        """Cross-track error a segment with ``lateral_m`` of obstacle clearance tolerates."""
+        return max(0., min(self.tracking_m, lateral_m - self.body_radius_m - self.mapping_margin_m))
 
     def __post_init__(self):
         if self.schema != PROFILE_SCHEMA: raise ValueError('unsupported execution profile')
@@ -113,6 +155,8 @@ class ExecutionProfile:
             if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'invalid execution profile {key}')
         if not 0 <= self.free_threshold < self.occupied_threshold <= 1: raise ValueError('invalid thresholds')
+        if self.handoff_m > self.join_m: raise ValueError('handoff_m cannot exceed join_m')
+        if self.corner_blend_deg > 90: raise ValueError('corner_blend_deg cannot exceed 90')
         if min(self.speed_mps, self.max_age_s, self.stopping_s, self.join_m, self.stream_hz, self.hold_dwell_s,
                self.hold_timeout_s, self.arrival_m, self.max_state_age_s, self.hold_speed_mps) <= 0:
             raise ValueError('speed, age, stop time, join, stream, hold and arrival limits must be positive')
@@ -252,12 +296,32 @@ def validate(value, schema=SCHEMA):
         raise ValueError('route exceeds 256 points or is incomplete')
     if any(not _xyz(p) for p in points): raise ValueError('invalid XYZ point')
     if value.get('planning_status') not in PLANNING_STATUSES: raise ValueError('invalid planning status')
+    mode = value.get('route_mode', 'planned')
+    if mode not in ROUTE_MODES: raise ValueError('invalid route mode')
+    if mode == 'substitute' and not _xyz(value.get('substitute_goal')):
+        raise ValueError('substitute route missing its end point')
     clearance = value.get('clearance')
     if not isinstance(clearance, dict) or type(clearance.get('eligible')) is not bool:
         raise ValueError('missing clearance')
     if not _text(clearance.get('reason')): raise ValueError('missing clearance reason')
+    departure = clearance.get('corner_departure')
+    if departure is not None:
+        if (not isinstance(departure, dict) or type(departure.get('eligible')) is not bool
+                or not _xyz(departure.get('pose')) or not _text(departure.get('executor_session'))
+                or not _integer(departure.get('segment')) or not 0 < departure['segment'] < len(points)-1):
+            raise ValueError('invalid corner departure clearance')
+    handoff = value.get('handoff')
+    if handoff is not None and (not isinstance(handoff, dict) or not _integer(handoff.get('from_revision'))
+                                or not _location(handoff.get('start'))
+                                or handoff['start'][0] >= max(1, len(points)-1)):
+        raise ValueError('invalid route handoff')
+    corners = clearance.get('corners')
+    if corners is not None and (not isinstance(corners, list) or len(corners) != max(0, len(points)-2)
+                                or not all(type(c) is bool for c in corners)):
+        raise ValueError('invalid corner blend clearance')
     if not clearance['eligible']: return value
-    if value['planning_status'] != 'ok' or not points: raise ValueError('eligible route missing')
+    if (value['planning_status'] != 'ok' and mode == 'planned') or not points:
+        raise ValueError('eligible route missing')
     ctx = value['context']
     for key in CONTEXT_KEYS:
         if key not in ctx or ctx[key] is None: raise ValueError(f'missing context {key}')
@@ -277,6 +341,10 @@ def validate(value, schema=SCHEMA):
         if start != (0, 0) or end != (0, 0): raise ValueError('arrival-only interval must be empty')
     elif start >= end:
         raise ValueError('empty or reversed interval')
+    lateral = clearance.get('lateral_m')
+    if len(points) > 1 and (not isinstance(lateral, list) or len(lateral) != len(points)-1
+                            or not all(number(x) and x >= 0 for x in lateral)):
+        raise ValueError('eligible route needs one lateral clearance per segment')
     return value
 
 

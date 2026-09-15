@@ -6,7 +6,7 @@ discovers those grids and derives cost from them under its own policy. Evidence
 rather than cost is the whole point of the split: two sensors' costs cannot be
 combined without double-counting the same wall, while two sensors' beliefs can,
 and the distinction between *never observed* and *observed free* survives only
-in an evidence grid. See DV-DNAV §2.
+in an evidence grid.
 
 This module is the contract, and nothing above it:
 
@@ -416,7 +416,7 @@ class MapPublisher:
         self.closed = False
         self.active = False
         # Every source of one generation shares one frame, localization and
-        # clock epoch, mapping epoch and geometry revision (DV-MAPPING Q10).
+        # clock epoch, mapping epoch and geometry revision.
         self.context = dict(frame_id='local', localization_epoch=0, clock_epoch=0,
                             mapping_epoch=self.generation, geometry_revision=self.generation,
                             clock_domain_id=self.instance)

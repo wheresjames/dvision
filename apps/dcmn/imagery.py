@@ -1,6 +1,6 @@
 """The reference-imagery plane: optional PNG backgrounds, published as evidence-adjacent data.
 
-DV-MAPPING §7 draws one line this module lives on: reference imagery -- a
+One line this module lives on: reference imagery -- a
 rendered simulator map today, a survey or a satellite tile tomorrow -- is
 **display and reporting data, never planning input**. Nothing here is
 converted into occupancy or cost; a consumer that switches, replaces or
@@ -50,7 +50,7 @@ affine, not with a convention nobody wrote down.
 
 **Budgets.** PNG only, at most 16 MiB encoded and 64 MiB decoded per image,
 at most :data:`MAX_IMAGES` images per instance, and a consumer keeps at most
-the current and one staged decoded revision per image (DV-MAPPING §9). These
+the current and one staged decoded revision per image. These
 are accounted apart from the mapping-memory budget: imagery is optional
 decoration, and exhausting it must cost an operator their background, not
 their map.
@@ -100,7 +100,7 @@ IMAGE_SCHEMA = 'dvision2.reference-image.v1'
 #: looking at, and the operational UI is entitled to refuse truth imagery.
 SIMULATION_TRUTH = 'simulation_truth'
 
-#: Budgets from DV-MAPPING §9: PNG only, at most 16 MiB encoded and 64 MiB
+#: Budgets: PNG only, at most 16 MiB encoded and 64 MiB
 #: decoded per image. "Decoded" is the RGBA bytes the consumer caches, four a
 #: pixel, so 64 MiB bounds the decoded plane the same way 16 MiB bounds the
 #: wire. Both are checked against the *declared* dimensions before anything
@@ -368,7 +368,7 @@ class ReferenceImage:
     def matches(self, context: dict[str, Any] | None) -> bool:
         """Whether this revision still describes the frame the vehicle is in.
 
-        The retention rule from DV-MAPPING §7: an image is retained only
+        The retention rule: an image is retained only
         while its reference frame, localization epoch and clock epoch agree
         with the context snapshot; the moment they do not, there is no
         background, because a picture of a *previous* frame behind a plan in

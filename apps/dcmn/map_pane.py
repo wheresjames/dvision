@@ -55,7 +55,7 @@ from dcmn.pacing import MAP_HZ, Paced
 #: What a pane can show of one grid. ``never`` is the observation debugger --
 #: what has been looked at at all -- and ``cost`` is the derived layer a
 #: consumer supplies; the pane never derives cost itself, because the policy
-#: that does belongs to `dnav` (DV-DNAV §4.3). ``blocked`` is the two at once:
+#: that does belongs to `dnav`. ``blocked`` is the two at once:
 #: the evidence as the sensor believes it, with the cells the consumer's cost
 #: forbids tinted over it, so what a margin added is visible against what was
 #: actually seen.
@@ -177,7 +177,7 @@ def render_raster(grid: EvidenceGrid | None, *, mode: str = 'occupancy',
 #: picture behind a pane is *reference*, not evidence: an operator glancing at
 #: a background must never mistake a rendered truth map for something the
 #: vehicle observed, and the label is how the pane keeps that distinction in
-#: front of the person looking at it (DV-MAPPING §7).
+#: front of the person looking at it.
 REFERENCE_LABEL = 'reference only'
 
 #: The default opacity of a reference layer under evidence. Below one, so the
@@ -326,7 +326,7 @@ class Overlay:
 
     Described once and painted by two backends, which is what keeps a report
     image and the screen identical. A route is the ordered waypoints of
-    DV-DNAV §4.2 with their speeds dropped: this pane draws where a plan goes,
+    the plan with their speeds dropped: this pane draws where a plan goes,
     not how fast it goes there.
     """
 
@@ -842,8 +842,8 @@ class ReferenceBackgroundHost:
     frame/epoch check, and produces the :class:`Background` the window's
     panes display. The toggle starts **off** and never defaults on -- a
     truth map behind live evidence is a display decision an operator makes
-    (DV-MAPPING §7: keep truth imagery out of the operational view or label
-    the session), which is why the host reports every change through
+    -- keep truth imagery out of the operational view or label the session --
+    which is why the host reports every change through
     ``on_change`` and the app records it in its session provenance.
 
     The host never invents a background: no imagery plane, no image, or a

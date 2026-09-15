@@ -158,7 +158,7 @@ def test_clearance_stops_inside_segment_and_never_crosses_unknown():
     c = value['clearance']
     assert c['eligible'] and not c['reaches_goal']
     end = permitted_points(value)[-1]
-    assert 2 < end[0] < 5-p.body_radius_m-p.tracking_m-p.stopping_m
+    assert 2 < end[0] < 5-p.clearance_radius_m
     assert end != value['points'][-1]
 
 
@@ -344,6 +344,36 @@ def executor_status(instance, publisher, sequence, state, **fields):
                    planner_session=publisher.session), **fields}
 
 
+@pytest.mark.parametrize('blocked', [False, True])
+def test_corner_departure_is_checked_from_the_stopped_pose(blocked):
+    instance = 'corner-'+uuid.uuid4().hex[:8]
+    run = FakeRun(instance)
+    run.plan([[1.5, 2.3], [1.5, 1.5], [3., 1.5]])
+    run.pose = [1.5, 2.3, 1.5]
+    profile = plan_profile(body_radius_m=.15, tracking_m=0, mapping_margin_m=0,
+                           stopping_m=0, reaction_s=0, plan_clearance_m=.15, join_m=1.)
+    if blocked:
+        occ = np.zeros(grid().geometry.shape, np.uint8)
+        occ[0, 4, 4] = 254  # safe polyline around [2,2.5]², unsafe diagonal departure
+        run.grids = {'scan': grid(occ)}
+    publisher = RoutePublisher(instance, profile)
+    executor = Snapshot(instance, 'execution')
+    try:
+        first = publisher.publish(run, wall=0.)
+        assert first['clearance']['eligible']
+        assert 'corner_departure' not in first['clearance']
+        executor.write(executor_status(instance, publisher, 1, 'HOLDING', geometry_revision=1,
+                                       progress=[0, 0.], segment=0, hold_kind='corner'))
+        value = publisher.publish(run, wall=.1)
+        departure = value['clearance']['corner_departure']
+        assert departure['pose'] == run.pose and departure['segment'] == 1
+        assert departure['eligible'] is not blocked
+        assert value['clearance']['eligible'] is not blocked
+        assert value['stop_generation'] == int(blocked)
+    finally:
+        executor.close(); publisher.close()
+
+
 def test_publisher_pins_executing_geometry_and_waits_for_confirmed_stop():
     instance = 'pin-'+uuid.uuid4().hex[:8]
     run = FakeRun(instance)
@@ -468,7 +498,12 @@ def test_dynamic_cli_flies_only_without_tours_or_world_maps():
 
 def test_route_source_adapters_keep_tours_and_dynamic_apart():
     from dway.route_source import TourRouteSource, route_source
-    tour = next((ROOT/'assets/tours').glob('*.json'), None) or next((ROOT/'assets/tours').iterdir())
+    # Directory order is the filesystem's, not ours: the directory holds
+    # aggregate diagnostics and tours a map could not fit, neither loadable.
+    def loadable(path):
+        payload = json.loads(path.read_text())
+        return 'tours' not in payload and payload.get('status') in (None, 'applicable')
+    tour = next(p for p in sorted((ROOT/'assets/tours').glob('*.json')) if loadable(p))
     static = TourRouteSource(tour)
     assert static.kind == 'tour' and static.tour.waypoints
     dynamic = route_source(SimpleNamespace(mode='dynamic', id='v', planner='dnav'),
@@ -547,7 +582,9 @@ def test_plan_permission_is_withdrawn_where_an_observed_obstacle_blocks_the_rout
     p, pts = plan_profile(), [[2., 2., 1.5], [7., 2., 1.5], [7., 4., 1.5]]
     occ = np.zeros(grid().geometry.shape, np.uint8); occ[0, 4, 10] = 254  # cell centre (5.25, 2.25)
     c = Clearance(p).check(pts, pts[0], {'scan': grid(occ)}, 10.)
-    assert not c['eligible'] and 'blocked' in c['reason'] and 2. < c['blocked_at_m'] < 3.5
+    # The cell's face is 3 m ahead; withdrawal lands one check step before it
+    # comes within the hard clearance radius.
+    assert not c['eligible'] and 'blocked' in c['reason'] and 2. < c['blocked_at_m'] <= 3. - p.clearance_radius_m
     # Behind the vehicle it no longer matters: the remaining route is clear.
     assert Clearance(p).check(pts, [7., 2., 1.5], {'scan': grid(occ)}, 10., start=(1, 0.))['eligible']
     # Outside the evidence grid is unknown space, which plan permission trusts.

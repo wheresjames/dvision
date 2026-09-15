@@ -17,7 +17,7 @@ PROFILE=ROOT/'assets/execution_profiles/dry-run.json'
 
 
 @pytest.mark.parametrize('real_simulator',[False,True])
-def test_phase1_process_chain(tmp_path,real_simulator):
+def test_dynamic_route_process_chain(tmp_path,real_simulator):
     processes=[]
     logs=[]
     def start(args,env=None):
@@ -36,7 +36,7 @@ def test_phase1_process_chain(tmp_path,real_simulator):
                 algorithm='ground-plane-baseline'
                 goal='5.5,1.5'
             else:
-                instance='phase1-'+uuid.uuid4().hex[:8]
+                instance='nav-chain-'+uuid.uuid4().hex[:8]
                 report=tmp_path/'run'
                 algorithm='lidar-baseline'
                 goal='8,2'

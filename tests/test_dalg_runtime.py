@@ -1,4 +1,4 @@
-"""dalg as a continuous, truth-independent evidence producer (DV-MAPPING Phase 1).
+"""dalg as a continuous, truth-independent evidence producer.
 
 Everything here runs against the deterministic fixture provider: a real session
 context, real sensor plane and real module bus, and no simulator, world file,

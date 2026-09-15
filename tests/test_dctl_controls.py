@@ -1,9 +1,11 @@
 """Tests for dctl manual control mappings."""
 
 import pytest
+from types import SimpleNamespace
 
 from dctl.dctl import (
     DroneController, JoystickManager, _MANUAL_YAW_RATE_DPS, _manual_yaw_rate,
+    parse_args,
 )
 
 
@@ -33,17 +35,19 @@ def _controller(owner: str, *, released: bool = False,
     controller.control_source = "dctl-test"
     controller._last_heartbeat = 0.0
     controller._control_released = released
+    controller._startup_take_control = False
+    controller.held = set()
+    controller._held_velocity_active = False
+    controller.log = lambda message: None
     controller.send_command = lambda typ, **fields: sent.append(typ)
     return controller
 
 
-def test_controller_claims_an_unowned_vehicle() -> None:
-    # Only `land` flies without a lease, so a dctl that never acquires one has
-    # every other control refused.
+def test_controller_observes_an_unowned_vehicle_by_default() -> None:
     sent: list[str] = []
     _controller("", sent=sent)._maintain_control()
 
-    assert sent == ["acquire_control"]
+    assert sent == []
 
 
 def test_controller_does_not_reclaim_after_release() -> None:
@@ -58,6 +62,90 @@ def test_controller_does_not_contend_with_another_owner() -> None:
     _controller("dway-test", sent=sent)._maintain_control()
 
     assert sent == []
+
+
+def test_cli_defaults_to_observer_and_supports_explicit_acquisition():
+    assert not parse_args(['--id', 'area1']).take_control
+    assert parse_args(['--id', 'area1', '--take-control']).take_control
+
+
+@pytest.mark.parametrize('owner', ['', 'dway-test'])
+def test_startup_acquisition_is_attempted_only_once(owner):
+    sent = []
+    controller = _controller(owner, released=True, sent=sent)
+    controller._startup_take_control = True
+    controller._maintain_control()
+    assert sent == ([] if owner else ['acquire_control'])
+    assert not controller._startup_take_control
+    # A busy owner's later departure (or a failed acquisition) must not turn
+    # this observer into a competing controller.
+    controller.status.getAll = lambda: {'control.owner': ''}
+    for _ in range(3): controller._maintain_control()
+    assert sent == ([] if owner else ['acquire_control'])
+
+
+def test_startup_waits_for_status_but_release_cancels_the_request():
+    sent = []
+    controller = _controller('', released=True, sent=sent)
+    controller._startup_take_control = True
+    controller.status.getAll = lambda: {}
+    controller._maintain_control()
+    assert controller._startup_take_control and not sent
+    controller.release_control()
+    controller.status.getAll = lambda: {'control.owner': ''}
+    controller._maintain_control()
+    assert not sent and not controller._startup_take_control
+
+
+def test_release_stops_renewal_immediately_even_with_stale_owner_status():
+    sent = []
+    controller = _controller('dctl-test', sent=sent)
+    controller.held.add('w')
+    controller.release_control()
+    controller._maintain_control()
+    assert sent == ['release_control']
+    assert not controller._owns_control() and not controller.held
+    controller.status.getAll = lambda: {'control.owner': ''}
+    controller.take_control()
+    assert sent == ['release_control', 'acquire_control']
+
+
+def test_lost_lease_does_not_trigger_reacquisition():
+    sent = []
+    controller = _controller('dctl-test', sent=sent)
+    controller.status.getAll = lambda: {'control.owner': ''}
+    controller._maintain_control()
+    assert not sent and not controller._owns_control()
+
+
+@pytest.mark.parametrize('command', ['velocity', 'zero', 'land', 'takeoff', 'arm', 'heartbeat'])
+def test_observer_manual_commands_never_reach_the_wire(command):
+    sent = []
+    controller = _controller('dway-test', released=True, sent=sent)
+    controller.command = SimpleNamespace(write=lambda payload: sent.append(payload) or True)
+    DroneController.send_command(controller, command)
+    assert not sent
+
+
+def test_owned_manual_command_reaches_the_wire():
+    sent = []
+    controller = _controller('dctl-test', sent=sent)
+    controller.control_lease = 'test-lease'
+    controller.command = SimpleNamespace(write=lambda payload: sent.append(payload) or True)
+    DroneController.send_command(controller, 'velocity', forward_mps=1.)
+    assert len(sent) == 1
+
+
+def test_observer_ignores_keyboard_and_joystick_without_queuing_motion():
+    sent = []
+    controller = _controller('', released=True, sent=sent)
+    controller.key_down(SimpleNamespace(keysym='w', widget=None))
+    assert not controller.held
+    # No joystick polling or command dispatch is needed while observing.
+    controller.send_held_velocity(force=True)
+    controller._handle_joy_buttons()
+    controller.key_up(SimpleNamespace(keysym='w'))
+    assert not sent and not controller._held_velocity_active
 
 
 def test_controller_heartbeats_only_its_own_lease(monkeypatch) -> None:

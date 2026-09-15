@@ -130,7 +130,7 @@ def _angular_rate(before, now, dt):
 
     The skew-symmetric part of ``before^T · now`` is the rotation between them
     to first order, and the axis it encodes has to be read with the public
-    frame's own handedness -- which is not uniform. ``DV-SENSORS.md`` picks
+    frame's own handedness -- which is not uniform. The frame conventions pick
     the roll and pitch matrices so that a positive roll drops the right wing
     and a positive pitch raises the nose, which makes those two rotations
     left-handed about +X and +Y, while positive yaw turning right is the

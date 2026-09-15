@@ -55,8 +55,8 @@ def _bare_tk_calls(path: Path) -> list[int]:
 #: The device-browser tests need a *mapped* toplevel, which ``hidden_root()``
 #: cannot give them: freeze selects panes by ``winfo_ismapped()``, pop-out
 #: exercises real window-manager geometry, and synthetic key events are
-#: delivered to the toplevel holding keyboard focus. DV-DCTL §11 states their
-#: pattern: build ``Tk`` only when a display is present **and** the operator
+#: delivered to the toplevel holding keyboard focus. Their pattern: build
+#: ``Tk`` only when a display is present **and** the operator
 #: opted in with ``DVISION2_GUI_TESTS``, and fall back to the pure half of
 #: each assertion otherwise.
 MAPPED_ROOT_MODULES = frozenset({
@@ -69,7 +69,7 @@ MAPPED_ROOT_MODULES = frozenset({
 def test_no_test_module_builds_its_own_tk_root(path: Path) -> None:
     """``Tk()`` maps a viewable window; ``hidden_root()`` is the way in."""
     if path.name in MAPPED_ROOT_MODULES:
-        pytest.skip("needs a mapped root; see DV-DCTL §11")
+        pytest.skip("needs a mapped root; see the pattern in dtest/tkfixture.py")
     lines = _bare_tk_calls(path)
     assert lines == [], (
         f"{path.name} calls Tk() at line(s) {lines}; use "

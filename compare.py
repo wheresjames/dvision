@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare historical, scored DALG summaries offline; no discovery or database.
 
-dalg no longer scores anything (DV-MAPPING): current summaries are truth-free
+dalg no longer scores anything: current summaries are truth-free
 and their numbers live in the dalg archive for a later offline evaluator. This
 tool still reads the historical schema-1 summaries that carried scores.
 """

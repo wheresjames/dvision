@@ -116,6 +116,6 @@ def _measured_peak(camera_algorithms, side):
 @pytest.mark.parametrize('cameras,side', [(('ground_plane',), 40.), (('ground_plane',), 120.),
     (('ground_plane', 'optical_flow_triangulation', 'feature_triangulation', 'sgbm', 'plane_sweep'), 60.)])
 def test_the_admission_estimate_covers_the_measured_peak(cameras, side):
-    """Default camera/lidar and a larger multi-source configuration (DV-MAPPING §9)."""
+    """Default camera/lidar and a larger multi-source configuration."""
     peak, geometry, sources = _measured_peak(cameras, side)
     assert MappingConfig.estimate(geometry, sources) >= peak, (peak, MappingConfig.estimate(geometry, sources))

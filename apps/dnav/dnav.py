@@ -138,8 +138,8 @@ class PlanTab:
         parent.rowconfigure(0, weight=1); parent.columnconfigure(0, weight=1)
         page.columnconfigure(0, weight=1); page.rowconfigure(1, weight=1)
         # The reference background is opt-in and its every change recorded:
-        # a truth map behind live evidence marks the session as assisted
-        # (DV-MAPPING §7), and the provenance entry is how that marking
+        # a truth map behind live evidence marks the session as assisted,
+        # and the provenance entry is how that marking
         # survives past the window. One host serves both map tabs.
         self.reference = ReferenceBackgroundHost(
             page, run.id, enabled=show_reference, on_change=self._reference_changed)

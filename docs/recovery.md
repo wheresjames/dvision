@@ -1,7 +1,7 @@
 # Crash recovery and module rejoin
 
 This is the target protocol contract for new communication interfaces and the
-sensor migration in [DV-SENSORS.md](../DV-SENSORS.md). It does not claim that
+sensor migration. It does not claim that
 current modules implement automatic recovery. Existing transport is described
 in [modcom.md](modcom.md); clock behavior is described in [clock.md](clock.md).
 

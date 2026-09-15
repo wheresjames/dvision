@@ -2,7 +2,7 @@
 
 The evidence images are the pane's own rendering: when the operator displayed
 a reference background, the report composes the exact same revision under the
-never-observed cells (DV-MAPPING §7), and the run archives those bytes beside
+never-observed cells, and the run archives those bytes beside
 the record, referenced by checksum.
 """
 import json

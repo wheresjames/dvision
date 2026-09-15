@@ -26,5 +26,7 @@
   "max_wind_mps": 0.0,
   "max_telemetry_latency_ms": 50.0,
   "heading": "travel",
-  "turn_tolerance_deg": 15.0
+  "turn_tolerance_deg": 15.0,
+  "handoff_m": 0.5,
+  "corner_blend_deg": 65.0
 }

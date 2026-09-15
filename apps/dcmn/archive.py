@@ -23,7 +23,7 @@ the grid's metadata and exact occupancy/timestamp bytes); every index reference
 also names the chunk holding it. Chunks commit every ``commit_s`` wall seconds
 or ``chunk_bytes`` of payload, whichever comes first.
 
-A reference image displayed behind a report (DV-MAPPING §7) rides the same
+A reference image displayed behind a report rides the same
 machinery as an *optional* payload: its PNG bytes are stored once under the
 content digest of metadata-plus-bytes, and its declared checksum (sha256 of
 the PNG alone) is verified before it is admitted. Image references live beside
@@ -498,7 +498,7 @@ class ArchiveReader:
 
         Reference images are loaded alongside but never required: a missing
         or corrupt image is a warning, because it costs a background, not a
-        decision (DV-MAPPING §7). Numeric reconstruction succeeds without it.
+        decision. Numeric reconstruction succeeds without it.
         """
         grids = {sid: self.grid(sid, ref) for sid, ref in event.get('grids', {}).items()}
         images = {}
@@ -549,7 +549,7 @@ def displayed_background(reader):
     """The reference image an archived report displayed, with its opacity.
 
     The module's run records a ``report.background`` event when it files a
-    picture over a reference image (DV-MAPPING §7); the newest such event is
+    picture over a reference image; the newest such event is
     the revision that report used, so it wins even when its bytes did not
     survive -- an older revision's picture would misregister, which is worse
     than no background. Absent, unreadable or corrupt imagery comes back as
@@ -574,8 +574,7 @@ def render_attempt(reader, sequence, out_path):
     reference image -- when one was displayed beside the report and its bytes
     committed -- composes under the never-observed cells through the same
     sampler and opacity, so an archived overlay registers exactly as the live
-    one did, and a world re-rendered later could never silently replace it
-    (DV-MAPPING §7).
+    one did, and a world re-rendered later could never silently replace it.
     """
     from dcmn.map_pane import Background, Overlay, snapshot_image
     attempt = reader.reconstruct_attempt(sequence)

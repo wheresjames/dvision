@@ -26,8 +26,8 @@ class Source:
 
 
 #: Camera algorithms that publish evidence, in the order they were converted.
-#: An algorithm joins this tuple once it meets DV-ALGOS §2 -- belief not truth,
-#: every write stamped with its capture time, causal, bounded -- and joining it
+#: An algorithm joins this tuple once it meets the evidence contract -- belief
+#: not truth, every write stamped with its capture time, causal, bounded -- and joining it
 #: is the whole switch: the run, the multi-source path, profile validation and
 #: the profile editor all read it. The controls never join: ``exact_range`` is
 #: built from truth and ``constant`` carries no information.

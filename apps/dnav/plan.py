@@ -6,7 +6,7 @@ control lease and sends no command: it is a route producer. A route through
 never-observed cells is a proposal, not verified clearance; executing one needs
 an executor with a verified horizon, which is outside this module.
 
-Inputs are provider-neutral (DV-MAPPING §4, §9):
+Inputs are provider-neutral:
 
 * **session context** (:mod:`dcmn.context`) -- data clock, frame, localization
   and clock epochs, the labelled pose, the goal and its authority, report root;
@@ -66,6 +66,10 @@ def policy_from_record(value: dict[str, Any]) -> CostPolicy:
     """The exact policy an attempt used, from its recorded fields."""
     return CostPolicy(name=value['name'], occupied_threshold=value['occupied_threshold'],
                       inflation_m=value['inflation_m'], combine=value['combine'],
+                      body_radius_m=value.get('body_radius_m', 0.0),
+                      clearance_preference_m=value.get('clearance_preference_m', 0.5),
+                      clearance_cost=value.get('clearance_cost', 1.0),
+                      escape_margin=value.get('escape_margin', True),
                       schema_version=value['schema_version'], digest=value['digest'])
 
 
@@ -151,6 +155,8 @@ class NavRun:
         self._events: list[dict[str, Any]] = []
         self._reference_display: dict[str, Any] | None = None
         self._last_plan_key: tuple | None = None
+        self._substitute: R.Route | None = None
+        self._substitute_key: tuple | None = None
         self._last_heartbeat = -1e9
         self._hello_sent = False
         self._session_id: str | None = None
@@ -163,6 +169,7 @@ class NavRun:
         from dnav.execution import RoutePublisher
         self.navigation = RoutePublisher(instance_id, ExecutionProfile.load(execution_profile, profile_overrides),
                                          navigation_name)
+        self.policy = self.policy.for_execution(self.navigation.profile)
 
     # -- connections -------------------------------------------------------
 
@@ -215,7 +222,7 @@ class NavRun:
             self.note('session.rollover', new_session=sid)
             # The picture first, then the background it used, then the archive
             # sealed: the report and its record can never disagree about which
-            # reference revision was displayed (DV-MAPPING §7).
+            # reference revision was displayed.
             image = self.snapshot_image()
             self._archive_displayed_background()
             previous.close()
@@ -319,7 +326,7 @@ class NavRun:
     def reload_policy(self) -> CostPolicy:
         """Re-read the policy file; the file stays the source of truth."""
         if self.policy.path is None: return self.policy
-        self.policy = load_policy(str(self.policy.path), self.root)
+        self.policy = load_policy(str(self.policy.path), self.root).for_execution(self.navigation.profile)
         self._last_plan_key = None
         self._trigger = 'policy'
         self.note('policy.reloaded', digest=self.policy.digest[:12], **self.policy.values())
@@ -340,7 +347,7 @@ class NavRun:
         A reference background is optional decoration, but *showing* one is a
         fact about how the session was conducted: an operator who planned over
         a truth map was assisted, and a report that could not say so would
-        make assisted and unassisted sessions comparable (DV-MAPPING §7).
+        make assisted and unassisted sessions comparable.
         Archived as an event and kept in the summary, where the evaluator
         reads it.
         """
@@ -438,13 +445,14 @@ class NavRun:
         trigger = 'forced' if force else self._trigger
         self._trigger = 'evidence_or_pose'
         started_wall = time.time()
-        route = self._compute(sim_now, grids, stale, pose, goal)
+        route = self._compute(sim_now, grids, stale, pose, goal, trigger)
         self._record(route, trigger, pose, goal, grids, stale, sim_now, started_wall)
         self._publish(route)
         return self.route
 
     def _compute(self, sim_now: float, grids: dict[str, Any], stale: frozenset[str],
-                 pose: dict[str, Any] | None, goal: dict[str, Any] | None) -> R.Route:
+                 pose: dict[str, Any] | None, goal: dict[str, Any] | None,
+                 trigger: str) -> R.Route:
         common = dict(planner=self.planner_name, policy_digest=self.policy.digest, sim_time_s=sim_now)
         self.control_route = None
         self.goal = None
@@ -462,7 +470,13 @@ class NavRun:
         position = goal['position']
         self.goal = (position[0], position[1], pose['z_m'] if len(position) < 3 else position[2])
         if not grids or self.cost_map is None:
-            return R.failed(R.STALE_MAP, self._absence_reason(), goal=self.goal, start=start, **common)
+            reason = self._absence_reason()
+            if trigger == 'generation':
+                # The transition withdrew the previous generation's grids, so
+                # the absence is its consequence, not a producer that never
+                # published. Said alone, the generic reason buries the cause.
+                reason = f'evidence generation changed; {reason}'
+            return R.failed(R.STALE_MAP, reason, goal=self.goal, start=start, **common)
         context = self.session.context
         for key in ('frame_id', 'localization_epoch', 'clock_epoch'):
             if context.get(key) != pose.get(key):
@@ -499,6 +513,25 @@ class NavRun:
         self.plans += 1
         self.intake.record()
         return route
+
+    def substitute_route(self) -> R.Route | None:
+        """A route to the reachable point nearest a goal the planner cannot reach.
+
+        None unless the current plan failed as ``goal_unreachable`` or
+        ``no_route`` and the planner and profile support substitutes. Computed
+        at most once per plan key; the publisher decides whether to use it.
+        """
+        radius = self.navigation.profile.goal_substitute_m
+        if (radius <= 0 or self.route.status not in (R.GOAL_UNREACHABLE, R.NO_ROUTE) or self.cost_map is None
+                or self.goal is None or not hasattr(self.planner, 'plan_near')):
+            return None
+        if self._substitute_key is None or self._substitute_key != self._last_plan_key:
+            pose = self._pose()
+            if pose is None: return None
+            start = (pose['x_m'], pose['y_m'], pose['z_m'])
+            self._substitute = self.planner.plan_near(self.cost_map, start, self.goal, self.policy, radius)
+            self._substitute_key = self._last_plan_key
+        return self._substitute
 
     def _absence_reason(self) -> str:
         if not self.session.sources:
@@ -705,7 +738,7 @@ class NavRun:
             # The picture first, then the background it used, then the archive
             # sealed -- the same order as a session rollover, so a report and
             # its record can never disagree about which reference revision was
-            # displayed (DV-MAPPING §7).
+            # displayed.
             image = self.snapshot_image()
             self._archive_displayed_background()
             if self.recorder is not None: self.recorder.close()

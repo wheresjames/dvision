@@ -132,20 +132,75 @@ processes, with the same values:
 
 ```sh
 python3 ./apps/dnav/dnav.py --id area1 --goal 52.444,2.389 --execution-profile sim-target \
-  --profile-set speed_mps=1.5 --profile-set plan_clearance_m=0.2 &
+  --profile-set speed_mps=1.5 --profile-set mapping_margin_m=0.15 &
 python3 ./apps/dway/dway.py --id area1 --mode target --wait-for algorithm \
-  --profile-set speed_mps=1.5 --profile-set plan_clearance_m=0.2
+  --profile-set speed_mps=1.5 --profile-set mapping_margin_m=0.15
 ```
 
 | Dial | Where | Effect |
 | --- | --- | --- |
 | `permission` | profile | `plan` trusts dnav's route through unknown space; `evidence` flies only swept cells with fresh free evidence (the strict mode above) |
-| `plan_clearance_m` | profile | with `plan`, a currently observed obstacle within this distance of the remaining route (cell centre to route) withdraws it; obstacles already around the vehicle, and the strict check's remembered vetoes, are ignored |
+| `plan_clearance_m` | profile | floor on the shared hard clearance radius; cannot reduce the body, mapping and least tracking envelope. Distances are measured to full occupied cell squares |
+| `mapping_margin_m` | profile | additional map/localization uncertainty allowance (default 0.1 m); choose from measured error for the deployment |
+| `tracking_m`, `min_tracking_m` | profile | cross-track allowance with room to spare, and the least allowance a route may leave (default 0.1 m). In between, dway narrows the allowance to the segment's published obstacle clearance and slows down |
 | `heading` | profile | `travel` (the `sim-target` default) turns in place on the route to face each segment, then flies it facing that way, so forward sensors such as the front camera look where the vehicle goes; `fixed` holds the heading from Start. The 2d lidar scans 360 degrees either way |
 | `turn_tolerance_deg` | profile | with `travel`, the heading error at which a segment may begin |
-| `speed_mps`, `tracking_m`, `stopping_m`, `join_m`, `arrival_m`, `max_age_s`, `altitude_m`, `half_height_m`, `hold_*` | profile | following, stopping, arrival, validity window, flight slab and HOLD confirmation |
-| `escape_margin` | cost policy JSON (`--policy`) | default `true`: a vehicle that stopped inside an obstacle's inflation margin is routed out through that margin at high cost. Its own cell counts as free if any source observed it, even if another marks it occupied. Unobserved start cells stay `start_blocked` |
-| `inflation_m`, `occupied_threshold` | cost policy JSON | the planner's obstacle margin and occupancy cutoff |
+| `handoff_m` | profile | largest offset from a replacement route at which dway takes it up while moving (`sim-target` 0.5 m); with it, plan permission shortens a route blocked ahead instead of withdrawing it. 0 keeps route changes stop-first |
+| `corner_blend_deg` | profile | largest turn flown through without stopping, where dnav cleared the shortcut (`sim-target` 65); 0 stops at every corner |
+| `goal_substitute_m` | profile | when the goal cannot be reached and the retained route is used up, route to the reachable point nearest the goal within this radius (default 2 m); 0 disables |
+| `speed_mps`, `stopping_m`, `join_m`, `arrival_m`, `max_age_s`, `altitude_m`, `half_height_m`, `hold_*` | profile | following, stopping, arrival, validity window, flight slab and HOLD confirmation |
+| `escape_margin` | cost policy JSON (`--policy`) | default `true`: a vehicle that stopped inside an obstacle's inflation margin is routed out through that margin at high cost. Every escape segment must preserve or increase distance to each nearby obstacle and keep the body clear. Occupied or unobserved start cells stay `start_blocked` |
+| `inflation_m`, `occupied_threshold` | cost policy JSON | configured planner margin and cutoff; the effective policy uses at least the execution envelope and the stricter occupancy cutoff |
+| `clearance_preference_m`, `clearance_cost` | cost policy JSON | finite-cost band outside the hard margin (default 0.75 m wide), costing up to `clearance_cost` (default 3) more per cell at the hard margin and falling quadratically to nothing at its outer edge. Routes keep their distance where there is room and centre themselves in a corridor too narrow to leave the band |
+
+The shared hard radius is
+`max(plan_clearance_m, body_radius_m + mapping_margin_m + min(min_tracking_m, tracking_m))`.
+For the default `sim-target` profile this is **0.35 m**. The rest of `tracking_m` is not
+reserved as a wall: a 3 m maze corridor that lidar maps 2 m wide, with a stray occupied
+cell beside the goal, closed under the earlier 0.65 m hard radius
+(`reports/area1/20260915-123000-1d464a83`). Instead, every eligible route publishes
+`clearance.lateral_m`, one obstacle clearance per segment over its permitted part
+(capped at `body_radius_m + mapping_margin_m + tracking_m`). dway brakes when cross-track
+exceeds `min(tracking_m, lateral_m - body_radius_m - mapping_margin_m)` and scales its
+speed cap by that allowance over `tracking_m`, down to a quarter of `speed_mps`. With
+`evidence` permission, unknown and stale cells count against `lateral_m` as they do against admission.
+With `plan` permission, never-observed cells touching an observed obstacle count as solid in the
+planner and in admission: the thin margin otherwise admits a route through a wall whose end
+the lidar has not seen yet (the archived Sep 15 wall-end crash, `tests/assets/corner_clearance/area1.json`).
+Braking remains an along-route stopping-distance check in dway; it does not widen
+the footprint against parallel walls. Planner inflation, search edges,
+route shortening and plan admission account for full occupied cells. Evidence admission
+uses a conservative swept rectangle with the same radius. The effective policy, including
+its adjusted margin and digest, is recorded for replay. A route through an existing
+margin must leave it before ending; nearby occupied cells are never erased to admit it.
+
+At a confirmed corner stop, dnav checks the direct segment from the actual stopped pose
+to the next target and publishes `clearance.corner_departure`. Dway waits for permission
+bound to its session, segment and stopped pose before advancing. An unsafe departure
+withdraws permission and triggers the normal stop/replan handshake. Restart both dnav and
+dway after upgrading: the new profile field changes the profile digest.
+
+#### When the goal is blocked
+
+A lidar phantom on or near the goal, or one closing the way far ahead, makes every replan
+`goal_unreachable` or `no_route`. That no longer strands the vehicle
+(`reports/area1/20260915-131438-3a72d536` held 16 m short behind one stray cell). dnav keeps
+publishing, in order:
+
+1. `route_mode: retained`, the last route planned to the goal, permitted up to the
+   last clear point before the first observed obstacle. Getting closer lets the sensors
+   look again, and distant phantoms often clear. A permission ending within `stopping_m`
+   of the vehicle counts as used up.
+2. `route_mode: substitute`, a route to the reachable point nearest the goal within
+   `goal_substitute_m`, with its end in `substitute_goal`. dnav does not re-issue one to
+   a point the vehicle already holds at.
+
+Both carry `fallback_reason` (the planner's). Every replan still aims at the real goal:
+as soon as one succeeds, dnav publishes it as `planned` and advances the stop generation,
+so the vehicle takes it up from a confirmed stop. dway ends a fallback in an ordinary
+`prefix` hold and never reports COMPLETE unless it is within `arrival_m` of the real goal.
+Its status and samples carry `route_mode` and `substitute_goal`; dnav records each change as
+a `navigation.mode` event. Stale evidence or pose, frame changes and coverage gaps get no fallback.
 
 `sim-target` is uncalibrated: its limits are chosen, not measured, and target mode
 accepts that. Dynamic mode still refuses uncalibrated profiles.
@@ -168,17 +223,44 @@ Target mode is wired end to end and measured, not tuned. On the maze_020 command
 maze in 16 stop, replan and resume cycles, then held about 11 m short of the goal.
 The optical-flow source had marked phantom obstacles around the goal, in cells the
 lidar had not observed yet, and dnav reported the goal unreachable. The same source had
-earlier marked the drone's own cell occupied, which the margin escape now handles.
-Both are evidence-quality findings. `--profiles lidar-baseline.json` alone, a different
-`plan_clearance_m`, and planner-side goal handling are the obvious next experiments.
+earlier marked the drone's own cell occupied. Such starts are now rejected rather than
+assumed to be false obstacles. These are evidence-quality findings; a larger margin
+cannot correct occupied evidence at the vehicle's own position.
 `tests/test_target_flight_process.py` (`DVISION_NIGHTLY=1`) runs the four processes and
 checks the wiring: takeoff, automatic Start, targets, progress toward the goal, a
 written report and no world reads. It records arrival without requiring it.
 
-Route changes still happen only from a confirmed stop. While the lidar reveals walls
-that cross the route dnav trusted, each one costs a stop, a replan from that pose and
-an automatic Resume. That churn is a real property of stop-first execution, visible in
-the logs, not a fault to hide.
+With `handoff_m` 0, route changes happen only from a confirmed stop: every wall the lidar
+reveals across the trusted route costs a stop, a replan from that pose and an automatic
+Resume. `reports/area1/20260915-140020-efd23612` stopped 18 times that way, for obstacles
+8-19 m ahead, and 16 more times at corners of 18-52°. With `handoff_m` above 0:
+
+- **Shortened, not withdrawn.** A route blocked ahead stays permitted up to the obstacle,
+  so the vehicle keeps flying. It is withdrawn only when the block is within `stopping_m`
+  or the departure from the pose is blocked.
+- **Handoff while moving.** When the permitted part no longer reaches the goal and the
+  planner has a replacement, dnav publishes it with `handoff: {from_revision, start}` and
+  no stop generation. That happens only if all of these hold: the vehicle is within
+  `handoff_m` of it, it heads within `turn_tolerance_deg` of the segment being flown, it
+  passes the same clearance check from the pose, and it permits more than is left. dway
+  repeats its own checks (offset within `handoff_m` and its tracking allowance, stopping
+  distance left, the new route heading within `turn_tolerance_deg` of the segment being
+  flown) and records `execution.handoff`. It compares route directions, as dnav does,
+  not the vehicle's heading, which lags a corner just flown through. Otherwise
+  it brakes as before. A route switch in the goal fallback stays stop-first.
+- **Corners.** Every eligible route carries `clearance.corners`, one flag per interior
+  vertex. A flag is true when the chord from `stopping_m` before the vertex (or from
+  the start of a shorter leg) to the vertex after it, or to the permitted end where that
+  comes first, is clear, with more than `stopping_m` permitted past the vertex. dway flies through a flagged turn up to
+  `corner_blend_deg` instead of stopping, provided cutting it stays inside the next
+  segment's tracking allowance. It slows to `cos(turn)` of its speed within 1 m of the
+  vertex and records `execution.corner_blend`.
+- **Moving off.** A stop can leave the vehicle further off the route than its tracking
+  allowance, as a corner stop that overshoots does. Braking again before it moves would
+  hold it there for good (`reports/area1/20260915-143229-fb015cb6` alternated corner and
+  tracking stops for 16 s). dnav checked the departure from that pose, so dway lets the
+  vehicle keep the offset it moved off with, plus 0.02 m, until it is back within the
+  allowance.
 
 ## Execution profile and measured limits
 

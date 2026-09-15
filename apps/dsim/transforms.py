@@ -63,9 +63,9 @@ def euler_angles(rotation_matrix):
     """Invert ``R = Rz(yaw) * Ry(pitch) * Rx(roll)`` back to degrees.
 
     Only the composition this module defines is inverted here; an ordinary
-    right-handed Euler helper does not apply, because ``DV-SENSORS.md`` picks
-    the roll and pitch matrices for their sign conventions rather than for a
-    uniform handedness.
+    right-handed Euler helper does not apply, because the frame conventions
+    pick the roll and pitch matrices for their sign conventions rather than
+    for a uniform handedness.
     """
     r = np.asarray(rotation_matrix)
     pitch = math.asin(float(np.clip(r[2, 0], -1.0, 1.0)))

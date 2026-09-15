@@ -12,12 +12,12 @@ Everything it publishes goes through the same interfaces a real provider uses:
 SensorPublisher` for lidar scans and camera frames (with capture-associated
 pose metadata), and the instance module bus.
 
-Test hooks mirror the provider-side events DV-MAPPING §9 distinguishes:
+Test hooks mirror the provider-side events a session distinguishes:
 ``announce_localization_reset``, ``announce_clock_reset``, ``sensor_reset``,
 ``set_sensors`` (a manifest change), ``pose_valid`` (an unavailable pose),
 ``mute`` (a sample gap), ``rollover`` (a new recording session) and ``close``.
 ``publish_reference_image`` / ``withdraw_reference_image`` mirror the optional
-imagery channel (DV-MAPPING §7): a caller-supplied PNG and affine, or a plan
+imagery channel: a caller-supplied PNG and affine, or a plan
 rendering of the scene's own boxes, on the plane no algorithm reads.
 
 As a process::
@@ -276,7 +276,7 @@ class FixtureProvider:
     # -- provider-side events -----------------------------------------------------------
 
     def announce_localization_reset(self):
-        """A provider-announced localization discontinuity (DV-MAPPING Q5)."""
+        """A provider-announced localization discontinuity."""
         self.localization_epoch += 1
 
     def announce_clock_reset(self):

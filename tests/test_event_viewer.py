@@ -158,6 +158,11 @@ def test_event_tab_blocks_flight_shortcuts_and_held_keys():
     controller = DroneController.__new__(DroneController)
     controller.held = set()
     controller.flight_page = 'flight'
+    # Manual control is a gate before the tab and widget gates this test is
+    # about, so hand the bare controller a lease it passes.
+    controller._control_released = False
+    controller.control_source = 'dctl-test'
+    controller.status = SimpleNamespace(getAll=lambda: {'control.owner': 'dctl-test'})
     controller.notebook = SimpleNamespace(select=lambda: 'events')
     key = SimpleNamespace(keysym='w', widget=None)
     controller.key_down(key)

@@ -8,7 +8,7 @@ import numpy as np
 
 from dalg.grid import LogOddsGrid
 from dalg.model import Result
-from dalg.algo.spatial import ray_cells
+from dalg.algo.spatial import fuse_endpoints
 
 
 #: Keyframes the evidence copy keeps as candidate partners. Keyframes are at
@@ -169,13 +169,16 @@ class PlaneSweepAlgorithm:
 
         The sweep hypothesises horizontal radial distance, so the row of a
         pixel only enters here as the ray's pitch -- which is what says whether
-        the sample is a wall or the patch of floor a metre ahead.
+        the sample is a wall or the patch of floor a metre ahead. Fusion then
+        goes through :func:`fuse_endpoints`, because no ground-plane
+        hypothesis fits a vertical face: those pixels overshoot, matching
+        metres beyond the real thing.
         """
         scale = self.config.match_scale
         fx, cx = self.intrinsics.fx_px*scale, self.intrinsics.cx_px*scale
         fy, cy = self.intrinsics.fy_px*scale, self.intrinsics.cy_px*scale
         pitch = math.radians(pose.pitch_deg)
-        (origin_x,), (origin_y,) = self.grid.cells([pose.x_m], [pose.y_m])
+        samples = []
         for py in range(0, depth.shape[0], self.config.stride):
             ray_pitch = pitch - math.atan((py-cy)/fy)
             rise = math.tan(ray_pitch)
@@ -186,12 +189,11 @@ class PlaneSweepAlgorithm:
                 if not self.config.min_height_m <= height <= self.config.max_height_m:
                     continue
                 yaw = math.radians(pose.heading_deg) + math.atan((px-cx)/fx)
-                (end_x,), (end_y,) = self.grid.cells(
-                    [pose.x_m+math.sin(yaw)*value], [pose.y_m-math.cos(yaw)*value])
-                xs, ys = ray_cells(origin_x, origin_y, end_x, end_y)
-                self.grid.update(xs, ys, self.config.free_log_odds)
-                self.grid.update([end_x], [end_y], self.config.occupied_log_odds)
-                self.accepted_points += 1
+                samples.append((value, (pose.x_m+math.sin(yaw)*value,
+                                        pose.y_m-math.cos(yaw)*value)))
+        self.accepted_points += fuse_endpoints(
+            self.grid, pose, samples, free=self.config.free_log_odds,
+            occupied=self.config.occupied_log_odds)
 
     def _process(self, limit=None):
         count = 0

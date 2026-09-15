@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 import numpy as np
 
+from dalg.grid import OCCUPIED_THRESHOLD
+
 
 def bearing(pose, pixel_x: float, intrinsics) -> float:
     return math.radians(pose.heading_deg) + math.atan(
@@ -112,6 +114,46 @@ def fuse_endpoint(grid, pose, point, *, free=-.7, occupied=2.5):
     xs, ys = ray_cells(int(x0), int(y0), int(x1), int(y1))
     grid.update(xs, ys, free)
     grid.update([x1], [y1], occupied)
+
+
+def fuse_endpoints(grid, pose, points, *, free=-.7, occupied=2.5):
+    """Fuse endpoint samples nearest first, dropping occluded ones.
+
+    The floor-reasoning baselines observe the edges of things standing ON the
+    floor -- a boundary edge's image row, a ground-plane depth match -- and a
+    point above the floor projects past the obstacle it belongs to: the floor
+    intersection the projection assumes lies beyond it. A sample whose line
+    of sight crosses a cell the grid already holds as an obstacle is such an
+    overshoot, because the ray would have hit that obstacle first. Fusing it
+    anyway carves free through the real obstacle and paints one where there
+    is nothing, so it is dropped. Samples fuse nearest first, so it is the
+    real obstacle's own floor intersections that decide what its rays
+    overshot past.
+
+    The rule cannot tell a spurious *near* mark from a true one: a floor-tile
+    boundary projects exactly like an obstacle's base, fuses first by being
+    nearer, and the true obstacle behind it then reads as occluded. What
+    stays behind such a mark is unknown, though -- never carved free through
+    a real thing -- which is the safe side of the trade, and the marking
+    itself is the floor-edge assumption this baseline already makes.
+    Returns how many were fused.
+    """
+    (origin_x,), (origin_y,) = grid.cells([pose.x_m], [pose.y_m])
+    blocking = math.log(OCCUPIED_THRESHOLD/(1. - OCCUPIED_THRESHOLD))
+    height, width = grid.log_odds.shape
+    fused = 0
+    for _, point in sorted(points, key=lambda sample: sample[0]):
+        (x1,), (y1,) = grid.cells([point[0]], [point[1]])
+        xs, ys = ray_cells(int(origin_x), int(origin_y), int(x1), int(y1))
+        # A point off the map still clears the part of its ray that is on it;
+        # only those cells carry occupancy to occlude with.
+        on_map = (xs >= 0) & (ys >= 0) & (xs < width) & (ys < height)
+        if on_map.any() and bool((grid.log_odds[ys[on_map], xs[on_map]] >= blocking).any()):
+            continue
+        grid.update(xs, ys, free)
+        grid.update([x1], [y1], occupied)
+        fused += 1
+    return fused
 
 
 def clear_rays(grid, pose, xs, ys, *, free=-.7):

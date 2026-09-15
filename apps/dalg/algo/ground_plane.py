@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from dalg.grid import LogOddsGrid
 from dalg.model import Result
-from dalg.algo.spatial import bearing, fuse_endpoint
+from dalg.algo.spatial import bearing, fuse_endpoints
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,7 @@ class GroundPlaneAlgorithm:
         horizon = int(self.intrinsics.cy_px)
         pose, pitch_deg, camera_height = self._camera(frame)
         camera_height = max(.1, camera_height)
+        points = []
         for px in range(0, gray.shape[1], self.config.column_stride):
             column = gradient[horizon:, px]
             if not len(column): continue
@@ -55,9 +56,10 @@ class GroundPlaneAlgorithm:
             distance = camera_height/math.tan(down)
             if not self.config.min_range_m <= distance <= self.config.max_range_m: continue
             angle = bearing(pose, px, self.intrinsics)
-            point = (pose.x_m+math.sin(angle)*distance,
-                     pose.y_m-math.cos(angle)*distance)
-            fuse_endpoint(self.grid, pose, point); self.points += 1
+            points.append((distance, (pose.x_m+math.sin(angle)*distance,
+                                       pose.y_m-math.cos(angle)*distance)))
+        fuse_endpoints(self.grid, pose, points)
+        self.points += len(points)
         self.frames += 1
 
     def _result(self): return Result(self.grid.result(), {"frames": self.frames, "projected_boundaries": self.points})

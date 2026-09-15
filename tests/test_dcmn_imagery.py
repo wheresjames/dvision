@@ -1,7 +1,7 @@
 """The optional reference-imagery plane, and everything a display does with it.
 
-The contract under test is DV-MAPPING §7 and §9: an image is decoration that
-can never become an input. Registration is exact under the full 2D affine --
+The contract under test is the reference-imagery plane's: an image is
+decoration that can never become an input. Registration is exact under the full 2D affine --
 translate, rotate, reflect, unequal scale -- and clipped, never stretched;
 anything malformed, oversized, stale or lying about its checksum is refused
 with a message or quietly not displayed; and nothing about imagery may change

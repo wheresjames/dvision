@@ -4,8 +4,8 @@ This directory holds one focused document per simulated sensor type. Each
 document records the profile fields, physical model, transport, scheduling,
 limitations, and correctness tests for its sensor. Shared contracts —
 discovery, the sample-record envelope, timestamps, generations, and the
-transform convention — live once in [`docs/modcom.md`](../modcom.md),
-[`docs/clock.md`](../clock.md), and `DV-SENSORS.md` and are linked, not
+transform convention — live once in [`docs/modcom.md`](../modcom.md) and
+[`docs/clock.md`](../clock.md) and are linked, not
 copied. A sensor type is not complete until its document and tests land with
 it.
 
@@ -28,8 +28,9 @@ Profile `type` values map to documents as follows:
 
 The profile loader rejects any other `type` with a field-specific error.
 Optical flow, UWB, radar, airspeed, RTK correction streams, dual-GNSS heading
-and visual odometry are deliberately schema extensions rather than v1 sensors;
-`DV-SENSORS.md` records why.
+and visual odometry are deliberately schema extensions rather than v1
+sensors; each one gets its document here and its transport contract when it
+lands.
 
 The two groups behave differently and the difference is worth stating once.
 The **ray sensors** -- both LiDAR outputs and the three `range.*` types -- read

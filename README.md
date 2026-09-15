@@ -355,8 +355,9 @@ whole point: two sensors' costs cannot be added without double-counting the same
 wall, and only an evidence grid keeps *never observed* distinct from *observed
 free*, which is what lets a ranged sensor clear space rather than only mark it.
 A cell nobody has looked at carries occupancy 255 and timestamp 0, and the pane
-paints it its own colour -- never as empty floor. The contract is DV-DNAV §2,
-whose successor in this checkout is [DV-MAPPING.md](DV-MAPPING.md); the
+paints it its own colour -- never as empty floor. That contract -- *never
+observed* stays distinct from *observed free*, and cost is always a
+consumer's policy -- travels with the plane itself; the
 transport is in [docs/membus.md](docs/membus.md).
 
 `dcmn.imagery` is the **optional reference-imagery plane**: a place a provider
@@ -997,18 +998,25 @@ Manual yaw is intentionally normalized so joystick and keyboard yaw directions
 match the UI labels and simulator heading behavior.
 
 **Control ownership.** The vehicle takes commands from one client at a time, so
-`dctl` claims the lease on connect -- but only if the vehicle is unowned; it
-never contends with a `dway` tour or a flying `daic` -- and renews it about
-once a second while it is running. Renewal is paced against the lease age the
-vehicle publishes, so an accelerated `--sim-speed`, which retires a lease
-sooner in wall time, does not cost the operator control mid-flight. The
-Controls panel has **Take Control** and **Release Control** for the case that
-matters: handing the vehicle to `dway` for a tour and taking it back
-afterwards. A release is deliberate and latches -- `dctl` will not reclaim the
-vehicle until you press **Take Control** again. The telemetry panel shows who
-currently holds it, and a failed acquire names the holder rather than failing
-silently. Without the lease only `land` is accepted: a `dctl` that shows an
-empty `control.owner` has every other button refused.
+`dctl` starts as a **passive observer**. Opening its window does not compete
+with `dway` for control, and keyboard, joystick and UI flight commands (including
+Land) are ignored until dctl owns the lease. The Controls panel shows
+**Observing — available**, **Observing — controlled by <owner>**, or
+**Manual control active**.
+
+Click **Take Control** to acquire an unowned vehicle. Click **Release Control**
+to return to observing. Dctl never takes over another client's lease and does
+not automatically reacquire after release or lease loss. For a manual-flight
+startup, use:
+
+```sh
+python3 apps/dctl/dctl.py --id area1 --take-control
+```
+
+This attempts acquisition once when vehicle status becomes available. If another
+client owns control, dctl reports the owner and stays observing; it does not wait
+to claim the vehicle later. While dctl owns control, it renews the lease using
+the vehicle's published lease age so accelerated simulation remains supported.
 
 Because the guided setpoint failsafe is on by default, a `dctl` that stops
 sending velocity -- all keys released, no stick input -- lets the vehicle fall

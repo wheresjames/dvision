@@ -201,8 +201,8 @@ def shared_names(instance_id: str) -> dict[str, str]:
         # producer owns its plane, and the simulator is not involved. The name
         # is stable so a consumer can probe it before any producer exists.
         "maps": f"{base}.maps",
-        # The reference-imagery plane's registry (DV-MAPPING §7): optional PNG
-        # backgrounds for display and reports, never planning input. The
+        # The reference-imagery plane's registry: optional PNG backgrounds
+        # for display and reports, never planning input. The
         # simulator is the producer here, because what it publishes is a
         # rendering of truth rather than a belief about it; the name is stable
         # for the same reason every plane's is.

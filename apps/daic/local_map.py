@@ -24,7 +24,7 @@ _FLOW_CONFIRM_HITS = 3
 _FLOW_HARD_CONFIRM_HITS = 6
 _FLOW_OCC_HIT_SCALE = 0.35
 _FLOW_SOFT_OCCUPIED_MAX = 1.2
-# Phase 6.8: a strong front-risk signal that stays high for several consecutive
+# Sustained front risk: a strong front-risk signal that stays high for several consecutive
 # ticks while the drone holds a steady heading is a real wall ahead, even when it
 # is rangeless (mini-SLAM / flow:persist often report high front risk with no
 # range). Map it as a hard, sticky barrier at a conservative near distance so A*
@@ -32,7 +32,7 @@ _FLOW_SOFT_OCCUPIED_MAX = 1.2
 # yaw-scanning/turning) rather than forward speed: reactive avoidance brakes the
 # drone to a near-crawl right in front of a wall, so a speed gate misses exactly
 # the moment we need; but a scanning/turning drone sweeping past obstacles must
-# not paint a phantom 2 m halo (the Phase 6.2 failure), and that is what the
+# not paint a phantom 2 m halo (the scanning-halo failure), and that is what the
 # heading-stability gate excludes.
 _SUSTAINED_RISK = 0.6
 _SUSTAINED_CONFIRM_TICKS = 5
@@ -304,8 +304,8 @@ class LocalOccupancyMap:
         # A few confirmations make a soft (traversable, fast-decaying) cell; once
         # the same world cell+sector keeps reporting a ranged front obstacle, it
         # is strong enough to be a real wall, so promote it to hard occupancy A*
-        # must route around rather than a high soft cost it can plough through
-        # (Phase 6.7). Hard marks use a distinct provenance prefix so they decay
+        # must route around rather than a high soft cost it can plough through.
+        # Hard marks use a distinct provenance prefix so they decay
         # at the normal rate (_cell_decay), not the fast soft-flow rate.
         if candidate.hits >= _FLOW_HARD_CONFIRM_HITS:
             self._mark_obstacle_sector(
@@ -634,8 +634,8 @@ def _should_map_sector(method: str, range_m: float | None) -> bool:
     """Return whether a sector has enough evidence to seed A* occupancy.
 
     Ranged detections make a concrete spatial claim, so they can be placed in
-    the local map. Rangeless mini-SLAM sectors are weaker evidence: Phase 6.2
-    found they can fire near-continuously and, if planted at the 3 m default,
+    the local map. Rangeless mini-SLAM sectors are weaker evidence: they
+    can fire near-continuously and, if planted at the 3 m default,
     create a trailing halo of phantom obstacles. They still flow through the
     reactive avoidance path; they just do not become compact A* blockers.
     """

@@ -1,6 +1,6 @@
 """Source-only baseline profiles: loading, composition, selectors and precise errors.
 
-DV-MAPPING §3/§9 Q8: the operational collection is exactly one baseline per
+The operational collection is exactly one baseline per
 evidence algorithm, holding sources and settings only. Tours, map extents and
 controls are not profile fields; old field names are rejected by name rather
 than silently ignored, and nothing aliases the retired profile names.

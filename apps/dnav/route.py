@@ -227,7 +227,7 @@ def simplify(cells: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
     return kept
 
 
-def shorten(cost: np.ndarray, geometry, points: Sequence[tuple[float, float]]
+def shorten(cost: np.ndarray, geometry, points: Sequence[tuple[float, float]], *, allows=None
             ) -> list[tuple[float, float]]:
     """Join waypoints whose direct segment costs no more than the path it replaces.
 
@@ -249,7 +249,7 @@ def shorten(cost: np.ndarray, geometry, points: Sequence[tuple[float, float]]
         for candidate in range(len(points) - 1, index + 1, -1):
             direct = path_cost(cost, line_cells(geometry, points[index], points[candidate]))
             through = path_cost(cost, polyline_cells(geometry, points[index:candidate + 1]))
-            if direct <= through + 1e-9:
+            if math.isfinite(direct) and direct <= through + 1e-9 and (allows is None or allows(points[index], points[candidate])):
                 target = candidate
                 break
         kept.append(points[target])

@@ -84,8 +84,12 @@ def test_simulation_health_marks_expired_members_bad_and_writes_report(tmp_path)
     assert record["modules"][0]["state"] == "expired"
     assert record["modules"][0]["grade"] == BAD
     assert monitor.grade.value == BAD
+    (tmp_path / "flight_path.png").write_bytes(b"\x89PNG\r\n\x1a\nflight")
     output = monitor.write_report(tmp_path)
     monitor.close()
     assert output.is_file()
-    assert "Simulation health" in output.read_text(encoding="utf-8")
+    html = output.read_text(encoding="utf-8")
+    assert "Simulation health" in html
+    # dsim's overhead track, saved beside the report, is embedded in it.
+    assert "Flight path" in html and "data:image/png;base64,iVBORw0KGgpmbGlnaHQ=" in html
     assert (tmp_path / "health.jsonl").is_file()

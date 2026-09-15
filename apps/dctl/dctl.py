@@ -228,9 +228,10 @@ class DroneController:
         self._joy_legend_shown = None  # None = not yet determined
         self._held_velocity_active = False
         self._last_heartbeat = 0.0
-        # Latched by Release Control: the vehicle was deliberately handed to
-        # another client, so the connect-time acquire must not reclaim it.
-        self._control_released = False
+        self._control_released = True
+        # Consume the CLI request once, when vehicle status is first available.
+        # A busy vehicle or a lost lease never schedules a later acquisition.
+        self._startup_take_control = args.take_control
         self._last_module_heartbeat = 0.0
         self._last_open_attempt = 0.0
         # Painting is for the operator and is capped on the wall clock; the
@@ -517,10 +518,14 @@ class DroneController:
         ttk.Button(controls, text="Stop", style="Danger.TButton",
                    command=lambda: self.send_command("zero")
                    ).grid(row=2, column=1, sticky="ew")
-        ttk.Button(controls, text="Take Control", command=self.take_control
-                   ).grid(row=3, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
-        ttk.Button(controls, text="Release Control", command=self.release_control
-                   ).grid(row=3, column=1, sticky="ew", pady=(6, 0))
+        self.take_control_button = ttk.Button(controls, text="Take Control", command=self.take_control)
+        self.take_control_button.grid(row=3, column=0, sticky="ew", padx=(0, 6), pady=(6, 0))
+        self.release_control_button = ttk.Button(controls, text="Release Control", command=self.release_control)
+        self.release_control_button.grid(row=3, column=1, sticky="ew", pady=(6, 0))
+        self.control_status = tk.StringVar(value="Observing — connecting")
+        ttk.Label(controls, textvariable=self.control_status, wraplength=260
+                  ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._update_control_ui()
 
         # ── Movement ──────────────────────────────────────────────────
         move = ttk.LabelFrame(side, text="Movement", padding=8)
@@ -970,25 +975,36 @@ class DroneController:
             self._measurement_last_state = now
 
     def _maintain_control(self) -> None:
+        self._update_control_ui()
         if self.command is None or self.status is None:
             return
         now = time.monotonic()
         values = self.status.getAll()
         owner = values.get("control.owner", "")
-        if owner == self.control_source:
+        if self._startup_take_control and "control.owner" in values:
+            self._startup_take_control = False
+            self.take_control()
+        if owner == self.control_source and not self._control_released:
             if self._heartbeat_due(values, now):
                 self.send_command("heartbeat", quiet=True)
                 self._last_heartbeat = now
-        elif not owner and not self._control_released:
-            # Claim an unowned vehicle -- on connect, and again if the lease
-            # ever lapses -- so the operator's first Arm is not refused. Only
-            # `land` flies without a lease, so a dctl that never acquires one
-            # looks like a controller whose every other button is dead. An
-            # existing owner (dway on a tour, daic flying) is still never
-            # contended with, and Release Control latches this off so handing
-            # the vehicle over does not immediately take it back.
-            self.send_command("acquire_control", quiet=True)
-            self._last_heartbeat = now
+
+    def _owns_control(self) -> bool:
+        return (not self._control_released and self.status is not None
+                and self.status.getAll().get("control.owner") == self.control_source)
+
+    def _update_control_ui(self) -> None:
+        if not hasattr(self, 'control_status'):
+            return  # the deferred controls panel has not been built yet
+        values = {} if self.status is None else self.status.getAll()
+        connected = self.command is not None and "control.owner" in values
+        owner = values.get("control.owner", "")
+        manual = self._owns_control()
+        label = ("Observing — connecting" if not connected else "Manual control active" if manual
+                 else f"Observing — controlled by {owner}" if owner else "Observing — available")
+        self.control_status.set(label)
+        self.take_control_button.configure(state="normal" if connected and not owner else "disabled")
+        self.release_control_button.configure(state="normal" if manual else "disabled")
 
     def _heartbeat_due(self, values: dict, now: float) -> bool:
         """Renew inside the lease as the *vehicle* measures it.
@@ -1014,6 +1030,10 @@ class DroneController:
 
     def take_control(self) -> None:
         """Acquire an unowned vehicle without contending with another client."""
+        self._startup_take_control = False
+        if self.command is None or self.status is None or "control.owner" not in self.status.getAll():
+            self.log("vehicle control status unavailable; try Take Control when connected")
+            return
         owner = "" if self.status is None else \
             self.status.getAll().get("control.owner", "")
         if owner and owner != self.control_source:
@@ -1022,17 +1042,25 @@ class DroneController:
         self._control_released = False
         self.send_command("acquire_control")
         self._last_heartbeat = time.monotonic()
+        self.held.clear()
+        self._held_velocity_active = False
 
     def release_control(self) -> None:
+        self._startup_take_control = False
+        self._control_released = True
+        self.held.clear()
+        self._held_velocity_active = False
         owner = "" if self.status is None else \
             self.status.getAll().get("control.owner", "")
         if owner != self.control_source:
             self.log("this dctl does not own control")
             return
-        self._control_released = True
         self.send_command("release_control")
+        self._update_control_ui()
 
     def _handle_joy_buttons(self) -> None:
+        if not self._owns_control():
+            return
         joy = self.joy
         if joy.button_pressed(0):   # A – hover
             self.send_command("zero")
@@ -1141,6 +1169,8 @@ class DroneController:
             self.held.add(_control_key(event.keysym))
 
     def _flight_keys_enabled(self, event) -> bool:
+        if not self._owns_control():
+            return False
         if hasattr(self, 'notebook') and self.notebook.select() != str(self.flight_page):
             return False
         widget = getattr(event, 'widget', None)
@@ -1156,6 +1186,10 @@ class DroneController:
         self.send_held_velocity(force=True)
 
     def send_held_velocity(self, force: bool = False) -> None:
+        if not self._owns_control():
+            self.held.clear()
+            self._held_velocity_active = False
+            return
         kb_forward, kb_right, kb_up, kb_yaw = _held_axes(self.held)
 
         joy = self.joy
@@ -1190,6 +1224,10 @@ class DroneController:
         self.send_command("arm", armed=value != "armed")
 
     def send_command(self, typ: str, quiet: bool = False, **fields) -> None:
+        if typ not in ("acquire_control", "release_control") and not self._owns_control():
+            if not quiet:
+                self.log("Observing — use Take Control before sending manual commands")
+            return
         if self.command is None:
             if not quiet:
                 self.log("command buffer not connected")
@@ -1337,6 +1375,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--vertical-speed", type=float, default=1.0)
     parser.add_argument("--no-joystick",  action="store_true",
                         help="disable joystick/gamepad support")
+    parser.add_argument("--take-control", action="store_true",
+                        help="try once to acquire control on connection; otherwise observe (default)")
     parser.add_argument("--layout", help="named device layout (default: profile name)")
     parser.add_argument("--camera", help="Flight camera id (default: manifest primary)")
     parser.add_argument("--devices", default="", help="comma-separated device ids to open")

@@ -17,7 +17,7 @@ States:
 ``RUNNING``           publishing; ``admission`` says whether samples are being
                       admitted or paused on an invalid/stale pose
 
-Resets (DV-MAPPING §9): an operator mapping reset (context ``reset_revision``)
+Resets: an operator mapping reset (context ``reset_revision``)
 stages the new generation before retiring the old one and is rejected without
 harm if it does not fit; a provider, localization, clock or sensor-transport
 epoch change retires the current generation first -- the old frame is not
@@ -105,7 +105,7 @@ class DalgRun:
         A reference background is optional decoration, but *showing* one is a
         fact about how the session was conducted: an operator who planned over
         a truth map was assisted, and a report that could not say so would
-        make assisted and unassisted sessions comparable (DV-MAPPING §7).
+        make assisted and unassisted sessions comparable.
         Archived as an event and kept in the summary's provenance, where the
         evaluator reads it.
         """
@@ -517,7 +517,7 @@ class DalgRun:
         self.note('module.closed', state=self.state, reason=self.reason)
         # The background is filed before the recorder seals, so the report
         # and its record can never disagree about which reference revision
-        # was displayed (DV-MAPPING §7).
+        # was displayed.
         self._archive_displayed_background()
         if self.recorder: self.recorder.close()
         self._write_report()
