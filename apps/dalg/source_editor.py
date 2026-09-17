@@ -1,25 +1,67 @@
-"""The one profile editor: algorithm sources and their settings, nothing else.
+"""The one profile editor: evidence sources, target detectors and their settings, nothing else.
 
 A profile is a name and a list of sources, each a sensor (or the
 ``primary_camera`` selector) paired with an evidence algorithm and its
-settings. Tours are mission tooling; map extent, resolution and slab are
+settings, and optionally a list of detectors paired the same way with a target
+detector. Both are rows of one list here -- a row whose algorithm is a
+registered detector (:data:`dalg.detect.DETECTORS`) saves under ``detectors``. Tours are mission tooling; map extent, resolution and slab are
 runtime mapping configuration (``dalg --bounds/--cell-m``) and are shown here
 read-only, as dalg resolved them, never saved into the file.
 
 Rows are validated with the same rules a run applies at readiness, so the editor
 and the runtime cannot disagree about what a profile means.
 """
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 
-from dalg.profiles import (PRIMARY_CAMERA, Source, profile_dir, save_sources_profile,
-                          source_configs, source_errors)
+from dalg.profiles import (PRIMARY_CAMERA, Detector, Source, detector_errors, profile_dir,
+                          save_sources_profile, source_configs, source_errors)
+
+
+@dataclass(frozen=True)
+class DetectorRow(Source):
+    """A detector in the editor's row list: a source-shaped row that saves as a detector."""
+    suffix: str = ''
+    label: str = ''
+
+    @property
+    def id(self):
+        return self.as_detector().id
+
+    def as_detector(self):
+        return Detector(self.sensor, self.algorithm, dict(self.settings), self.suffix, self.label)
+
+
+def is_detector(name):
+    from dalg.detect import DETECTORS
+    return name in DETECTORS
+
+
+def row(sensor, algorithm, settings=None, suffix='', label=''):
+    """The right row type for an algorithm or detector name."""
+    if is_detector(algorithm): return DetectorRow(sensor, algorithm, dict(settings or {}), suffix, label)
+    return Source(sensor, algorithm, dict(settings or {}))
 
 
 def algorithms_for(sensor_type=None):
-    """Evidence algorithms a sensor of this type can run; all of them when unknown."""
-    return tuple(name for name, (kind, _) in source_configs().items()
-                 if sensor_type is None or kind == sensor_type)
+    """Evidence algorithms and detectors a sensor of this type can run; all of them when unknown."""
+    from dalg.detect import DETECTORS
+    evidence = tuple(name for name, (kind, _) in source_configs().items()
+                     if sensor_type is None or kind == sensor_type)
+    return evidence + tuple(name for name, cls in DETECTORS.items()
+                            if sensor_type is None or cls.sensor_type == sensor_type)
+
+
+def settings_defaults(algorithm):
+    """``[(name, default)]`` a row's settings form shows: an algorithm's config, or a detector's common and own settings."""
+    if is_detector(algorithm):
+        from dalg.detect import DETECTORS, DetectorConfig
+        own = getattr(DETECTORS[algorithm], 'settings_class', None)
+        classes = (DetectorConfig,) if own is None else (DetectorConfig, own)
+    else:
+        config = source_configs().get(algorithm, (None, None))[1]
+        classes = () if config is None else (config,)
+    return [(f.name, getattr(cls(), f.name)) for cls in classes for f in fields(cls())]
 
 
 def coerce(kind, text):
@@ -46,9 +88,14 @@ def row_errors(sources, manifest=None):
     primary = (manifest or {}).get('primary_camera')
     for source in sources:
         if source.sensor == PRIMARY_CAMERA and manifest is not None and primary:
-            source = Source(primary, source.algorithm, source.settings)
+            source = row(primary, source.algorithm, source.settings, getattr(source, 'suffix', ''),
+                         getattr(source, 'label', ''))
         resolved.append(source)
-    errors = source_errors(resolved, manifest if manifest is not None else None)
+    evidence = [(index, s) for index, s in enumerate(resolved) if not isinstance(s, DetectorRow)]
+    detectors = [(index, s) for index, s in enumerate(resolved) if isinstance(s, DetectorRow)]
+    errors = {evidence[i][0]: e for i, e in source_errors([s for _, s in evidence], manifest).items()}
+    errors.update({detectors[i][0]: e for i, e in
+                   detector_errors([s.as_detector() for _, s in detectors], manifest).items()})
     if manifest is not None and not primary:
         for index, source in enumerate(sources):
             if source.sensor == PRIMARY_CAMERA:
@@ -70,7 +117,8 @@ class SourceEditor:
         self.profile = profile
         self.manifest = None
         self.path = profile.path
-        self.sources = list(profile.sources)
+        self.sources = list(profile.sources) + [DetectorRow(d.sensor, d.detector, dict(d.settings), d.suffix, d.label)
+                                                 for d in getattr(profile, 'detectors', ())]
         self._draft_errors = {}
         self._drafts = {}
         self.name = tk.StringVar(value=profile.name)
@@ -85,7 +133,7 @@ class SourceEditor:
         top.columnconfigure(1, weight=1)
         left = ttk.LabelFrame(page, text='Discovered sensors', padding=6)
         left.grid(row=1, column=0, sticky='nsew', padx=(0, 6), pady=6)
-        right = ttk.LabelFrame(page, text='Profile sources', padding=6)
+        right = ttk.LabelFrame(page, text='Profile sources and detectors', padding=6)
         right.grid(row=1, column=1, sticky='nsew', pady=6)
         self.sensors = ttk.Treeview(left, columns=('type', 'rate'), show='tree headings', height=5)
         self.sensors.heading('#0', text='Sensor'); self.sensors.column('#0', width=90)
@@ -143,7 +191,8 @@ class SourceEditor:
     def state_signature(self):
         """Everything a save would write, drafts included, to tell edited from untouched."""
         return (self.name.get(),
-                tuple((source.sensor, source.algorithm, tuple(sorted(source.settings.items())))
+                tuple((source.sensor, source.algorithm, tuple(sorted(source.settings.items())),
+                       getattr(source, 'label', ''))
                       for source in self.sources),
                 tuple(sorted((key, tuple(sorted(draft.items())))
                              for key, draft in self._drafts.items())))
@@ -190,7 +239,7 @@ class SourceEditor:
         self.algorithm.set(choices[0] if choices else '')
 
     def add_source(self, sensor, algorithm, settings=None):
-        self.sources.append(Source(sensor, algorithm, dict(settings or {})))
+        self.sources.append(row(sensor, algorithm, settings))
         self._refresh_rows()
         self.rows.selection_set(str(len(self.sources)-1)); self._select()
 
@@ -235,14 +284,28 @@ class SourceEditor:
         box.bind('<<ComboboxSelected>>', lambda _e: self._change_algorithm(index, choice.get()))
         self._scroll.claim_wheel(box)
         self.row_algorithm = box
-        row = 1
-        config = source_configs().get(source.algorithm, (None, None))[1]
+        line = 1
+        if isinstance(source, DetectorRow):
+            # What detections are published as: the name a mission's target_label must use.
+            native = ', '.join(source.as_detector().native_labels)
+            ttk.Label(frame, text='label').grid(row=line, column=0, sticky='w')
+            self.label_var = self.tk.StringVar(value=source.label)
+            ttk.Entry(frame, textvariable=self.label_var).grid(row=line, column=1, sticky='ew')
+            ttk.Label(frame, text=f'published label; empty publishes {native}', style='Dim.TLabel').grid(
+                row=line + 1, column=1, sticky='w')
+            self.label_var.trace_add('write', lambda *_: self._label_changed(index))
+            line += 2
         draft = self._drafts.get(source.id, source.settings)
-        if config is not None:
-            defaults = config()
-            for field in fields(defaults):
-                row = self._setting_row(row, field.name, getattr(defaults, field.name), draft)
+        for name, default in settings_defaults(source.algorithm):
+            line = self._setting_row(line, name, default, draft)
         frame.columnconfigure(1, weight=1)
+
+    def _label_changed(self, index):
+        source = self.sources[index]
+        label = self.label_var.get().strip()
+        if label == source.label: return
+        self.sources[index] = DetectorRow(source.sensor, source.algorithm, dict(source.settings), source.suffix, label)
+        self.validate()
 
     def _setting_row(self, row, name, default, draft):
         variable = self.tk.StringVar(value=str(draft.get(name, default)))
@@ -257,7 +320,7 @@ class SourceEditor:
         source = self.sources[index]
         if algorithm == source.algorithm: return
         self._drafts.pop(source.id, None); self._draft_errors.pop(source.id, None)
-        self.sources[index] = Source(source.sensor, algorithm, {})
+        self.sources[index] = row(source.sensor, algorithm)
         self._refresh_rows(); self.rows.selection_set(str(index)); self._select()
 
     def _settings_changed(self, *_):
@@ -266,15 +329,15 @@ class SourceEditor:
         source = self.sources[index]
         self._drafts[source.id] = {key: variable.get() for key, (variable, _) in self.setting_vars.items()}
         try:
-            config = source_configs()[source.algorithm][1]
-            defaults = config()
+            defaults = dict(settings_defaults(source.algorithm))
             values = {}
             for key, (variable, kind) in self.setting_vars.items():
                 value = coerce(kind, variable.get())
                 # Only what differs from the algorithm's defaults is written: a
                 # profile states choices, not a copy of today's defaults.
-                if value != getattr(defaults, key) or key in source.settings: values[key] = value
-            self.sources[index] = Source(source.sensor, source.algorithm, values)
+                if value != defaults[key] or key in source.settings: values[key] = value
+            self.sources[index] = row(source.sensor, source.algorithm, values, getattr(source, 'suffix', ''),
+                                      getattr(source, 'label', ''))
             self._draft_errors.pop(source.id, None)
         except ValueError as exc:
             self._draft_errors[source.id] = str(exc)
@@ -300,7 +363,9 @@ class SourceEditor:
     def save(self, path):
         if not self.validate(): raise ValueError('profile has validation errors')
         name = self.name.get().strip()
-        save_sources_profile(Path(path), name=name, sources=self.sources)
+        save_sources_profile(Path(path), name=name,
+                             sources=[s for s in self.sources if not isinstance(s, DetectorRow)],
+                             detectors=[s.as_detector() for s in self.sources if isinstance(s, DetectorRow)])
         self.path = Path(path)
         self._drafts.clear()
         self._saved_signature = self.state_signature()

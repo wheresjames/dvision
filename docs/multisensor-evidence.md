@@ -101,7 +101,7 @@ Source validation, inverse-model geometry, profile round-trip, both UI panes
 and layered-cost checks:
 
 ```sh
-xvfb-run -a pytest -q tests/test_dalg_sources.py tests/test_dalg_runtime.py
+xvfb-run -a pytest -q tests/dalg/test_dalg_sources.py tests/dalg/test_dalg_runtime.py
 ```
 
 ## Composing algorithm profiles

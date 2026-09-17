@@ -14,8 +14,9 @@ reports/<id>/<run>/
   dsim/        the simulator's own artifacts
   daic/        the AI controller's artifacts
   dway/        the tour follower's artifacts
-  dalg/        the evidence producer's summary, images and archive/
+  dalg/        the evidence producer's summary, images, detections.png, detections/ and archive/
   dnav/        the route planner's summary, events, route image and archive/
+  dmsn/        the mission coordinator's summary, events, mission image and archive/
   <module>/    any other attached client, named after itself
 ```
 
@@ -216,9 +217,18 @@ session visible rather than quietly comparable to an unassisted one.
 the final route over evidence-derived cost -- composed with the reference
 background the operator displayed, when one was displayed, whose exact
 revision the archive also holds; never a world file.
-`dalg/summary.json` (schema 3) is truth-free: state, resolved geometry
+`dalg/summary.json` (schema 4) is truth-free: state, resolved geometry
 and how it was chosen, omitted sources, counters, recording status and one
-evidence image per source. Neither carries a score. Beyond these there is no shared schema, and deliberately
+evidence image per source. When the profile has detectors it adds a
+`detectors` section: per detector its ID, name, settings digest, frames
+processed / skipped / failed, effective and configured rate, latency p50/p95,
+frames with detections, detections by label and not-projectable counts by
+reason; the final estimates (ID, label, `xy_m`, spread, count, confirmed,
+first/last seen); `detections.png`, the Detections tab's map (evidence,
+projected detections, estimates and camera footprint, over the displayed
+reference background under the same provenance rules as the evidence images);
+and `detections/<estimate>.png`, the crop of each estimate's highest-confidence
+detection (`crops` names them). Neither carries a score. Beyond these there is no shared schema, and deliberately
 so: each module reports what it measured. What *is* fixed is the file name and the location, which is what lets
 a tool find every module's numbers for a run without knowing what they mean.
 
@@ -233,9 +243,24 @@ a tool find every module's numbers for a run without knowing what they mean.
 
 ---
 
-### Numeric archives (dalg, dnav)
+`dmsn/summary.json` (`dvision2.dmsn-report.v1`) holds the mission, its profile,
+digest and command-line overrides; the outcome, reason and phases with sim
+durations; every goal set with its outcome and the count of debounced goals;
+home, track length, budgets, coverage requests, intents with dway's
+acknowledgements, the arena check and the assisted flags (reference display,
+provider target used, tour import), and the mission's own summary -- waypoint
+states, or an explore run's area, strategy, coverage and every blacklisted
+point with its reason, or a search's target, phase, given-up estimates and its
+`estimate_log`: every decision that acted on an estimate (go to standoff, face,
+observe, approach, land, give up) with the estimate ID and revision, so a
+mission outcome links back to dalg's archive. `mission.png` is the Mission tab's rendering at the end.
+See [missions](missions.md). dway's `summary.json` records its executor
+settings (`metadata.settings`, including `land_timeout_s`) and any mission
+landings and turns in place (`landings`, `turns_in_place`).
 
-Screenshots and summaries lose the numbers. dalg and dnav therefore also keep
+### Numeric archives (dalg, dnav, dmsn)
+
+Screenshots and summaries lose the numbers. dalg, dnav and dmsn therefore also keep
 an `archive/` (`apps/dcmn/archive.py`, schema `dvision2.archive.v2`) of what
 they actually published or consumed:
 
@@ -252,7 +277,27 @@ archive/
   which is stored once and referenced by content digest), every admitted and
   rejected sample with its capture-associated pose, mapping initialisations
   with geometry, sizing basis, sources, model digests and allocation estimate,
-  every reset with its cause, and mission/lifecycle bus events.
+  every reset with its cause, and mission/lifecycle bus events. With detectors
+  it also records `detector.configured` (ID, name, labels, settings and
+  digest, intrinsics, code version); a `detector.frame` for **every** processed
+  frame, empty ones included (capture ID and time, pose context, camera pose,
+  latency, detection and candidate counts); a `detector.detection` per
+  detection (pixel fields, confidence, diagnostics, the projection's inputs and
+  result or not-projectable reason, the estimate it joined), with a crop of the
+  detection and, for the observation that opened an estimate, the full frame;
+  `detector.candidates` for frames with rejected candidates, with reasons;
+  `detector.skipped` / `detector.failed` (reason, count, traceback summary);
+  `estimate.opened` / `updated` / `confirmed` / `stale` / `cleared` with before
+  and after positions and the cause; `detections.published` for every
+  publication of the detections plane; and full frames at the detector's
+  `record_frames_hz` when set (`detector.recorded_frame`). Detection images
+  ride the recorder's optional image payloads: a lost image costs a picture,
+  never the numbers.
+- **dmsn** records the profile each mission started with, every observation its
+  mission body stepped on with the decision it returned, every operator event,
+  goal, suppressed goal, intent and acknowledgement, pause and handoff.
+  `dmsn.runner.replay(archive)` runs the recorded mission again and compares
+  every decision.
 - **dnav** records every planning attempt, successful or not: trigger, exact
   pose, goal descriptor and authority, policy and planner, route, the
   straight-line diagnostic, and the exact evidence revisions used (with their
@@ -285,8 +330,16 @@ and policy; `dnav.plan.replay_attempt` plans it again, and the route must match.
 alone -- grids, route, pose and goal from the numbers, optionally over the
 exact reference revision the report displayed, all through the same renderer
 the live pane used, and with no dsim and no world file.
+`--detections` lists each detector's frames, every detection with its
+projection, and each estimate's lifecycle; `--estimate ID` traces one
+estimate's observations and events in order; `--detection N --out PATH`
+renders detection `N` (or `DN`) from the archive alone: its crop, or its frame
+when that detection opened an estimate, with the detection circled, beside the
+top-down projection. `dalg.detect.projection.replay` re-projects a recorded
+detection from its recorded inputs, and the result must match.
 Output archives support evaluating what happened; they are not a raw sensor
-recording and cannot rerun a perception algorithm.
+recording and cannot rerun a perception algorithm (unless a detector's
+`record_frames_hz` kept frames for it).
 
 A module that finds an `archive/` already present (a restart within one
 session) writes `archive-2/` and so on; archives are append-once.

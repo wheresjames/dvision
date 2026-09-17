@@ -163,7 +163,7 @@ class FlightWindow:
         left.columnconfigure(0, weight=1)
         left.rowconfigure(0, weight=3)
         left.rowconfigure(2, weight=1)
-        self.pane = MapPane(left, width=720, height=430, title='Live map')
+        self.pane = MapPane(left, width=720, height=430, title='Live map', zoom=True)
         self.pane.widget.grid(row=0, column=0, sticky='nsew')
         ttk.Label(left, text=LEGEND, style='Dim.TLabel').grid(row=1, column=0, sticky='w', pady=(6, 8))
 
@@ -522,7 +522,9 @@ def load_flight_profile(args):
 
 def executor_options(args):
     target = args.mode == 'target'
-    return dict(auto=target, allow_uncalibrated=target, wait_for=tuple(args.wait_for) if target else ())
+    return dict(auto=target, allow_uncalibrated=target, wait_for=tuple(args.wait_for) if target else (),
+                wait_for_mission=target and getattr(args, 'wait_for_mission', False),
+                land_timeout_s=getattr(args, 'land_timeout_s', 60.0))
 
 
 def run_flight(args):

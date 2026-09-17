@@ -508,7 +508,7 @@ a good image are withdrawal, a producer restart, or the frame moving on.
 Reference images are archived with the report that displayed them, referenced
 by checksum (see [reports.md](reports.md)).
 
-Verification: [imagery contract](../tests/test_dcmn_imagery.py) -- the affine
+Verification: [imagery contract](../tests/dcmn/test_dcmn_imagery.py) -- the affine
 under translate/rotate/reflect/unequal scale, malformed and lying records,
 budget exhaustion, frame epochs, provider restarts, and the three-background
 numeric-identity run (no image, a correct one and a misleading one produce
@@ -682,19 +682,19 @@ names based on absent historical interfaces.
 
 | Concern | Implementation | Relevant verification |
 |---|---|---|
-| Stable names, status schema, command codec/results | [dvision2_common.py](../dvision2_common.py) | [vehicle contract](../tests/test_dway_vehicle_contract.py) |
-| Area creation, command application, telemetry and cleanup | [dsim.py](../apps/dsim/dsim.py) | [process transport](../tests/test_dvision_process_transport.py), [crash/reset](../tests/test_dsim_crash_reset.py) |
-| Sensor names, registry, envelope and readers | [sensors.py](../apps/dcmn/sensors.py) | [sensor contract](../tests/test_sensor_contract.py) |
-| Allocation sizes and validation | [profiles.py](../apps/dsim/profiles.py) | [release/lifecycle](../tests/test_sensor_release.py) |
-| Capture scheduling and payload publication | [sensor_manager.py](../apps/dsim/sensor_manager.py) | [stereo](../tests/test_sensor_stereo.py), [state sensors](../tests/test_sensor_state.py) |
-| The one simulator-shaped seam under scheduling | [sensor_backend.py](../apps/dcmn/sensor_backend.py), [dsim backend](../apps/dsim/backend.py) | [sensor backend](../tests/test_sensor_backend.py) |
-| Array layout and physical models | [sensor_models.py](../apps/dsim/sensor_models.py), [state_sensors.py](../apps/dsim/state_sensors.py) | [geometry](../tests/test_sensor_geometry.py) |
-| Broadcast events and presence projection | [module_bus.py](../apps/dcmn/module_bus.py) | [module bus](../tests/test_module_bus.py) |
-| Intake health and aggregation | [health.py](../apps/dcmn/health.py), [DSIM health](../apps/dsim/health.py) | [sensor health](../tests/test_sensor_health.py) |
-| Tour/manual coordination and algorithm participation | [DWAY](../apps/dway/dway.py), [DCTL](../apps/dctl/dctl.py), [DALG](../apps/dalg/run.py) | [DWAY process](../tests/test_dway_process.py), [DALG process](../tests/test_dalg_process.py) |
-| Session context: provider ownership, pose, goal authority, resets | [context.py](../apps/dcmn/context.py) | [context](../tests/test_dcmn_context.py), [dalg runtime](../tests/test_dalg_runtime.py) |
-| Optional reference imagery: publisher, manifest, records, display session | [imagery.py](../apps/dcmn/imagery.py), [map_pane.py](../apps/dcmn/map_pane.py) | [imagery contract](../tests/test_dcmn_imagery.py) |
-| Reference-image archiving and standalone report rendering | [archive.py](../apps/dcmn/archive.py) | [imagery contract](../tests/test_dcmn_imagery.py), [archive](../tests/test_dcmn_archive.py) |
+| Stable names, status schema, command codec/results | [dvision2_common.py](../dvision2_common.py) | [vehicle contract](../tests/dway/test_dway_vehicle_contract.py) |
+| Area creation, command application, telemetry and cleanup | [dsim.py](../apps/dsim/dsim.py) | [process transport](../tests/vision/test_dvision_process_transport.py), [crash/reset](../tests/dsim/test_dsim_crash_reset.py) |
+| Sensor names, registry, envelope and readers | [sensors.py](../apps/dcmn/sensors.py) | [sensor contract](../tests/sensors/test_sensor_contract.py) |
+| Allocation sizes and validation | [profiles.py](../apps/dsim/profiles.py) | [release/lifecycle](../tests/sensors/test_sensor_release.py) |
+| Capture scheduling and payload publication | [sensor_manager.py](../apps/dsim/sensor_manager.py) | [stereo](../tests/sensors/test_sensor_stereo.py), [state sensors](../tests/sensors/test_sensor_state.py) |
+| The one simulator-shaped seam under scheduling | [sensor_backend.py](../apps/dcmn/sensor_backend.py), [dsim backend](../apps/dsim/backend.py) | [sensor backend](../tests/sensors/test_sensor_backend.py) |
+| Array layout and physical models | [sensor_models.py](../apps/dsim/sensor_models.py), [state_sensors.py](../apps/dsim/state_sensors.py) | [geometry](../tests/sensors/test_sensor_geometry.py) |
+| Broadcast events and presence projection | [module_bus.py](../apps/dcmn/module_bus.py) | [module bus](../tests/dcmn/test_module_bus.py) |
+| Intake health and aggregation | [health.py](../apps/dcmn/health.py), [DSIM health](../apps/dsim/health.py) | [sensor health](../tests/sensors/test_sensor_health.py) |
+| Tour/manual coordination and algorithm participation | [DWAY](../apps/dway/dway.py), [DCTL](../apps/dctl/dctl.py), [DALG](../apps/dalg/run.py) | [DWAY process](../tests/dway/test_dway_process.py), [DALG process](../tests/dalg/test_dalg_process.py) |
+| Session context: provider ownership, pose, goal authority, resets | [context.py](../apps/dcmn/context.py) | [context](../tests/dcmn/test_dcmn_context.py), [dalg runtime](../tests/dalg/test_dalg_runtime.py) |
+| Optional reference imagery: publisher, manifest, records, display session | [imagery.py](../apps/dcmn/imagery.py), [map_pane.py](../apps/dcmn/map_pane.py) | [imagery contract](../tests/dcmn/test_dcmn_imagery.py) |
+| Reference-image archiving and standalone report rendering | [archive.py](../apps/dcmn/archive.py) | [imagery contract](../tests/dcmn/test_dcmn_imagery.py), [archive](../tests/dcmn/test_dcmn_archive.py) |
 
 This inventory describes the implementation as inspected on 2026-09-11. Wire
 changes should update this guide together with `STATUS_KEYS`, the registry/

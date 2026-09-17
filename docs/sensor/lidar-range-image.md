@@ -110,8 +110,8 @@ without a high-rate point ABI.
 
 ## Correctness tests
 
-`tests/test_sensor_geometry.py` — row-major shape, the centre element
+`tests/sensors/test_sensor_geometry.py` — row-major shape, the centre element
 measuring the analytic distance to a known wall, invalid returns, and the
 determinism rules.
-`tests/test_sensor_contract.py` — layout round-trip, metadata/array sequence
+`tests/sensors/test_sensor_contract.py` — layout round-trip, metadata/array sequence
 pairing, and dedicated-ring behaviour under load.

@@ -13,6 +13,8 @@ contains:
 - `dalg`: the evidence producer, which turns sensor samples and the provider's
   pose into occupancy-evidence grids -- no world file, tour or truth required
 - `dnav`: the route planner, which plans on that evidence toward a framed goal
+- `dmsn`: the mission coordinator, which decides where to go next and when the job
+  is finished, and reports each mission
 - `dfgb`: a FlightGear bridge that stands in for `dsim` behind the same
   buffers -- a work in progress
 - `dcmn`: what the windows share -- one palette, one drawing of a map, one
@@ -33,7 +35,6 @@ tested or replaced independently.
 
 ## Contents
 
-- [Project Layout](#project-layout)
 - [Architecture](#architecture)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
@@ -42,6 +43,7 @@ tested or replaced independently.
 - [AI Controller: daic](#ai-controller-daic)
 - [Waypoint Navigation: dway](#waypoint-navigation-dway)
 - [Dynamic routes: dnav plans, dway flies](#dynamic-routes-dnav-plans-dway-flies)
+- [Missions: dmsn](#missions-dmsn)
 - [Vision Navigation](#vision-navigation)
 - [Evidence Producer: dalg](#evidence-producer-dalg)
 - [Automated Testing and Diagnostics](#automated-testing-and-diagnostics)
@@ -49,262 +51,114 @@ tested or replaced independently.
 - [Shared Memory Protocol](#shared-memory-protocol)
 - [Telemetry](#telemetry)
 - [Rendering and Assets](#rendering-and-assets)
-- [Development Notes](#development-notes)
+- [Project Layout](#project-layout)
+- [Asset Types](#asset-types)
 - [Comparison to Similar Projects](#comparison-to-similar-projects)
 
-## Project Layout
+## Architecture
+
+dvision2 is six separate processes that share one instance id (such as
+`area1`) and talk only through named POSIX shared-memory areas. No process
+calls another directly. Each can be started, stopped and restarted on its own,
+in any order, and a real vehicle can stand in for the simulator without the
+modules above it changing.
+
+The first diagram shows what flows from module to module. Each box lists the
+`assets/` files that module reads (see [Asset Types](#asset-types)):
 
 ```text
-dvision2_common.py          Shared protocol, map loading, ids, status keys
-compare.py                  Offline comparison of historical, scored dalg summaries
-requirements.txt            The pinned, supported runtime environment
-requirements-dev.txt        The above plus the linter, auditor and coverage plugin
-ruff.toml                   Lint rules: correctness only, house style left alone
-LICENSE                     MIT
-SECURITY.md                 What to report privately, where, and what is in scope
-.github/
-  dependabot.yml            Weekly pip and action updates, so exact pins stay fresh
-  workflows/
-    ci.yml                  Lint, then the suite on 3.11-3.13 under xvfb
-    codeql.yml              Static analysis on master and weekly
-    security.yml            pip-audit over the pins, gitleaks over the history
-    nightly.yml             The `nightly` marker, on a schedule
-docs/
-  clock.md                  Simulated vs wall time, module sync, and the failure modes
-  modcom.md                 Module communication: the four shared-memory planes
-  membus.md                 The shared-memory buffer inventory and payloads
-  reports.md                Report layout: who owns what, and the rules
-  recovery.md               How a module recovers from a reset, restart or profile change
-  sensors-protocols.md      Sensor configuration and the protocols behind it
-  dctl-devices.md           The dctl device browser: intake, layout, renderers
-  sensor/                   One document per simulated sensor type, plus the
-                            rules they share
-  mavlink-slam-nav.md       The reference architecture the vehicle seam borrows from
-  navigation.md             Dynamic routes: dnav's permission, dway's dynamic and target
-                            modes, dials, measured limits, reports and replay
-  camera-evidence.md        Camera evidence algorithms and their baselines
-  multisensor-evidence.md   Combining camera and LiDAR evidence sources
-
-scripts/
-  build_sensor_pymembus.py  Build the byte-safe pymembus binding locally
-  install_dalg_depth_model.py  Download, export and install dalg's depth ONNX model
-
-apps/                       The six applications and the view layer they share.
-                            A source root rather than a package, like src/:
-                            they import each other as `dsim.dsim` and
-                            `dcmn.window`, never `apps.dsim`
-  dcmn/
-    theme.py                  The one dvision2 colour palette
-    tktheme.py                That palette applied to ttk, shared by every window
-    mapview.py                Top-down map and vehicle drawing, shared by every view
-    pacing.py                 Repaint caps, so a window never paces control
-    window.py                 Window geometry persistence and the input-method opt-out
-    sensors.py                Sensor discovery, record wire format, camera intake
-    context.py                The neutral session context: provider-owned pose,
-                              goal authority, frame and epoch resets
-    mapping.py                Runtime coverage sizing, caps and the allocation budget
-    maps.py                   The evidence plane: registry, manifest, grid codec,
-                              staleness -- plus `--dump` to inspect one
-    imagery.py                The optional reference-imagery plane: publisher,
-                              records, frame-checking session -- plus `--dump`
-    archive.py                Numeric output archives: recorder, reader, validator,
-                              standalone attempt rendering -- plus the CLI
-    map_pane.py               The shared grid-and-route view, and a host window
-    sensor_backend.py         The one seam a sensor provider fills: geometry,
-                              camera views, and the vehicle datum
-    device_view.py            The Devices tab: tree, pane grid, and every renderer
-    device_export.py          Pane snapshot PNG and JSON/CSV sample dumps
-    layout.py                 The pane grid: placement, spans, repair, persistence
-    scroll.py                 A form taller than its window, and the wheel that reaches it
-    series.py                 Min/max envelope series, so a 100 Hz sensor plots cheaply
-    module_bus.py             Module presence and run coordination over pymembus
-    event_viewer.py           The Events tab: passive, bounded event-bus inspection
-    health.py                 The one health vocabulary: wanted against achieved, graded
-    report_html.py            The page a report is written on, whatever it is about
-    navigation.py             Retained route/execution snapshots, execution profiles and dials
-    provider_target.py        The map target a provider publishes, as a fallback dnav goal
-
-  dsim/
-    dsim.py                   Simulator: physics, rendering, IPC server, UI
-    backend.py                dsim's answer to the sensor plane's three seams
-    headless.py               Fixed-timestep in-process driver with set_pose()
-    profiles.py               Drone hardware profiles: load, validate, resolve
-    transforms.py             The parent-linked body/mount/sensor transform graph
-    sensor_manager.py         Simulated-time sensor schedule and publication
-    sensor_models.py          Range/LiDAR measurement models and capture noise
-    sensors_panel.py          The Sensors tab: load, inspect, edit, apply
-    add_menu.py               The Add dropdown: described items, drawn to the palette
-    range.py                  Shared ray geometry and the exact range oracle
-    state_sensors.py          GNSS, IMU, barometer, magnetometer, thermometer models
-    realism.py                GPS, estimators, wind, latency, noise, battery, geofence
-    realism_panel.py          The Realism tab: those settings, changeable in flight
-    health.py                 Whether simulated time and every attached module keep up
-    scene.py                  Renderer appearance presets
-
-  dctl/
-    dctl.py                   Manual controller UI
-
-  daic/
-    daic.py                   AI controller, UI and headless modes
-    detector.py               OpenCV red target detector
-    planner.py                Mission state machine
-    controller.py             Target visual-servo controller
-    avoidance.py              Forward-speed obstacle brake
-    optical_flow_avoidance.py Dense optical-flow risk and range estimation
-    local_map.py              Vision-built local occupancy map and A* route plan
-    mini_slam_detector.py     Lightweight visual-motion obstacle detector
-    orb_slam3_detector.py     Optional ORB_SLAM3 integration wrapper
-    flight_log.py             JSONL flight logger and report analyzer
-    run_reporter.py           Run summary, images and HTML for a flight
-
-  dway/
-    dway.py                   Tour follower client, window and headless modes
-    link.py                   VehicleLink contract and the dsim implementation
-    tour.py                   Tour load/save/validate, frames, clearance
-    follower.py               Arrival rules, sequencing, control strategies
-    mission.py                Flight lifecycle state machine
-    frames.py                 map / local NED / global transforms
-    editor.py                 Map and waypoint editor, with live geometry checks
-    report.py                 Flight summary, event log, track plot, repeatability
-    route_source.py           Tour and dynamic route sources behind one interface
-    dynamic.py                Dynamic route admission, and the no-motion dry run
-    executor.py               Flies dnav's routes: permission checks, stops, launch, target mode
-    flightui.py               The dynamic/target flight window and headless runner
-    flightlog.py              Offline flight reports and run comparison (also a CLI)
-    replay.py                 Offline replay of a recorded flight (also a CLI)
-
-  dalg/
-    dalg.py                   Evidence producer: window, profile editor, headless, mapping CLI
-    run.py                    Continuous observation: context, pose admission, resets, archive
-    sources.py, evidence.py   One evidence adapter per sensor/algorithm source
-    profiles.py               Source-only profiles; the baselines live in assets/algorithm_profiles/
-    source_editor.py          The one profile editor: sources and settings only
-    model.py                  Pose, Frame and Result: what an algorithm sees and returns
-    algo/                     One module per evidence algorithm (no controls)
-    grid.py                   Occupancy and log-odds grids
-    overlay.py                The algorithm's own belief as an image
-    report.py                 summary.json and evidence images (numbers live in archive/)
-
-  dnav/
-    dnav.py                   Route planner: Plan / Cost / Events window, headless
-    plan.py                   Context pose/goal, evidence, cost, plan, publish, record
-    policy.py                 The cost policy: threshold, inflation, layer combine
-    route.py                  Waypoints, the status vocabulary, and what a route costs
-    clearance.py              Permission to fly a route: strict evidence or trusted plan
-    execution.py              Publishes the executable route and follows the executor's stops
-    planners/                 One module per planner, plus the straight-line control
-    report.py                 summary.json, events.jsonl and the route image
-
-  dfgb/
-    dfgb.py                   FlightGear bridge, a work in progress
-    protocols/                The FlightGear property-tree protocol XML it installs
-
-assets/                       Data to fly and experiment with (test fixtures live in tests/assets/)
-  maps/                       Text map files
-  textures/                   CC0 ground/wall textures
-  models/trees/               CC0 tree GLB models
-  tours/                      Committed benchmark tours and their diagnostics
-  algorithm_profiles/         The seven source-only dalg baselines
-  drone_profiles/             Committed vehicle hardware profiles, sensors and all
-  cost_policies/              Committed dnav cost policies
-  execution_profiles/         Route execution profiles: dry run, calibrated dsim, research target
-
-dtest/
-  contract.py               Literal coordinate/sign expectations (the oracle)
-  calibration_scene.py      Calibration fixture paths and image expectations
-  deterministic.py          Fixed-timestep in-process dsim driver
-  process_harness.py        Real-process dsim harness over the live transports
-  dway_rig.py               Deterministic dway flight: real dsim, in-process transport
-  conformance.py            Backend-neutral suite both harnesses must pass
-  color_probe.py            Independent RGB landmark measurement
-  faults.py                 Test-local fault injection for oracle self-checks
-  assertions.py             High-level assertions with failure artifacts
-  artifacts.py              Failure bundles (frames, timeline, path plot)
-  backend.py                Normalized vehicle-backend protocol
-  tkfixture.py              Withdrawn Tk roots, and the opt-in for mapped ones
-  preflight.py              Dependency preflight for the test groups
-  provider.py               Deterministic sensor/pose provider, no world file (also a CLI)
-  synthetic.py              The evidence fixture: a known room on the real plane (also a CLI)
-  evaluation.py             Offline truth rasters, scores, visibility, oracle controls
-  queries.py                Planner query sidecars, submitted as the mission goal authority
-  isolation.py              Audit hook that forbids world/tour/truth access in a process
-  dynamic_rig.py            Deterministic dynamic/target flights: real dsim, dnav publisher, executor
-  flight_calibration.py     Measures HOLD stopping for the calibrated execution profile
-
-tests/
-  assets/                   Fixture data only the tests use: calibration and
-                            perception-chain maps, planner queries, navigation
-                            protocol examples and the sim-speed conformance tour
-  flight_test.py            End-to-end headless flight runner
-  reversal_mutations.py     Audits the suite against sign/orientation reversals
-  test_dvision_perception_chain.py  Render -> detector -> occupancy map, end to end
-  vision_debug_report.py    Vision/map diagnostic summary from flight logs
-  benchmark_diagnosis.py    Route/control cause summary + failure classification hints
-  test_daic_*.py            DAIC detector, planner, map, avoidance tests
-  test_dctl_controls.py     Manual control tests
-  test_dsim_crash_reset.py  Simulator collision/reset tests
-  test_dsim_realism_controls.py  Changing the environment while the sim runs
-  test_dcmn_mapview.py      Shared map geometry, both drawing backends
-  test_dcmn_theme.py        One palette, and no module keeping its own copy
-  test_dcmn_device_view.py  Renderers, pane grid, freeze, export, pop-out
-  test_dcmn_layout.py       Grid placement, spans and record repair
-  test_dcmn_session.py      Sensor intake, caching and accounting
-  test_dctl_devices.py      The Devices tab inside a real dctl window
-  test_sensor_*.py          Sensor contract, geometry, state, stereo, health,
-                            release, and the backend seam under all of them
-  bridge_probe.py           A full sensor run through a non-dsim backend, in a
-                            fresh interpreter: proves the scheduler stays free
-                            of the simulator at capture time, not just at import
-  test_dnav_planning.py     Cost policy, planners, and the admissibility gate
-  test_dnav_run.py          Planning loop: staleness, re-planning, presence, report
-  test_dnav_window.py       The Plan and Cost tabs, against real widgets
-  test_dcmn_maps.py         Evidence contract: codec, discovery, revision, staleness
-  test_dcmn_context.py      Session context: provider ownership, pose validity, goal authority
-  test_dcmn_archive.py      Output archive: bounds, gaps, corruption, crash recovery
-  test_dcmn_mapping.py      Coverage sizing, caps, and the measured allocation budget
-  test_dcmn_map_pane.py     What the shared map pane paints, and what it refuses to
-  test_dcmn_imagery.py      The optional reference-imagery plane: registration
-                            under every transform, lying and torn records,
-                            budgets, frame epochs, provider restarts, and the
-                            three-background numeric-identity run
-  test_dalg_*.py            Algorithm core, baselines, profile editor, runtime lifecycle
-                            and resets, isolated real-process runs, the fixture room
-  test_module_bus.py        Module presence, run coordination and shutdown
-  test_event_viewer.py      Bounded event history, filters and eviction
-  test_dvision_wall_clock_independence.py  Nothing depends on how busy the machine is
-  test_dvision_sim_speed_conformance.py  The same tour flown at two speeds, and the same report
-  test_dtest_harness.py     The suite's own invariants, including staying off screen
-  test_dway_*.py            Vehicle contract, tours, flights, realism, editor, transports
-  test_navigation*.py       Route/execution snapshots, clearance, the dnav publisher, and the
-                            dry-run process chain
-  test_dynamic_flight.py    Dynamic and target flights on the deterministic rig: stops,
-                            replanning, launch, heading, shutdown
-  test_flight_*.py          Execution profile calibration, flight window, reports and replay
-  test_target_flight_process.py  The four processes flying to a target (DVISION_NIGHTLY=1)
-  test_provider_target.py   dnav's fallback goal from the provider's map target
-  test_dnav_report.py       dnav's report page
-  test_dcmn_maps_generation.py  A consumer follows a new evidence generation after a remap
-  test_dcmn_health.py       Intake meters, health helpers, envelopes and periodic deadlines
-  test_dcmn_window.py       Window geometry persistence and the input-method opt-out
-  test_dcmn_array_match.py  Array and metadata rendezvous, including delayed channels
-  test_dsim_sensors_panel.py  The Sensors tab: a validated draft and a safe Apply
-  test_dvision_scene_presets.py  The calibration contract under every scene preset
-  test_dvision_nightly.py   Opt-in longer process calibration checks
-  test_dfgb_controls.py     FlightGear bridge controls
-  test_optical_flow_avoidance.py  Optical-flow obstacle risk extraction
-  test_local_map_provenance.py, test_mini_slam_correlation.py  daic flight-log analysis
-  test_benchmark_aggregate.py  The multi-run benchmark aggregator
-  dway_repeatability.py     Repeated baseline flights, aggregated into variance
-  benchmark_batch.py        N parallel flights of one configuration, aggregated
+ ┌────────────────────────────────────────────────────────────────────┐
+ │ dsim · the world and the vehicle                                   │
+ │ physics, collisions, rendering, sensor models, realism,            │
+ │ simulated clock, session context                                   │
+ │ in: maps/, drone_profiles/                                         │
+ └───┬────────────────────────────────────────────────────────────▲───┘
+     │ sensors, telemetry,                                        │ commands, from one
+     │ pose, goal                                                 │ lease holder at a time
+     │                                                            │
+     │    ┌──────────────────────────────────────┐                │
+     ├───▶│ dctl · manual flight                 │───────────────▶┤
+     │    │ keyboard and gamepad, device views   │                │
+     │    └──────────────────────────────────────┘                │
+     │    ┌──────────────────────────────────────┐                │
+     ├───▶│ daic · camera autopilot              │───────────────▶┤
+     │    │ detect, local map, avoid, servo      │                │
+     │    └──────────────────────────────────────┘                │
+     │    ┌──────────────────────────────────────┐                │
+     ├───▶│ dalg · evidence producer             │                │
+     │    │ sensors -> occupancy grid per source │                │
+     │    │ in: algorithm_profiles/              │                │
+     │    └───────────────────┬──────────────────┘                │
+     │                        │ evidence grids                    │
+     │                        ▼                                   │
+     │    ┌──────────────────────────┐  route    ┌────────────────┴─────────┐
+     ├───▶│ dnav · route planner     │──────────▶│ dway · executor          │
+     │    │ evidence -> cost ->      │           │ flies a tour, or dnav's  │
+     │    │ route to the goal        │◀──────────│ route, and stops safely  │
+     │    │ in: cost_policies/,      │  stops    │ in: tours/,              │
+     │    │     execution_profiles/  │           │     execution_profiles/  │
+     │    └──────────────────────────┘           └──────────────────────────┘
+     │                                                 ▲
+     └─────────────────────────────────────────────────┘
 ```
 
-`assets/` holds what you fly and experiment with: the maps, the committed tours
-with their geometry diagnostics, the algorithm, drone and execution profiles,
-the cost policies, and the CC0 textures and tree models the renderer uses. Data
-that exists only for the test suite lives in `tests/assets/`, and downloaded or
-generated models (dalg's depth model) live in `.cache/`.
+| Module | Role | Outline |
+|---|---|---|
+| `dsim` | Vehicle provider | Owns the simulated world and the vehicle: physics, collisions, rendering, the sensor schedule and noise models, environment realism and simulated time. Creates the stable shared-memory areas, publishes sensors, telemetry and the session context (pose, goal, epochs), and is the only reader of vehicle commands. [More](#simulator-dsim) |
+| `dctl` | Manual controller | An operator window: flies the vehicle from keyboard or gamepad, and inspects every sensor stream (Devices tab) and the module bus (Events tab). [More](#manual-controller-dctl) |
+| `daic` | Camera autopilot | A self-contained vision controller: detects the red target, builds its own local occupancy map from the camera, brakes for obstacles and servos onto the target. Its perception and planning stay inside the process. [More](#ai-controller-daic) |
+| `dalg` | Evidence producer | Runs sensor-to-evidence algorithms (LiDAR inverse model, stereo, optical flow, monocular depth and others) and publishes one occupancy-evidence grid per source. It never sees the map and sends no vehicle commands. [More](#evidence-producer-dalg) |
+| `dnav` | Route planner | Turns evidence into cost under a cost policy, plans a route to the goal, decides how much of that route is clear to fly under the execution profile, and publishes it. It holds no control lease and sends no vehicle commands. [More](#dynamic-routes-dnav-plans-dway-flies) |
+| `dway` | Executor | The only module that flies a path. It either follows a fixed tour, or flies dnav's route and reports progress and stops back to dnav. It reaches the vehicle only through `VehicleLink`, the seam a real drone would sit behind. [More](#waypoint-navigation-dway) |
 
-## Architecture
+The second diagram shows the same connections at the level of shared-memory
+areas: which module writes (●) or reads (○) each one, ◉ where a module does
+both, and ◌ where it reads only to draw a debug background. A line that passes
+a column (┼) means that module does not touch that area.
+
+```text
+                    ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
+                    │   dsim  │  │   dctl  │  │   daic  │  │   dalg  │  │   dnav  │  │   dway  │
+                    │ vehicle │  │  manual │  │  vision │  │ evidence│  │  route  │  │tours and│
+                    │ provider│  │ control │  │autopilot│  │ producer│  │ planner │  │  routes │
+                    └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘
+                         │            │            │            │            │            │
+.control                 ○────────────●────────────●────────────┼────────────┼────────────●
+                         │            │            │            │            │            │
+.status                  ●────────────○────────────○────────────┼────────────┼────────────○
+                         │            │            │            │            │            │
+.sensors + rings         ●────────────○────────────○────────────○            │            │
+                         │            │            │            │            │            │
+.context                 ●────────────┼────────────┼────────────○────────────◉────────────○
+                         │            │            │            │            │            │
+.imagery                 ●────────────┼────────────┼────────────◌────────────◌            │
+                         │            │            │            │            │            │
+.maps + map rings        │            │            │            ●────────────○────────────○
+                         │            │            │            │            │            │
+navigation.dnav          │            │            │            │            ●────────────○
+                         │            │            │            │            │            │
+execution                │            │            │            │            ○────────────●
+                         │            │            │            │            │            │
+.events                  ◉────────────◉────────────◉────────────◉────────────◉────────────◉
+```
+
+| Area | What it carries |
+|---|---|
+| `.control` | Vehicle commands and control-lease requests. Exactly one client holds the lease at a time, and dsim refuses commands that do not carry it |
+| `.status` | Retained vehicle telemetry, published capabilities and command outcomes |
+| `.sensors` + rings | The sensor manifest, plus one video ring per camera, one array ring per LiDAR and a shared ring for compact samples, all named by provider session and generation |
+| `.context` | The session: report root, frame and epochs, data clock, the provider's pose, and the goal with its single authority |
+| `.imagery` | An optional reference picture of the world, for people to look at. Never an input to dalg or dnav |
+| `.maps` + map rings | dalg's evidence manifest and one occupancy-and-age grid ring per source |
+| `navigation.dnav` | dnav's current executable route and how far along it permission to fly extends |
+| `execution` | dway's progress along that route, its stops and its stop generation |
+| `.events` | The module bus: presence, health, run coordination, `route.planned` and shutdown |
+
+`dtest/provider.py` can take dsim's place as a deterministic provider with no
+world file. `dfgb`, the FlightGear bridge, is set aside and does not speak the
+current sensor contract. The full buffer inventory is in
+[docs/membus.md](docs/membus.md), and the protocol between dnav and dway is in
+[docs/navigation.md](docs/navigation.md).
 
 `dsim` owns the simulated world. It creates the shared-memory buffers, runs the
 physics loop, renders the drone camera feed, checks collisions, and publishes
@@ -398,6 +252,24 @@ simulated time, geometry, how much has been observed -- and says `stale_map`
 with an age when the producer stops, rather than going quiet. `--mode` selects
 what the pane paints: `occupancy`, `age`, `never` or `cost`.
 
+**Zooming a pane.** A host asks for it (`MapPane(..., zoom=True)`), and
+`dmsn`'s Mission map, `dnav`'s Plan map and `dway`'s live map do. The wheel
+zooms about the pointer and stops where the evidence runs out of detail -- one
+cell at 32 screen pixels -- so the ceiling follows the grid and the canvas
+rather than being a constant: 0.25 m cells in a 480 px pane reach about 17x,
+and a wider window reaches less because the fit already started larger. Only
+the cells the canvas can show are ever scaled and uploaded, so a repaint costs
+the same zoomed in as fitted. Which button pans depends on what the host
+claimed: a pane that takes no pointer callbacks (dway's live map) pans with a
+plain drag, and one that does (dmsn's editors, dnav's click-to-set-goal) pans
+with the middle button or control and keeps every gesture it had. The image
+cannot be dragged off its own canvas, so "not the fitted view" and "there is
+something to reset" are the same question: while they hold, a translucent
+**Reset view** badge sits in the image's top-right corner showing the factor,
+and a press on it is never a press on the map. The view belongs to the pane,
+not to the data -- every report snapshot renders the whole grid at its own
+scale, whatever an operator happens to be looking at.
+
 `dnav` is the consumer of that plane. It discovers the evidence, turns it into
 cost under a **cost policy**, plans a route to a goal, publishes it and shows
 it. The policy split is the point: `dalg` says how likely a cell is occupied
@@ -414,8 +286,9 @@ python3 dtest/queries.py --id area1 \
     tests/assets/planner_queries/maze_013.v1.json                   # a scenario goal, as the mission
 ```
 
-Without `--goal`, dnav adopts the map target (`*`) the simulator publishes, once per
-session and never over another goal; `--no-provider-goal` turns that off. dnav writes
+Without `--goal`, dnav plans nothing until a goal is set; `--provider-goal` makes it adopt
+the map target (`*`) the simulator publishes, once per session and never over another
+goal. dnav writes
 a dark `report.html` beside its `summary.json`.
 
 Goals live in the instance's **session context** (`apps/dcmn/context.py`), not
@@ -611,14 +484,14 @@ python3 apps/dway/dway.py --edit --map assets/maps/maze_012.txt
 Headless automated run:
 
 ```sh
-python3 tests/flight_test.py --map assets/maps/maze_002.txt --duration 20 --fps 20
+python3 tests/tools/flight_test.py --map assets/maps/maze_002.txt --duration 20 --fps 20
 ```
 
 Headless run with a vision diagnostic log:
 
 ```sh
-python3 tests/flight_test.py --map assets/maps/maze_002.txt --duration 20 --fps 20 --log /tmp/maze002.jsonl
-python3 tests/vision_debug_report.py /tmp/maze002.jsonl
+python3 tests/tools/flight_test.py --map assets/maps/maze_002.txt --duration 20 --fps 20 --log /tmp/maze002.jsonl
+python3 tests/tools/vision_debug_report.py /tmp/maze002.jsonl
 ```
 
 Permanent benchmark run with route/control diagnosis (why is the drone still
@@ -626,9 +499,9 @@ in `SEARCH`? — perception miss, map noise/trap, planning miss, control stall,
 or target-reacquisition miss):
 
 ```sh
-python3 tests/flight_test.py --map assets/maps/maze_002.txt --duration 30 --fps 20 \
+python3 tests/tools/flight_test.py --map assets/maps/maze_002.txt --duration 30 --fps 20 \
     --report-dir reports/benchmarks/<run-id>
-python3 tests/benchmark_diagnosis.py reports/benchmarks/<run-id>
+python3 tests/tools/benchmark_diagnosis.py reports/benchmarks/<run-id>
 ```
 
 `--report-dir` writes `summary.json` (with a nested `diagnosis` block),
@@ -1457,11 +1330,11 @@ replays one offline (see [docs/navigation.md](docs/navigation.md)).
 
 `dalg`'s premise is that a tour is a predictable stimulus, so how repeatable
 closed-loop following actually is had to be measured rather than assumed.
-`tests/dway_repeatability.py` flies one baseline tour N times through real
+`tests/tools/dway_repeatability.py` flies one baseline tour N times through real
 `dsim` and `dway` processes with realism off and aggregates the runs:
 
 ```sh
-python3 tests/dway_repeatability.py --runs 5
+python3 tests/tools/dway_repeatability.py --runs 5
 ```
 
 It writes `reports/dway-repeatability/<name>/repeatability.json` -- run count,
@@ -1511,12 +1384,50 @@ python3 ./apps/dnav/dnav.py --id area1 --goal 52.444,2.389 --execution-profile s
 python3 ./apps/dway/dway.py --id area1 --mode target --wait-for algorithm
 ```
 
-Leave out `--goal` and dnav adopts the map target (`*`) the simulator publishes.
+Leave out `--goal` and add `--provider-goal` and dnav adopts the map target (`*`) the simulator
+publishes. With a mission coordinator, dway waits for it instead (`--wait-for-mission`): see
+[Missions: dmsn](#missions-dmsn).
 
 See [dynamic navigation](docs/navigation.md) for target mode's dials, the measured limits, the execution
 lifecycle, the retained protocol, reports, replay and what is deferred. The profile
 was measured on dsim only (no wind, at most 50 ms telemetry latency) and does not
 transfer to hardware.
+
+## Missions: dmsn
+
+`dmsn` is the mission coordinator: it picks where the vehicle goes next and decides when
+the job is finished, while dnav plans and dway flies. It holds no control lease. It sets
+the session goal as the `mission` authority and asks dway for `launch`, `hold`, `resume`,
+`cancel`, `land` and `yaw_to` through a retained intent that dway may refuse. Missions are
+`goto` (one point), `waypoints` (a list, with an abort/skip/retry policy for unreachable
+points), `explore` (an area polygon, with a nearest-frontier or wall-following goal
+strategy) and `search` (explore until a dalg detector's target estimate is confirmed, look
+again from a standoff, land on the estimate; dalg then runs `--profiles lidar-baseline
+red-disc`, see [detection](docs/detection.md)). The chain waits to be told:
+
+```sh
+python3 ./apps/dsim/dsim.py --id area1 --map ./assets/maps/maze_020.txt --drone-profile camera-lidar --sim-speed 1.5 &
+python3 ./apps/dalg/dalg.py --id area1 --profile lidar-baseline &
+python3 ./apps/dnav/dnav.py --id area1 --execution-profile sim-target &
+python3 ./apps/dway/dway.py --id area1 --mode target --execution-profile sim-target --wait-for-mission &
+python3 ./apps/dmsn/dmsn.py --id area1                                   # the window
+python3 ./apps/dmsn/dmsn.py --id area1 --no-ui --profile maze_020-goto --start   # headless
+python3 ./apps/dmsn/dmsn.py --id area1 --no-ui --profile maze_020-explore --start
+python3 ./apps/dmsn/dmsn.py --import-tour assets/tours/maze_020.default.v1.json --out ~/.config/dvision2/missions/maze_020-tour.json
+```
+
+The window has Mission (the map with area and waypoint editors, controls, readouts and one **blocking fact** line),
+Setup (the mission type, a form generated from its parameters, and the profile file),
+Status (a sim-time strip of phases, goals, stops and intents) and Events tabs. Profiles
+are JSON (`assets/mission_profiles/` for examples, `~/.config/dvision2/missions/` for
+saves); `--set KEY=VALUE` overrides a field and `--validate` checks a file. A headless run
+exits 0 when the mission completes, 1 when it fails, is aborted, spends a budget or times
+out, and 2 on a startup problem such as a second dmsn for the same vehicle. Reports go to
+`<run>/dmsn/`, with an archive a recorded mission can be replayed from.
+
+The only mission today is `goto` (a click, typed coordinates or the provider's target).
+See [missions](docs/missions.md) for the chain, profiles, phases, intents, the window and
+reports.
 
 ## Vision Navigation
 
@@ -1631,6 +1542,15 @@ python3 apps/dway/dway.py --id area1 --no-ui --exit-on-finish \
         --tour assets/tours/maze_020.default.v1.json      # motion, supplied externally
 ```
 
+dalg also runs **target detectors** beside evidence when a detector profile is
+composed in (`--profiles lidar-baseline red-disc`): `red_disc` finds the red
+landing pad in camera frames, dalg projects each detection onto the ground with
+the capture-time camera pose, keeps a running estimate per target and publishes
+them on the detections plane (`/dvision2.<id>.detections.dalg`) for missions
+such as dmsn's `search`. A Detections tab, a Live overlay, archive events and a
+report section show what each detector saw and rejected. See
+[detection](docs/detection.md).
+
 dalg starts observing as soon as there is a session, a valid pose and at least
 one compatible sensor; it needs no goal and survives mission completion. Its
 states are `WAITING_PROVIDER`, `WAITING_POSE`, `WAITING_SENSORS`,
@@ -1646,7 +1566,7 @@ Options:
 | `--bounds` | `xmin,ymin,xmax,ymax` in local metres; overrides automatic sizing |
 | `--cell-m`, `--z0-m`, `--dz-m` | Resolution (0.5 m) and the one vertical slab (0 m, 3 m) |
 | `--mapping-budget-mib` | Estimated mapping memory budget, default 512 (not a process limit) |
-| `--min-side-m`, `--size-multiplier`, `--margin-m` | Automatic sizing: 40 m, 2.5, 10 m |
+| `--min-side-m`, `--size-multiplier`, `--margin-m` | Automatic sizing: 100 m, 2.5, 10 m |
 | `--camera-hz` | Camera admission per source in data-clock Hz, default 5 |
 | `--pose-max-age` | Pose freshness limit, data-clock seconds, default 0.5 |
 | `--recording-queue-mib`, `--recording-disk-mib` | Archive bounds, default 64 and 4096 |
@@ -1721,6 +1641,12 @@ Run all tests:
 pytest -q
 ```
 
+Tests are grouped by application (`tests/dalg/`, `tests/dmsn/`, etc.), with
+shared suites in `tests/navigation/`, `tests/sensors/`, and `tests/vision/`.
+Run one group with, for example, `pytest -q tests/sensors/`. Diagnostic and
+benchmark scripts live in `tests/tools/`; shared fixtures stay in
+`tests/assets/` and `tests/fixtures/`.
+
 `pytest -q` never opens a window on your desktop: widget tests run on a
 withdrawn root, and the few device-browser tests that genuinely need a
 *mapped* toplevel — freeze, pop-out and keyboard-focus delivery — take their
@@ -1728,7 +1654,7 @@ headless halves instead. Set `DVISION2_GUI_TESTS=1` to exercise those widget
 halves on a real display:
 
 ```sh
-DVISION2_GUI_TESTS=1 pytest -q tests/test_dcmn_device_view.py tests/test_dctl_devices.py
+DVISION2_GUI_TESTS=1 pytest -q tests/dcmn/test_dcmn_device_view.py tests/dctl/test_dctl_devices.py
 ```
 
 Install and verify the pinned vision-test environment:
@@ -1746,14 +1672,14 @@ deterministic physics and coordinate contract tests always run.
 Run only the deterministic coordinate/video contract:
 
 ```sh
-pytest -q tests/test_dvision_coordinate_contract.py \
-  tests/test_dvision_calibration_render.py
+pytest -q tests/vision/test_dvision_coordinate_contract.py \
+  tests/vision/test_dvision_calibration_render.py
 ```
 
 Run the real-process command/status/video and DAIC integration checks:
 
 ```sh
-pytest -q tests/test_dvision_process_transport.py
+pytest -q tests/vision/test_dvision_process_transport.py
 ```
 
 ### Linting
@@ -1795,6 +1721,11 @@ status conditions rather than fixed startup sleeps, records failure frames and
 telemetry, and removes shared-memory resources during cleanup. The DCTL GUI
 smoke case uses `xvfb-run` when a virtual display is available.
 
+Cleanup also runs when startup is interrupted or writing failure artifacts
+fails. On Linux, harness-launched simulators are killed automatically if the
+test runner dies; normal shutdown still terminates and reaps them gracefully.
+An abrupt kill cannot write final reports or run shared-memory cleanup.
+
 `dtest/conformance.py` holds the backend-neutral suite. It runs against the
 in-process deterministic simulator and the real DSIM process today, and is what
 a future MAVLink backend must pass.
@@ -1824,7 +1755,7 @@ Run the end-to-end perception chain (rendered pixels → detector → occupancy
 map):
 
 ```sh
-pytest -q tests/test_dvision_perception_chain.py
+pytest -q tests/vision/test_dvision_perception_chain.py
 ```
 
 Each link in that chain is unit-tested in isolation, which is not the same as
@@ -1838,14 +1769,14 @@ answer's sign rather than merely shift it.
 
 Sign and orientation bugs are the failure mode this project hits most: the data
 is well-formed and only its *interpretation* is mirrored, so a test that merely
-asserts "something happened" passes straight through. `tests/reversal_mutations.py`
+asserts "something happened" passes straight through. `tests/tools/reversal_mutations.py`
 measures whether the suite actually notices. It injects one reversal at a time
 into a production file, runs the suite, and reports whether anything failed:
 
 ```sh
-python3 tests/reversal_mutations.py            # audit every catalogued reversal
-python3 tests/reversal_mutations.py --list     # show the catalogue
-python3 tests/reversal_mutations.py -k slam    # only matching mutations
+python3 tests/tools/reversal_mutations.py            # audit every catalogued reversal
+python3 tests/tools/reversal_mutations.py --list     # show the catalogue
+python3 tests/tools/reversal_mutations.py -k slam    # only matching mutations
 ```
 
 A `MISSED` row is the useful output: it names a boundary where a mirrored axis
@@ -1861,7 +1792,7 @@ no longer matches the code and needs updating.
 Run a headless mission:
 
 ```sh
-python3 tests/flight_test.py
+python3 tests/tools/flight_test.py
 ```
 
 Useful options:
@@ -1877,7 +1808,7 @@ Useful options:
 Example:
 
 ```sh
-python3 tests/flight_test.py \
+python3 tests/tools/flight_test.py \
   --map assets/maps/maze_002.txt \
   --duration 20 \
   --fps 20 \
@@ -1926,7 +1857,7 @@ diagnostics:
 Use the diagnostic report to inspect whether perception and mapping agree:
 
 ```sh
-python3 tests/vision_debug_report.py /tmp/maze002.jsonl
+python3 tests/tools/vision_debug_report.py /tmp/maze002.jsonl
 ```
 
 The report highlights:
@@ -2229,69 +2160,490 @@ renderer change shows up in the record instead of hiding behind a stable label.
 
 Asset sources are documented in `SOURCE.md` files beside the imported assets.
 
-## Development Notes
 
-Physics are intentionally approximate. There is no full multirotor model,
-gravity or propeller simulation. Horizontal velocity follows body-frame
-forward/right setpoints through a first-order lag. Vertical velocity follows
-`up_mps` directly.
+## Project Layout
 
-Wind is simulated, but as an environment rather than as aerodynamics: it moves
-the airframe over the ground without acting on attitude, so the vehicle's own
-velocity is through the air and the published velocity is over the ground. That
-difference is the whole point -- it is what a position controller has to notice
-and correct -- and it is enough to tell a controller that works from one that
-only looked like it worked. It is not a model of how a real airframe reacts to
-a gust.
+```text
+dvision2_common.py          Shared protocol, map loading, ids, status keys
+compare.py                  Offline comparison of historical, scored dalg summaries
+requirements.txt            The pinned, supported runtime environment
+requirements-dev.txt        The above plus the linter, auditor and coverage plugin
+ruff.toml                   Lint rules: correctness only, house style left alone
+LICENSE                     MIT
+SECURITY.md                 What to report privately, where, and what is in scope
+.github/
+  dependabot.yml            Weekly pip and action updates, so exact pins stay fresh
+  workflows/
+    ci.yml                  Lint, then the suite on 3.11-3.13 under xvfb
+    codeql.yml              Static analysis on master and weekly
+    security.yml            pip-audit over the pins, gitleaks over the history
+    nightly.yml             The `nightly` marker, on a schedule
+docs/
+  clock.md                  Simulated vs wall time, module sync, and the failure modes
+  modcom.md                 Module communication: the four shared-memory planes
+  membus.md                 The shared-memory buffer inventory and payloads
+  reports.md                Report layout: who owns what, and the rules
+  recovery.md               How a module recovers from a reset, restart or profile change
+  sensors-protocols.md      Sensor configuration and the protocols behind it
+  dctl-devices.md           The dctl device browser: intake, layout, renderers
+  sensor/                   One document per simulated sensor type, plus the
+                            rules they share
+  mavlink-slam-nav.md       The reference architecture the vehicle seam borrows from
+  navigation.md             Dynamic routes: dnav's permission, dway's dynamic and target
+                            modes, dials, measured limits, reports and replay
+  camera-evidence.md        Camera evidence algorithms and their baselines
+  multisensor-evidence.md   Combining camera and LiDAR evidence sources
+  algorithms/               One document per dalg algorithm: the six camera
+                            evidence algorithms, the LiDAR inverse model, the
+                            detector and the shared occupancy grid
+  missions/                 One document per dmsn mission type, plus the goal
+                            strategies the area missions plug in
+  planners/                 One document per dnav planner, plus the cost policy,
+                            the clearance geometry and the route object they
+                            are all defined against
 
-Velocity command values in logs are SI setpoints. Status velocity keys show the
-actual simulated world-frame response after lag and collision handling.
+scripts/
+  build_sensor_pymembus.py  Build the byte-safe pymembus binding locally
+  install_dalg_depth_model.py  Download, export and install dalg's depth ONNX model
 
-**Simulated time is the vehicle's clock.** `sim.time_s` counts the seconds the
-physics advanced, and every timer that gates flight reads it rather than the
-wall clock: the guided setpoint failsafe, the control lease and telemetry
-latency in `dsim`; the whole mission clock in `dway` -- dwell, arrival gates,
-leg timeouts, the setpoint stream; the planner's state timers in `daic`; the
-frame capture rate in `dalg`. A failsafe that fires because the machine was
-busy rather than because the vehicle flew for two seconds is measuring the
-wrong thing.
+apps/                       The six applications and the view layer they share.
+                            A source root rather than a package, like src/:
+                            they import each other as `dsim.dsim` and
+                            `dcmn.window`, never `apps.dsim`
+  dcmn/
+    theme.py                  The one dvision2 colour palette
+    tktheme.py                That palette applied to ttk, shared by every window
+    mapview.py                Top-down map and vehicle drawing, shared by every view
+    pacing.py                 Repaint caps, so a window never paces control
+    window.py                 Window geometry persistence and the input-method opt-out
+    sensors.py                Sensor discovery, record wire format, camera intake
+    context.py                The neutral session context: provider-owned pose,
+                              goal authority, frame and epoch resets
+    mapping.py                Runtime coverage sizing, caps and the allocation budget
+    maps.py                   The evidence plane: registry, manifest, grid codec,
+                              staleness -- plus `--dump` to inspect one
+    imagery.py                The optional reference-imagery plane: publisher,
+                              records, frame-checking session -- plus `--dump`
+    archive.py                Numeric output archives: recorder, reader, validator,
+                              standalone attempt rendering -- plus the CLI
+    map_pane.py               The shared grid-and-route view, and a host window
+    sensor_backend.py         The one seam a sensor provider fills: geometry,
+                              camera views, and the vehicle datum
+    device_view.py            The Devices tab: tree, pane grid, and every renderer
+    device_export.py          Pane snapshot PNG and JSON/CSV sample dumps
+    layout.py                 The pane grid: placement, spans, repair, persistence
+    scroll.py                 A form taller than its window, and the wheel that reaches it
+    series.py                 Min/max envelope series, so a 100 Hz sensor plots cheaply
+    module_bus.py             Module presence and run coordination over pymembus
+    event_viewer.py           The Events tab: passive, bounded event-bus inspection
+    health.py                 The one health vocabulary: wanted against achieved, graded
+    report_html.py            The page a report is written on, whatever it is about
+    navigation.py             Retained route/execution snapshots, execution profiles and dials
+    provider_target.py        The map target a provider publishes, as a fallback dnav goal
 
-`dt` is fixed at `1/physics_hz` (300 Hz in the default drone profile) in
-every mode. Real time paces those fixed steps against the wall clock and
-never enlarges a step to catch up: a process that stalls falls behind and
-reports the shortfall through `sim.speed_achieved`, because the physics did
-not run. A scaled run paces the identical steps at `step / multiplier`, which
-is what makes a scaled run repeatable.
+  dsim/
+    dsim.py                   Simulator: physics, rendering, IPC server, UI
+    backend.py                dsim's answer to the sensor plane's three seams
+    headless.py               Fixed-timestep in-process driver with set_pose()
+    profiles.py               Drone hardware profiles: load, validate, resolve
+    transforms.py             The parent-linked body/mount/sensor transform graph
+    sensor_manager.py         Simulated-time sensor schedule and publication
+    sensor_models.py          Range/LiDAR measurement models and capture noise
+    sensors_panel.py          The Sensors tab: load, inspect, edit, apply
+    add_menu.py               The Add dropdown: described items, drawn to the palette
+    range.py                  Shared ray geometry and the exact range oracle
+    state_sensors.py          GNSS, IMU, barometer, magnetometer, thermometer models
+    realism.py                GPS, estimators, wind, latency, noise, battery, geofence
+    realism_panel.py          The Realism tab: those settings, changeable in flight
+    health.py                 Whether simulated time and every attached module keep up
+    scene.py                  Renderer appearance presets
 
-Only two things may read the wall clock: liveness between processes
-(heartbeats, expiry, acknowledgement deadlines) and how often a window
-repaints. [`docs/clock.md`](docs/clock.md) is the full contract, including the
-failure modes that follow from getting the split wrong.
+  dctl/
+    dctl.py                   Manual controller UI
 
-A client that infers a distance from motion needs the same clock. `daic`'s
-optical-flow detector turns expansion into a range using `speed x elapsed`, and
-it takes both halves from the vehicle: taking the elapsed half from the wall
-clock made every range estimate a function of how busy the machine was.
+  daic/
+    daic.py                   AI controller, UI and headless modes
+    detector.py               OpenCV red target detector
+    planner.py                Mission state machine
+    controller.py             Target visual-servo controller
+    avoidance.py              Forward-speed obstacle brake
+    optical_flow_avoidance.py Dense optical-flow risk and range estimation
+    local_map.py              Vision-built local occupancy map and A* route plan
+    mini_slam_detector.py     Lightweight visual-motion obstacle detector
+    orb_slam3_detector.py     Optional ORB_SLAM3 integration wrapper
+    flight_log.py             JSONL flight logger and report analyzer
+    run_reporter.py           Run summary, images and HTML for a flight
 
-GPS values are derived from local XY using a flat-earth projection around the
-configured map origin. This is good enough for short local maps and gives DAIC
-a status-only target bearing without exposing simulator map geometry.
+  dway/
+    dway.py                   Tour follower client, window and headless modes
+    link.py                   VehicleLink contract and the dsim implementation
+    tour.py                   Tour load/save/validate, frames, clearance
+    follower.py               Arrival rules, sequencing, control strategies
+    mission.py                Flight lifecycle state machine
+    frames.py                 map / local NED / global transforms
+    editor.py                 Map and waypoint editor, with live geometry checks
+    report.py                 Flight summary, event log, track plot, repeatability
+    route_source.py           Tour and dynamic route sources behind one interface
+    dynamic.py                Dynamic route admission, and the no-motion dry run
+    executor.py               Flies dnav's routes: permission checks, stops, launch, target mode
+    flightui.py               The dynamic/target flight window and headless runner
+    flightlog.py              Offline flight reports and run comparison (also a CLI)
+    replay.py                 Offline replay of a recorded flight (also a CLI)
 
-DAIC should be debugged in layers:
+  dmsn/
+    dmsn.py                   Mission coordinator: window, headless loop, --validate
+    runner.py                 MissionRun: phases, goal debounce, intents, budgets, archive, replay
+    missions/                 One module per mission type (goto)
+    strategies/               Goal strategies for area missions (registry)
+    profiles.py, schema.py    Mission profiles and the ParamSchema behind form, file and --set
+    inputs.py, intents.py     The observation a mission sees and the decisions it returns
+    ports.py                  Every plane dmsn reads or writes, behind one surface
+    report.py                 summary.json, events, mission image, report.html
+    ui/                       Mission, Setup and Status tabs
 
-1. Check video orientation and target detection.
-2. Check fused obstacle sector risks.
-3. Check sector range estimates.
-4. Check local map occupied/free cells.
-5. Check the planned path and waypoint command.
-6. Check the final avoidance brake and sent command.
+  dalg/
+    dalg.py                   Evidence producer: window, profile editor, headless, mapping CLI
+    run.py                    Continuous observation: context, pose admission, resets, archive
+    sources.py, evidence.py   One evidence adapter per sensor/algorithm source
+    profiles.py               Source-only profiles; the baselines live in assets/algorithm_profiles/
+    source_editor.py          The one profile editor: sources and settings only
+    model.py                  Pose, Frame and Result: what an algorithm sees and returns
+    algo/                     One module per evidence algorithm (no controls)
+    grid.py                   Occupancy and log-odds grids
+    overlay.py                The algorithm's own belief as an image
+    report.py                 summary.json and evidence images (numbers live in archive/)
 
-The most useful command pair for obstacle-navigation debugging is:
+  dnav/
+    dnav.py                   Route planner: Plan / Cost / Events window, headless
+    plan.py                   Context pose/goal, evidence, cost, plan, publish, record
+    policy.py                 The cost policy: threshold, inflation, layer combine
+    route.py                  Waypoints, the status vocabulary, and what a route costs
+    clearance.py              Permission to fly a route: strict evidence or trusted plan
+    execution.py              Publishes the executable route and follows the executor's stops
+    planners/                 One module per planner, plus the straight-line control
+    report.py                 summary.json, events.jsonl and the route image
 
-```sh
-python3 tests/flight_test.py --map assets/maps/maze_002.txt --duration 20 --fps 20 --log /tmp/maze002.jsonl
-python3 tests/vision_debug_report.py /tmp/maze002.jsonl
+  dfgb/
+    dfgb.py                   FlightGear bridge, a work in progress
+    protocols/                The FlightGear property-tree protocol XML it installs
+
+assets/                       Data to fly and experiment with (test fixtures live in tests/assets/)
+  maps/                       Text map files
+  textures/                   CC0 ground/wall textures
+  models/trees/               CC0 tree GLB models
+  tours/                      Committed benchmark tours and their diagnostics
+  algorithm_profiles/         The seven source-only dalg baselines
+  drone_profiles/             Committed vehicle hardware profiles, sensors and all
+  cost_policies/              Committed dnav cost policies
+  execution_profiles/         Route execution profiles: dry run, calibrated dsim, research target
+
+dtest/
+  contract.py               Literal coordinate/sign expectations (the oracle)
+  calibration_scene.py      Calibration fixture paths and image expectations
+  deterministic.py          Fixed-timestep in-process dsim driver
+  process_harness.py        Real-process dsim harness over the live transports
+  owned_process.py          Linux parent-death protection for harness subprocesses
+  dway_rig.py               Deterministic dway flight: real dsim, in-process transport
+  conformance.py            Backend-neutral suite both harnesses must pass
+  color_probe.py            Independent RGB landmark measurement
+  faults.py                 Test-local fault injection for oracle self-checks
+  assertions.py             High-level assertions with failure artifacts
+  artifacts.py              Failure bundles (frames, timeline, path plot)
+  backend.py                Normalized vehicle-backend protocol
+  tkfixture.py              Withdrawn Tk roots, and the opt-in for mapped ones
+  preflight.py              Dependency preflight for the test groups
+  provider.py               Deterministic sensor/pose provider, no world file (also a CLI)
+  synthetic.py              The evidence fixture: a known room on the real plane (also a CLI)
+  evaluation.py             Offline truth rasters, scores, visibility, oracle controls
+  queries.py                Planner query sidecars, submitted as the mission goal authority
+  isolation.py              Audit hook that forbids world/tour/truth access in a process
+  dynamic_rig.py            Deterministic dynamic/target flights: real dsim, dnav publisher, executor
+  flight_calibration.py     Measures HOLD stopping for the calibrated execution profile
+
+tests/
+  conftest.py               Shared dependency gating
+  daic/, dalg/, dcmn/       Controller, algorithm, and common-component tests
+  dctl/, dfgb/              Manual-control and FlightGear bridge tests
+  dmsn/, dnav/              Mission and planner application tests
+  dsim/, dway/              Simulator and waypoint application tests
+  navigation/              Cross-module navigation, flight, and execution tests
+  sensors/                 Sensor contracts, geometry, state, health, and lifecycle
+  vision/                  Rendering, perception, coordinate, and timing contracts
+  tools/                   Test-harness tests, flight runners, diagnostics, benchmarks
+  assets/                  Shared maps, queries, tours, and protocol fixtures
+  fixtures/                Shared mission fixtures
 ```
+
+`assets/` holds what you fly and experiment with: the maps, the committed tours
+with their geometry diagnostics, the algorithm, drone and execution profiles,
+the cost policies, and the CC0 textures and tree models the renderer uses. Data
+that exists only for the test suite lives in `tests/assets/`, and downloaded or
+generated models (dalg's depth model) live in `.cache/`.
+
+
+## Asset Types
+
+Everything in `assets/` is data rather than code: a run is *configured* with
+it, no single module owns it, and it changes far more often than the code
+that reads it. Each type answers one question and belongs to one module (or
+to one pair of modules that must agree). Every JSON type carries a `schema`
+or `schema_version`, and the loaders refuse unknown versions and unknown
+fields instead of guessing. Most are also hashed when loaded, and the digest
+goes into the reports, so a result records exactly which file produced it
+and not just the file's name.
+
+Anywhere a module takes one of these on the command line, a bare name (with
+or without `.json`) looks in the matching `assets/` directory, and a path
+loads that file. A copy you edit elsewhere never has to be committed first.
+
+| Directory | Question it answers | Read by | Flag |
+|---|---|---|---|
+| `maps/` | What does the world look like? | dsim, dway (tour checks), evaluation | `--map` |
+| `drone_profiles/` | What hardware is fitted to the vehicle? | dsim | `--drone-profile` |
+| `algorithm_profiles/` | Which sensor feeds which evidence algorithm? | dalg | `--profile`, `--profiles` |
+| `cost_policies/` | How does evidence become a cost to plan on? | dnav | `--policy` |
+| `execution_profiles/` | What are this vehicle's flight limits? | dnav *and* dway | `--execution-profile`, `--profile-set` |
+| `tours/` | Which fixed path should the vehicle fly? | dway | `--tour` |
+| `textures/`, `models/` | What should the scene look like? | dsim renderer | none |
+
+### Maps (`assets/maps/`)
+
+A map is the ground truth of a world: an ASCII grid, one character per
+metre, with the drone's start position, targets, walls and trees, and a
+`DATA` block that sets the starting altitude. The format and the included
+maps are covered under [Maps](#maps). `maze_020.txt` is the larger layout the
+dynamic-route and multi-sensor examples fly.
+
+Maps exist so a world is a text file you can read, diff and write by hand,
+not a scene you have to open in an editor. The same file drives the renderer,
+the collision model and the evaluation-only truth oracle, so those three
+cannot disagree about where a wall is. Only dsim and offline evaluation may
+read a map. dalg and dnav have to work the world out from sensors, and
+`dtest/isolation.py` enforces that in the tests.
+
+### Drone profiles (`assets/drone_profiles/`)
+
+A drone profile (`dvision2.drone-profile.v1`) describes the simulated
+vehicle's **hardware**: which sensors are fitted, where each one is mounted,
+what each measures and how often. dsim loads one with `--drone-profile`, and
+publishes every sensor it names on the sensor plane. It holds:
+
+| Field | Meaning |
+|---|---|
+| `name` | The profile's identity in reports and the Sensors tab |
+| `physics_hz` | The simulation step rate, default 300. Every sensor's `rate_hz` must divide it exactly, so every sample lands on a physics tick |
+| `primary_camera` | The id of an enabled `camera.rgb` sensor. Algorithm profiles refer to it with the `primary_camera` selector, so the same algorithm profile works on any vehicle |
+| `mounts` | The mount tree: `mount.fixed`, `rig.fixed`, or `mount.ptz` with a pan/tilt/roll `state` and `limits` |
+| `sensors` | Every sensor: `id`, `type`, `enabled`, `rate_hz`, a `parent` (`body` or a mount id), a `pose_parent` offset (`x_m y_m z_m roll_deg pitch_deg yaw_deg`), a type-specific `model`, and an optional `sync_group` for sensors that must be captured together, such as a stereo pair |
+| `transport` | Optional `retention_s` and `memory_limit_mib` (default 256 MiB) for the shared-memory rings |
+
+Sensor types are `camera.rgb`, `lidar.scan2d`, `lidar.range_image`, the
+rangefinders `range.ultrasonic`, `range.infrared` and `range.laser`, and the
+state sensors `position.gnss`, `motion.imu`, `altimeter.barometric`,
+`heading.magnetometer` and `environment.temperature`. A `model` gives
+resolution, field of view, range limits and noise; any field left out takes
+the type's default. [docs/sensor/](docs/sensor/README.md) documents each type,
+and [docs/sensor/mounts.md](docs/sensor/mounts.md) the mount tree.
+
+Profiles exist because what a vehicle carries is an experimental variable,
+not part of the simulator. Change the sensor set and you change the vehicle
+without touching code. Loading also checks that the profile can run: sample
+rates, parent links, sync groups, and whether the rings fit the memory budget.
+A profile that cannot run is refused at startup, not partway through a flight.
+
+| File | What it is for |
+|---|---|
+| `default.json` | A forward 640x480 camera plus the five state sensors. This is the committed copy of the built-in default dsim uses when `--drone-profile` is omitted |
+| `camera-lidar.json` | `default` plus a 360-degree, 180-sample `lidar.scan2d`. The usual vehicle for dynamic and target flights |
+| `fast-sweep.json` | A single 5 Hz camera and nothing else, for unattended `--sim-speed max` sweeps where rendering is the bottleneck |
+| `stereo-nav-and-proximity.json` | The reference vehicle and sensor budget: a PTZ-mounted stereo pair, both LiDAR outputs, three rangefinders and every state sensor. See [Reference budget](docs/sensor/README.md#reference-budget) |
+
+The Sensors tab in dsim edits a profile as a validated draft, applies it to
+the running simulator and saves it back to JSON.
+
+### Algorithm profiles (`assets/algorithm_profiles/`)
+
+An algorithm profile tells dalg **which evidence to produce**: a list of
+*sources*, each pairing one sensor with one evidence algorithm. It holds only
+two fields:
+
+```json
+{ "name": "lidar-baseline",
+  "sources": [ { "sensor": "scan", "algorithm": "lidar_inverse", "settings": {} } ] }
+```
+
+`sensor` is a sensor id from the drone profile, or the `primary_camera`
+selector, which resolves to whichever camera the running vehicle calls its
+primary. `algorithm` names a module under `apps/dalg/algo/`. `settings`
+overrides that algorithm's defaults, and an empty object takes them all.
+
+Profiles are deliberately source-only. A profile does not name a tour, a map,
+map bounds or cell size: tours belong to the mission tooling and grid extents
+to dalg's `--bounds` and `--cell-m`. Old profiles that still carry those fields
+are refused, and the error names the field. The rule keeps one profile valid
+across every map, vehicle and flight, which is what makes two runs
+comparable. `--profiles A B` joins the source lists of several profiles into
+one publisher, and a duplicate sensor/algorithm pair is an error. If a
+profile names a sensor the vehicle does not have, that source is left out and
+the reason is reported. It does not stop the run. See
+[docs/multisensor-evidence.md](docs/multisensor-evidence.md#composing-algorithm-profiles).
+
+There is exactly one committed **baseline** per evidence algorithm, each with
+default settings, so any new algorithm or tuning has a fixed reference to be
+measured against:
+
+| File | Sensor | Algorithm |
+|---|---|---|
+| `lidar-baseline.json` | `scan` | `lidar_inverse`: inverse sensor model over a 2D scan |
+| `ground-plane-baseline.json` | primary camera | `ground_plane` |
+| `features-baseline.json` | primary camera | `feature_triangulation` |
+| `optical-flow-baseline.json` | primary camera | `optical_flow_triangulation` |
+| `plane-sweep-baseline.json` | primary camera | `plane_sweep` |
+| `sgbm-baseline.json` | primary camera | `sgbm`: semi-global block matching |
+| `monocular-depth-baseline.json` | primary camera | `monocular_depth`: an ONNX metric-depth model installed into `.cache/` by `scripts/install_dalg_depth_model.py` |
+
+The camera algorithms are described in
+[docs/camera-evidence.md](docs/camera-evidence.md).
+
+### Cost policies (`assets/cost_policies/`)
+
+A cost policy (`dvision2.cost-policy.v1`) is **dnav's rule for turning
+evidence into cost**. dalg publishes what it believes: how likely each cell is
+to be occupied, and when that cell was last observed. It says nothing about
+what the belief should cost a route. The policy does that, and it is a
+separate versioned file, with its digest recorded, rather than a constant
+inside a planner. With it as a file, how cautious to be is a parameter you
+can see and change, not a choice hidden in the fusion code.
+
+| Field | Meaning |
+|---|---|
+| `name` | The policy's identity in reports |
+| `occupied_threshold` | Occupancy at or above this makes a cell an obstacle |
+| `inflation_m` | Hard margin around every obstacle. No route may enter it, so it has to cover the vehicle's footprint plus its least margin |
+| `clearance_preference_m` | Width of a soft band outside the hard margin |
+| `clearance_cost` | Extra cost at the inner edge of that band, falling to zero at its outer edge. With room, routes keep away from walls; in a narrow gap they run down the middle |
+| `combine` | How layers from several sources merge. Only `max` exists: a cell is as bad as its worst witness. Summing would count one wall twice when two sensors both see it |
+
+Free cells cost 1, cells never observed cost 1.5, and a blocked cell costs
+infinity. The unknown is passable, but routes prefer ground something has
+actually seen, and no detour is ever long enough to buy a path through a
+wall. The execution profile sets a floor under the policy: dnav raises
+`inflation_m` to the profile's clearance radius and records the resulting
+*effective* policy, so planning, admission and replay all use the same
+numbers.
+
+| File | What it is for |
+|---|---|
+| `default.json` | 0.35 m hard margin plus a 0.75 m soft band. dnav's default |
+| `cautious.json` | 1.1 m hard margin with no soft band. Routes stay well away from anything seen, at the cost of refusing narrow corridors |
+
+### Execution profiles (`assets/execution_profiles/`)
+
+An execution profile (`dvision2.execution-profile.v1`) is **the flight
+envelope of one vehicle under stated conditions**: how fast it may fly, how
+far it travels before a stop takes effect, how far it may drift off the
+route, how old evidence may be, and whether dnav's route may pass through
+space no sensor has observed. It exists because a route is only safe relative
+to the vehicle flying it. A path with 0.3 m of clearance is fine for a vehicle
+that tracks within 0.1 m and stops in 0.2 m, and not for one that overshoots
+by 0.6 m.
+
+A profile is a **contract between two processes**. dnav uses it to decide
+which routes it may clear for flight. dway uses it to decide which of those it
+will accept, and to fly and stop them. Both must load the same file with the
+same `--profile-set` overrides. Each route snapshot carries the profile
+digest, and dway rejects any mismatch
+(`execution profile mismatch (planner <digest>, executor <digest>)`).
+Otherwise the planner could clear a route for a vehicle other than the one
+flying it.
+
+What a profile contains, by group (every field is listed with its default in
+`ExecutionProfile` in `apps/dcmn/navigation.py`, and
+[docs/navigation.md](docs/navigation.md) explains each in depth):
+
+| Group | Fields | Meaning |
+|---|---|---|
+| Identity and trust | `calibrated`, `calibration`, `note`, `slab_assumption` | Whether the limits were measured. A calibrated profile must carry the measurement record, and the loader checks every limit against it. `slab_assumption: vertical-extrusion` declares that a 2D grid stands for the full flight height. With `none`, nothing is cleared |
+| Permission | `permission`, `required_sources`, `free_threshold`, `occupied_threshold`, `max_age_s` | `evidence` (the default) clears only cells observed free recently. `plan` trusts dnav's route through the unknown and withdraws it only where an observed obstacle blocks it. `required_sources` names evidence sources that must be present before anything is cleared |
+| Geometry | `body_radius_m`, `half_height_m`, `altitude_m`, `mapping_margin_m`, `plan_clearance_m`, `tracking_m`, `min_tracking_m` | The vehicle's size, its altitude slab, and the lateral clearance a route must keep: the body plus the map error plus the least tracking allowance |
+| Motion and stopping | `speed_mps`, `stopping_m`, `stopping_s`, `reaction_s`, `stream_hz` | Cruise speed, the distance and time a stop needs, and how often dway sends commands |
+| Arrival and HOLD | `join_m`, `arrival_m`, `hold_speed_mps`, `hold_dwell_s`, `hold_timeout_s` | When the vehicle counts as on the route, arrived, or stopped |
+| Conditions | `max_state_age_s`, `max_wind_mps`, `max_telemetry_latency_ms` | The conditions the limits hold under. Start and Resume refuse when the vehicle reports worse |
+| Behaviour | `heading`, `turn_tolerance_deg`, `handoff_m`, `corner_blend_deg`, `goal_substitute_m` | Face the direction of travel or hold a fixed heading; take up a replacement route while moving; fly through shallow corners; or settle for the nearest reachable point when the goal is blocked. At zero, each of these stops first |
+
+The committed profiles are three levels of trust:
+
+| File | Calibrated | What it is for |
+|---|---|---|
+| `dry-run.json` | no | Synthetic limits for exercising the dnav and dway pipeline with no motion. Dynamic flight refuses it at startup (`calibrated: false ... cannot authorize dynamic flight`) |
+| `dsim-position-v1.json` | **yes** | The only calibrated profile: dsim's position-target vehicle, measured by `dtest/flight_calibration.py` on 2026-09-14 at 0.25 and 0.5 m/s, 0 and 50 ms latency, and no wind. `tests/navigation/test_flight_profile.py` re-measures it on every run, so a simulator change that invalidates it fails the suite. The loader refuses extrapolation: a speed, wind or latency above what was measured, or a limit tighter than the measured envelope plus margins. Its numbers describe dsim and do not transfer to a real vehicle |
+| `sim-target.json` | no | The research profile for target flights, and dway's default in target mode. It uses `plan` permission, travel heading, 0.5 m handoff and 65-degree corner blending at 1 m/s. Its limits were chosen, not measured, which target mode accepts and dynamic mode does not |
+
+To try a different limit without editing the file, pass
+`--profile-set KEY=VALUE` to **both** dnav and dway. An override changes the
+digest, so a one-sided change is caught and never flown.
+
+### Tours (`assets/tours/`)
+
+A tour is a **fixed, pre-authored flight path**: an ordered list of waypoints
+with heading and dwell time, plus the arrival gates (`waypoint_tolerance_m`,
+`arrival_speed_mps`, `heading_tolerance_deg`), the map it was written for,
+and that map's SHA-256. dway flies a tour exactly as written and avoids
+nothing. Before taking control it checks the map hash and the clearance of
+every leg, and it refuses a leg that passes through geometry. The format,
+coordinate frames and gates are under [Tours](#tours).
+
+Tours exist so that a *perception* experiment can hold motion constant. With
+the vehicle flying the same path every time, a change in dalg's output comes
+from the algorithm, not from where the vehicle happened to go. That is why
+the committed tours are grouped by **archetype**, each chosen to stress
+something different in an evidence algorithm:
+
+| Archetype | Motion | Why it matters |
+|---|---|---|
+| `forward` | Straight ahead | Depth from forward motion, where parallax is weakest at the centre of the image |
+| `strafe` | Sideways translation | The widest baseline per metre, the best case for triangulation |
+| `yaw_only` | Rotation in place | No translation and no parallax. An algorithm that reports depth here is making it up |
+| `orbit` | A circle around an obstacle | Views of one object from all sides |
+| `boustrophedon` | Back-and-forth rows | Area coverage |
+| `stop_and_stare` | Move, stop, turn, repeat | Mostly rotation, with short translations |
+
+Files are named `<map>.<archetype>.v<version>.json`, and a new version gets a
+new file, so a published result keeps pointing at the path it was measured
+on. Not every archetype fits every map: `maze_012.orbit`, `maze_014.orbit` and
+`maze_013.boustrophedon` are committed as `not_applicable` records. Each gives
+the measured geometry that ruled it out (for example, no obstacle with a clear
+1.2 m ring around it), so a missing tour is a recorded decision rather than a
+gap. dway refuses to fly them and says why.
+
+`diagnostics.v1.json` is not a tour. It holds each fixture's measured
+geometry: path length, total rotation, maximum baseline, distinct viewpoints,
+whether parallax is available, and the map hash. A tour that drifts from its
+record is caught before it changes a result. It also records `curated_via`
+and `curated`, which say whether a human has reviewed the tour in the editor
+or it was only generated. Results flown over an uncurated tour should say so.
+`maze_020.default.v1.json` is a plain route through `maze_020`, used as the
+fixed motion for the multi-sensor and camera-evidence examples.
+
+Tours are written and edited in dway's editor (`--edit`), which checks leg
+clearance as you go.
+
+### Textures and models (`assets/textures/`, `assets/models/`)
+
+The renderer's appearance inputs, all CC0:
+
+| Path | Used for |
+|---|---|
+| `textures/Ground037/` | The tiled ground plane (ambientCG, about 2.1 m per tile) |
+| `textures/Bricks042/` | The wall boxes (ambientCG) |
+| `models/trees/*.glb` | Tree models (Quaternius). Each `1` cell in a map gets a model and a rotation from a seed derived from the map path and cell, so a scene renders the same way every run |
+
+These change how the scene looks, never what is in it. Range sensors and the
+truth oracle see geometry only, so swapping a texture or model cannot change a
+range measurement. It can change what a camera algorithm sees, and that is a
+change worth measuring on its own. Each directory has a `SOURCE.md` giving
+the origin and license. If these files are missing, dsim draws plain boxes
+and primitive trees.
 
 ## Comparison to Similar Projects
 

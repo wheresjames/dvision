@@ -80,7 +80,7 @@ the way a real QNH does. The ISA model is troposphere-only.
 
 ## Correctness tests
 
-`tests/test_sensor_state.py` -- pressure and altitude inverting each other, the environment drift
+`tests/sensors/test_sensor_state.py` -- pressure and altitude inverting each other, the environment drift
 being read rather than re-rolled, and quantization reporting on its own grid.
-`tests/test_sensor_release.py` -- the sensor is present in the reference
+`tests/sensors/test_sensor_release.py` -- the sensor is present in the reference
 profile and produces every configured sample inside the run budget.

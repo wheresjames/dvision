@@ -677,6 +677,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="what to do once the last waypoint is reached")
     parser.add_argument("--wait-for-start", action="store_true",
                         help="stay in READY until Start is pressed")
+    parser.add_argument("--wait-for-mission", action="store_true",
+                        help="target mode: stay on the ground until a mission coordinator (dmsn) "
+                             "publishes a launch intent, and take hold/resume/cancel from it")
+    parser.add_argument("--land-timeout-s", type=float, default=60.0,
+                        help="target mode: simulated seconds to confirm a mission-requested landing "
+                             "before the executor faults (default: 60)")
     parser.add_argument("--wait-for", action="append", default=[], metavar="ROLE",
                         help="require a module role to acknowledge this run")
     parser.add_argument("--ready-timeout-s", type=float, default=15.0,
@@ -694,6 +700,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-ui", action="store_true",
                         help="run headless, for scripted flights")
     args = parser.parse_args(argv)
+    if args.wait_for_mission and args.mode != "target":
+        parser.error("--wait-for-mission requires --mode target")
     if args.mode == "target" and args.dry_run:
         parser.error("target mode flies; use --mode dynamic --dry-run to observe")
     if args.mode in ("dynamic", "target"):
@@ -722,6 +730,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         raise SystemExit("timeout must not be negative")
     if args.ready_timeout_s <= 0.0 or args.start_delay_s < 0.0:
         raise SystemExit("readiness timeout must be positive and start delay non-negative")
+    if args.land_timeout_s <= 0.0:
+        raise SystemExit("land timeout must be positive")
     return args
 
 

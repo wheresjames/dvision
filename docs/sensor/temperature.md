@@ -67,7 +67,7 @@ rather than above sea level.
 
 ## Correctness tests
 
-`tests/test_sensor_state.py` -- the value falling with height from the environment setting, and a
+`tests/sensors/test_sensor_state.py` -- the value falling with height from the environment setting, and a
 sample depending on its capture index rather than on call order.
-`tests/test_sensor_release.py` -- the sensor is present in the reference
+`tests/sensors/test_sensor_release.py` -- the sensor is present in the reference
 profile and produces every configured sample inside the run budget.

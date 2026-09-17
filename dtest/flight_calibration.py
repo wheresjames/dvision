@@ -5,7 +5,7 @@ real ``DroneSimulator`` physics and command handling through ``DsimLink`` over
 the in-process loopback transport, under a controlled clock, and compares what
 the vehicle *published* when the stop was decided with where it truly came to
 rest. The checked-in dynamic flight profile must cover every number measured
-here plus its declared margins; ``tests/test_flight_profile.py`` re-measures
+here plus its declared margins; ``tests/navigation/test_flight_profile.py`` re-measures
 and fails when it does not.
 
 Distances are measured from the *observed* position at the moment the stop was

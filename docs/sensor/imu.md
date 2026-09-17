@@ -89,9 +89,9 @@ barometer inside it: those are separate sensors in this profile.
 
 ## Correctness tests
 
-`tests/test_sensor_state.py` -- one g upward at rest, zero in free fall, forward acceleration on the
+`tests/sensors/test_sensor_state.py` -- one g upward at rest, zero in free fall, forward acceleration on the
 forward axis, each rate sign against its angle convention in both directions,
 an inverted mount inverting the reading, and the first sample having nothing
 to differentiate.
-`tests/test_sensor_release.py` -- the sensor is present in the reference
+`tests/sensors/test_sensor_release.py` -- the sensor is present in the reference
 profile and produces every configured sample inside the run budget.

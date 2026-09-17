@@ -52,7 +52,7 @@ class Shape:
     instead of by two implementations agreeing to stay in step.
     """
 
-    kind: str                      # "rect" | "oval" | "line"
+    kind: str                      # "rect" | "oval" | "line" | "polygon" | "text"
     x0: float
     y0: float
     x1: float
@@ -61,6 +61,24 @@ class Shape:
     outline: str | None = None
     width: float = 1.0
     dash: tuple[int, ...] = ()     # line only: on/off pixel lengths; empty is solid
+    #: polygon only: the vertices in map metres, closed implicitly. ``x0..y1``
+    #: then hold the bounding box, so extent checks need no special case.
+    points: tuple[tuple[float, float], ...] = ()
+    #: text only: the label, centred on ``(x0, y0)`` in the ``outline`` colour.
+    text: str = ""
+
+    @classmethod
+    def polygon(cls, points, **style) -> "Shape":
+        """A closed polygon; the bounding box is filled in from the vertices."""
+        pts = tuple((float(x), float(y)) for x, y in points)
+        if len(pts) < 2: raise ValueError("a polygon shape needs at least two vertices")
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return cls("polygon", min(xs), min(ys), max(xs), max(ys), points=pts, **style)
+
+    @classmethod
+    def label(cls, x: float, y: float, text: str, **style) -> "Shape":
+        """A text label centred on a map point."""
+        return cls("text", float(x), float(y), float(x), float(y), text=str(text), **style)
 
 
 def map_shapes(sim_map, *, grid: bool = True) -> Iterator[Shape]:

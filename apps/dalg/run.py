@@ -17,6 +17,12 @@ States:
 ``RUNNING``           publishing; ``admission`` says whether samples are being
                       admitted or paused on an invalid/stale pose
 
+Detectors: a profile's ``detectors`` (:mod:`dalg.detect`) run beside evidence
+through :class:`dalg.detect.host.DetectorSources`, on their own rates, and
+publish the detections plane. A mapping reset or epoch change clears their
+estimates (and says so); a detector that cannot start is reported and never
+stops evidence.
+
 Resets: an operator mapping reset (context ``reset_revision``)
 stages the new generation before retiring the old one and is rejected without
 harm if it does not fit; a provider, localization, clock or sensor-transport
@@ -38,7 +44,7 @@ from dcmn.mapping import AllocationError, MappingConfig, contains
 from dcmn.module_bus import PymembusModuleBus, SENSOR_HEALTH_EVENT, requests_shutdown
 from dcmn.pacing import PeriodicDeadline
 from dcmn.sensors import SensorSession
-from dalg.profiles import (PRIMARY_CAMERA, camera_evidence_algorithms, resolve_sources,
+from dalg.profiles import (PRIMARY_CAMERA, camera_evidence_algorithms, resolve_detectors, resolve_sources,
                            validate_sources)
 from dalg.sources import EvidenceSources, camera_frame
 
@@ -54,7 +60,9 @@ def matches_prepare(profile, requirements, process_id=''):
                  if str(value).partition(':')[0] == 'algorithm']
     if not selectors: return True
     return any(not selector or selector in (profile.name, process_id,
-                                             *(source.algorithm for source in profile.sources))
+                                             *(source.algorithm for source in profile.sources),
+                                             *(detector.detector for detector in profile.detectors),
+                                             *(label for detector in profile.detectors for label in detector.labels))
                for selector in selectors)
 
 
@@ -89,6 +97,8 @@ class DalgRun:
                                                         backlog=0, resets=0, publications=0)
         self._closed = False
         self.background_provider = None; self._displayed_background = None
+        #: The detector host, built with the first mapping generation when the profile has detectors.
+        self.detectors = None; self.detector_error = ''; self.unavailable_detectors = {}
 
     # -- clocks and connections ---------------------------------------------------
 
@@ -160,6 +170,7 @@ class DalgRun:
             frame=self.snapshot.get('frame'), clock_domain_id=self.snapshot.get('clock_domain_id'),
             profiles=list(self.profile.components), profile_digest=self.profile.digest,
             configuration=[s.as_dict() for s in self.profile.sources],
+            detectors=[d.as_dict() for d in self.profile.detectors],
             mapping=self.mapping.as_dict(), camera_hz=self.camera_hz, pose_max_age_s=self.pose_max_age,
             code_version=_code_version(self.root))
         try:
@@ -187,6 +198,8 @@ class DalgRun:
 
     def _retire(self, reason):
         self.note('mapping.retired', reason=reason, mapping_epoch=self._mapping_epoch)
+        if self.detectors is not None:
+            self.detectors.clear(f'mapping retired: {reason}', self.sim_time_s())
         if self.sources: self.sources.close()
         self.sources = None; self.active = False; self._allocated = 0
         self._failed_attempt = None; self._last_record = None
@@ -257,6 +270,8 @@ class DalgRun:
             self.note('mapping.retired', reason='operator mapping reset', mapping_epoch=self._mapping_epoch)
             previous.close()
             self.counters['resets'] += 1
+            if self.detectors is not None:
+                self.detectors.clear('operator mapping reset', self.sim_time_s(), context)
         self.sources = new
         self.mapping = config; self.geometry = geometry; self.geometry_basis = basis
         self._allocated = allocation
@@ -282,7 +297,51 @@ class DalgRun:
                   goal=goal)
         self.bus.publish('mapping.initialized', run_id=self.run_id, payload=dict(
             geometry=geometry.as_dict(), mapping_epoch=epoch, basis=basis, sources=sorted(new.states)))
+        self._start_detectors(context)
         return True
+
+    def _start_detectors(self, context):
+        """Build the detector host once, beside the first mapping generation; later generations only update it."""
+        if not self.profile.detectors: return
+        if self.detectors is not None:
+            self.detectors.context = {k: v for k, v in context.items() if k in ('frame_id', 'localization_epoch',
+                'clock_domain_id', 'clock_epoch', 'mapping_epoch')}
+            return
+        from dalg.detect.host import DetectorSources
+        manifest, devices = self.sensor_session.manifest, self.sensor_session.devices
+        try:
+            configured = resolve_detectors(self.profile, manifest)
+        except ValueError as exc:
+            self.detector_error = f'detectors not started: {exc}'
+            self.note('detectors.unavailable', reason=self.detector_error)
+            return
+        available, omitted = [], {}
+        for detector in configured:
+            if detector.sensor == PRIMARY_CAMERA:
+                omitted[detector.id] = 'the sensor manifest declares no primary camera'
+            elif detector.sensor not in devices:
+                omitted[detector.id] = f'sensor {detector.sensor!r} absent'
+            else: available.append(detector)
+        self.unavailable_detectors = omitted
+        if not available:
+            self.detector_error = 'no detector sensor is available'
+            self.note('detectors.unavailable', reason=self.detector_error, omitted=omitted)
+            return
+        try:
+            validate_sources((), manifest, detectors=available)
+            recorder = lambda kind, data, images=None, vital=False: (  # noqa: E731
+                self.recorder.record(kind, dict(data), images=images, vital=vital) if self.recorder else None)
+            self.detectors = DetectorSources(
+                self.id, available, self.sensor_session, self.source_streams, z0_m=self.mapping.z0_m,
+                record=recorder, context=context, session_id=self.snapshot.get('session_id') or self.run_id,
+                bus_publish=lambda kind, payload: self.bus.publish(kind, run_id=self.run_id, payload=payload),
+                code_version=_code_version(self.root))
+            self.detector_error = ''
+            self.provenance['detectors'] = [d.as_dict() | dict(id=d.id, settings_digest=d.settings_digest)
+                                            for d in available]
+        except (ValueError, RuntimeError, TypeError, KeyError, OSError) as exc:
+            self.detector_error = f'detectors not started: {exc}'
+            self.note('detectors.unavailable', reason=self.detector_error, omitted=omitted)
 
     # -- observation ------------------------------------------------------------------
 
@@ -347,6 +406,8 @@ class DalgRun:
                           body=sample.payload.get('body'))
         self.counters['backlog'] = backlog
         if due: self._capture.advance(now)
+        if self.detectors is not None:
+            self.detectors.step(now, lambda sample: self._check_sample(None, sample, True))
 
     def _publish(self):
         self.sources.publish(self.sim_time_s())
@@ -384,10 +445,14 @@ class DalgRun:
         payload = dict(state=self.state, ready=self.active, profile=self.profile.name,
             profile_digest=self.profile.digest, reason=self.reason, admission=self.admission,
             coverage=self.coverage, geometry=None if self.geometry is None else self.geometry.as_dict(),
-            mapping_epoch=self._mapping_epoch, allocation_estimate_bytes=self._allocated,
+            mapping_epoch=self._mapping_epoch, reset_revision=self._reset_revision, allocation_estimate_bytes=self._allocated,
             capabilities=dict(maps=self.sources is not None,
                               algorithms=[s.algorithm for s in self.profile.sources],
-                              sensors=list(self.profile.sensors)),
+                              sensors=list(self.profile.sensors),
+                              detectors=[dict(id=d.id, name=d.detector, labels=list(d.labels))
+                                         for d in self.profile.detectors],
+                              detections_plane=None if self.detectors is None else self.detectors.plane),
+            detector_error=self.detector_error, unavailable_detectors=self.unavailable_detectors,
             unavailable_sources=self.unavailable_sources, counters=dict(self.counters),
             recording=None if not self.recorder else self.recorder.report())
         if not self._hello_sent:
@@ -405,7 +470,9 @@ class DalgRun:
                     self.profile, event.payload.get('required_roles', ()), self.bus.process_id):
                 self.bus.publish('run.ready', run_id=event.run_id, payload=dict(profile=self.profile.name,
                     capabilities={'algorithms': [s.config.algorithm for s in self.sources.states.values()],
-                                  'maps': True},
+                                  'maps': True,
+                                  'detectors': [] if self.detectors is None else sorted(self.detectors.states),
+                                  'labels': [] if self.detectors is None else self.detectors.labels},
                     configuration_digest=self.profile.digest))
             if event.type == 'run.completed':
                 # Mission completion is a recording event, never a perception stop.
@@ -487,8 +554,20 @@ class DalgRun:
     def _write_report(self):
         if self.report_dir is None: return
         from dalg.report import write_report
+        detectors = None
+        if self.profile.detectors:
+            detectors = dict(configured=[d.as_dict() | dict(id=d.id) for d in self.profile.detectors],
+                             error=self.detector_error, unavailable=self.unavailable_detectors)
+            if self.detectors is not None:
+                grids = self.evidence_grids()
+                try:
+                    detectors.update(self.detectors.write_report(
+                        self.report_dir, grid=grids[sorted(grids)[0]] if grids else None,
+                        background=self._displayed_background, now_s=self.sim_time_s()))
+                except Exception as exc:                  # noqa: BLE001 - never raise out of reporting
+                    detectors['report_error'] = str(exc)
         try:
-            write_report(self.report_dir, summary=dict(schema_version=3, module='dalg', session_id=self.run_id,
+            write_report(self.report_dir, summary=dict(schema_version=4, module='dalg', session_id=self.run_id,
                 instance=self.id, profile=self.profile.name, profiles=list(self.profile.components),
                 profile_digest=self.profile.digest, sources=[s.as_dict() for s in self.profile.sources],
                 frames=self.frames, state=self.state, reason=self.reason, admission=self.admission,
@@ -500,7 +579,7 @@ class DalgRun:
                 archive=None if self.recorder is None else self.recorder.directory.name,
                 allocation_estimate_bytes=self._allocated, provenance=self.provenance,
                 reference_image=self._reference_image_record(),
-                pose_provider=self.snapshot.get('provider_kind', '')),
+                pose_provider=self.snapshot.get('provider_kind', ''), detectors=detectors),
                 evidence=self.evidence_grids(), background=self._displayed_background)
         except Exception as exc:                          # noqa: BLE001 - never raise out of reporting
             import sys
@@ -521,6 +600,7 @@ class DalgRun:
         self._archive_displayed_background()
         if self.recorder: self.recorder.close()
         self._write_report()
+        if self.detectors is not None: self.detectors.close()
         if self.sources: self.sources.close()
         self.sensor_session.close(); self.context.close()
         self.bus.publish('module.goodbye', run_id=self.run_id, payload={'state': 'stopped'})

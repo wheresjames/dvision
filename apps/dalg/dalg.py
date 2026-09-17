@@ -25,7 +25,7 @@ from dcmn.window import (disable_input_method, restore_window_geometry,
 from dcmn.mapview import contained_size
 from dcmn.pacing import Paced, TEXT_HZ, VIDEO_HZ
 from dalg.overlay import prediction_image
-from dalg.profiles import Profile, load_profile, load_profiles, preflight, profile_dir
+from dalg.profiles import Profile, load_profile, load_profiles, preflight, profile_dir, require_evidence
 from dalg.run import DalgRun
 
 
@@ -61,7 +61,9 @@ def parse_args(argv):
     mapping.add_argument("--dz-m", type=float, default=3.0, help="slab thickness")
     mapping.add_argument("--mapping-budget-mib", type=float, default=512.0,
                          help="estimated mapping memory budget (not a process limit)")
-    mapping.add_argument("--min-side-m", type=float, default=40.0)
+    mapping.add_argument("--min-side-m", type=float, default=100.0,
+                         help="side of the first pose-centred grid when no goal sizes it; 100 m covers "
+                              "every committed map from its start cell")
     mapping.add_argument("--size-multiplier", type=float, default=2.5,
                          help="side length = max(min side, k * |start-goal|, |start-goal| + 2*margin)")
     mapping.add_argument("--margin-m", type=float, default=10.0)
@@ -149,6 +151,10 @@ class Window:
         run.background_provider = self._displayed_background
         if show_reference:
             run.note_display('reference-on', source='--show-reference')
+        self.detections = None
+        if run.profile.detectors:
+            from dalg.detection_view import DetectionsTab
+            self.detections = DetectionsTab(notebook, run, tk, ttk, reference=self.reference)
         self.events = EventViewer(notebook, run.id)
         profiles = ttk.Frame(notebook, padding=12)
         notebook.add(profiles, text="Profile")
@@ -157,6 +163,11 @@ class Window:
         self.source = source
         source.set(run.profile.algorithm)
         source.grid(row=0, column=0, sticky="w")
+        # Draw every detector's latest detections over a camera source's frames.
+        self.overlay_detectors = tk.BooleanVar(value=bool(run.profile.detectors))
+        if run.profile.detectors:
+            ttk.Checkbutton(live, text="overlay detectors on camera sources",
+                            variable=self.overlay_detectors).grid(row=0, column=1, sticky="w")
         self.status = tk.StringVar(value="connecting")
         ttk.Label(self.root, textvariable=self.status, anchor="w",
                   style="Dim.TLabel").grid(
@@ -224,6 +235,9 @@ class Window:
                     f"frames={run.frames}  t={run.sim_time_s():.2f}s  coverage={extent}  "
                     f"intake={run.sensor_intake.grade()}  report={run.report_dir or '--'}")
             if run.reason: text += f"  -- {run.reason}"
+            if run.profile.detectors:
+                from dalg.detection_view import status_text
+                text += "  " + status_text(run.detectors, run.detector_error)
             if run.unavailable_sources:
                 text += "  omitted: " + '; '.join(
                     f"{sid}: {reason}" for sid, reason in run.unavailable_sources.items())
@@ -232,7 +246,8 @@ class Window:
             self.profile_editor.set_runtime(geometry=geometry, basis=run.geometry_basis,
                                             state=run.state, reason=run.reason)
         sources = self.run.sources
-        available = list(sources.states) if sources is not None else []
+        from dalg.detection_view import selector_values
+        available = selector_values(self.run)
         if available and tuple(available) != self._source_values:
             # Reconfigured only when the source list changes: a values update
             # every loop turn closes the selector's dropdown as it opens.
@@ -265,10 +280,16 @@ class Window:
             if not producers:
                 self.map_pane.set_header(f"No evidence yet: {self.run.state} {self.run.reason}")
                 self.map_pane.refresh()
+        if self.detections is not None and self.notebook.select() == str(self.detections.page):
+            if self._paint_text.due(): self.detections.paint()
+            return
         if self.notebook.select() != str(self.live): return
         if not self._paint_video.due():
             return
         from PIL import Image
+        detectors = self.run.detectors
+        if detectors is not None and self.source.get() in detectors.states:
+            return self._paint_detector(detectors.states[self.source.get()])
         selected = sources.states.get(self.source.get()) if sources is not None else None
         lidar = selected is not None and selected.config.algorithm == "lidar_inverse"
         wanted = selected.config.id if lidar else 'camera'
@@ -289,8 +310,34 @@ class Window:
         result = selected.preview if selected is not None else self.run.preview_result
         frame = selected.last_image if selected is not None else self.run.last_frame
         images = [None if frame is None else Image.fromarray(frame)]
+        if (images[0] is not None and detectors is not None and self.overlay_detectors.get()
+                and selected is not None and not lidar):
+            from dalg.detection_view import overlay_on_frame
+            images[0] = overlay_on_frame(images[0], detectors.states.values(), selected.config.sensor)
         images.append(None if result is None else prediction_image(result.grid, scale=1))
+        self._show(images)
+
+    def _paint_detector(self, state):
+        """The frame the detector processed, with what it saw and rejected, and the reasons beside it."""
+        from dalg.detection_view import frame_overlay, reasons_text
+        if self._sensor_shown != 'camera':
+            for renderer in self.lidar_views.values(): renderer.widget.pack_forget()
+            self.canvases[0].pack(fill="both", expand=True)
+            self._sensor_shown = 'camera'
+        image, reasons = frame_overlay(state, self.run.sim_time_s())
+        self._show([image, None])
+        canvas = self.canvases[1]
+        canvas.delete("preview")
+        text = (f"{state.config.id}: {state.state} {state.reason}\nrejected candidates:\n"
+                + reasons_text(reasons))
+        canvas.create_text(8, 8, text=text, anchor="nw", fill=theme.TEXT, tags="preview",
+                           width=max(1, canvas.winfo_width() - 16))
+
+    def _show(self, images):
         for index, (canvas, image) in enumerate(zip(self.canvases, images)):
+            if image is None and index == 1 and self.run.detectors is not None \
+                    and self.source.get() in self.run.detectors.states:
+                continue
             if image is None:
                 canvas.delete("preview")
                 canvas.create_text(max(1, canvas.winfo_width())//2, max(1, canvas.winfo_height())//2,
@@ -412,6 +459,11 @@ def main(argv=None):
         except tk.TclError as exc:
             print(f"dalg: cannot open profile editor: {exc}", file=sys.stderr)
             return 1
+    try:
+        require_evidence(profile)
+    except ValueError as exc:
+        print(f"dalg: {exc}", file=sys.stderr)
+        return 1
     errors = preflight(profile, ROOT)
     if errors:
         for error in errors: print(f"dalg: {error}", file=sys.stderr)

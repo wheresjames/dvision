@@ -103,7 +103,7 @@ provided by the local pymembus build `2.1.0+records` (see
 `scripts/build_sensor_pymembus.py`, output under `.cache/sensor-pymembus`);
 the upstream Python binding exposes only text conversion for the existing
 binary-safe C++ ring. Measured primitive guarantees frozen by
-`tests/test_sensor_contract.py`:
+`tests/sensors/test_sensor_contract.py`:
 
 - `memkv.getAll()` returns one coherent committed snapshot of all keys.
 - `memvid` returns the exact committed frame sequence of a slot before and

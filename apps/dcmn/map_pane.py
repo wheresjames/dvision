@@ -69,6 +69,37 @@ BLOCKED_TINT = 0.5
 #: What the hover readout says before the pointer has been anywhere.
 HOVER_PROMPT = 'hover for a cell'
 
+#: What a zoomable pane adds to that prompt, because a gesture nobody mentions
+#: is a gesture nobody finds. Which one it says depends on whether the host has
+#: claimed the left button for editing or clicking.
+ZOOM_HINT = ' · wheel zooms · middle-drag or ctrl-drag pans'
+ZOOM_HINT_LEFT = ' · wheel zooms · drag pans'
+
+#: One wheel notch. 1.0 is the fitted view every pane starts in, and it is also
+#: the floor: zooming out past the whole extent would only shrink it inside the
+#: canvas, which shows nothing more.
+ZOOM_STEP = 1.25
+MIN_ZOOM = 1.0
+
+#: How large one cell is worth magnifying to, in screen pixels. Past this the
+#: pane is drawing a bigger square of the same single measurement: the evidence
+#: has no more detail in it, and a goal can already be placed anywhere inside a
+#: cell. So the ceiling belongs to the *grid*, not to the widget -- a 0.25 m
+#: grid on a wide canvas runs out of detail sooner than a fine one on a narrow
+#: one -- and :attr:`MapPane.max_zoom` reads it off the fit rather than taking a
+#: number on faith.
+MAX_CELL_PX = 32.0
+#: A backstop for a pathologically fine grid, so the factor on the badge stays
+#: a number an operator can reason about.
+MAX_ZOOM = 64.0
+
+#: The reset badge: how far its corner sits inside the image's top-right, and
+#: the padding around its text. Drawn stippled rather than with a real alpha
+#: channel, because a Tk canvas has no translucent fill -- the same trick the
+#: vehicle's view cone uses.
+BADGE_INSET_PX = 6
+BADGE_PAD_PX = 4
+
 #: Pixels per cell in a report snapshot, before the overlays are drawn. Large
 #: enough that a 0.5 m cell is legible on a page and small enough that a
 #: 200x200 grid stays a reasonable image.
@@ -344,15 +375,18 @@ class Overlay:
     candidate: Sequence[tuple[float, float]] = ()
     #: The segment currently being flown, drawn over the route.
     highlight: Sequence[tuple[float, float]] = ()
+    #: A host's own primitives -- a mission area, waypoints, a home marker --
+    #: drawn above the clearance ring and below the route and the vehicle, so
+    #: what the vehicle is doing always reads over what it was asked to do.
+    shapes: Sequence[Shape] = ()
 
 
 def overlay_shapes(overlay: Overlay, cell_m: float) -> Iterator[Shape]:
     """Every primitive an overlay is made of, in map metres.
 
     The vehicle is a disc with a heading spoke rather than
-    :meth:`MapView.draw_drone`'s nose-forward triangle: a polygon has no
-    representation in :class:`~dcmn.mapview.Shape`, and a shape the PIL backend
-    could not draw would be a shape a report could not contain.
+    :meth:`MapView.draw_drone`'s nose-forward triangle, so it stays the same
+    small mark at every zoom in both backends.
     """
     route = [(float(x), float(y)) for x, y in overlay.route]
     radius = max(cell_m * .6, 0.15)
@@ -372,6 +406,7 @@ def overlay_shapes(overlay: Overlay, cell_m: float) -> Iterator[Shape]:
             r = float(overlay.inflation_m)
             yield Shape('oval', x - r, y - r, x + r, y + r,
                         outline=theme.blend(theme.DANGER, theme.CANVAS, .55), width=1.)
+    yield from overlay.shapes
     dot = radius * (.3 if overlay.proposal else .5)
     for (x0, y0), (x1, y1) in zip(route, route[1:]):
         yield Shape('line', x0, y0, x1, y1, outline=theme.ROUTE,
@@ -444,7 +479,12 @@ def _paint_shapes_pil(draw, view: MapView, geometry: GridGeometry, shapes) -> No
         x0, y0 = project(view, geometry, shape.x0, shape.y0)
         x1, y1 = project(view, geometry, shape.x1, shape.y1)
         width = max(1, int(round(shape.width)))
-        if shape.kind == 'rect':
+        if shape.kind == 'polygon':
+            points = [project(view, geometry, x, y) for x, y in shape.points]
+            draw.polygon(points, fill=shape.fill, outline=shape.outline, width=width)
+        elif shape.kind == 'text':
+            draw.text((x0, y0), shape.text, fill=shape.outline or shape.fill or theme.TEXT, anchor='mm')
+        elif shape.kind == 'rect':
             draw.rectangle((x0, y0, x1, y1), fill=shape.fill, outline=shape.outline, width=width)
         elif shape.kind == 'oval':
             draw.ellipse((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
@@ -525,6 +565,69 @@ def snapshot_image(grid: EvidenceGrid | None, *, mode: str = 'occupancy', layer:
     return image
 
 
+# -- editing support -----------------------------------------------------------
+
+#: Most cells a fallback extent is divided into along its longer side. The
+#: blank grid behind it only has to carry a transform and read as unobserved,
+#: so it stays coarse however large the extent is.
+FALLBACK_CELLS = 200
+
+#: How near, in screen pixels, a press must land to pick up a handle.
+HANDLE_RADIUS_PX = 8.0
+
+
+def reference_footprint(image) -> tuple[float, float, float, float]:
+    """The map-metre bounding box a reference image covers, from its affine."""
+    from dcmn.imagery import affine_xy
+
+    corners = [affine_xy(image.affine, col, row)
+               for col in (-.5, image.width - .5) for row in (-.5, image.height - .5)]
+    xs, ys = [c[0] for c in corners], [c[1] for c in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def choose_fallback_extent(*, area_bounds=None, workspace=None, reference_bounds=None,
+                           pose=None, min_side_m: float = 100.0) -> tuple[tuple[float, ...] | None, str]:
+    """Where a pane with no evidence yet lets an operator point, and why there.
+
+    In order: the mission's own area or workspace -- what the operator is
+    about to work in; the reference image, only while it is displayed; a
+    square of dalg's default size around the vehicle. ``(None, reason)``
+    when none of them is known, and the pane stays blank.
+    """
+    for bounds, label in ((area_bounds, 'mission area'), (workspace, 'profile workspace'),
+                          (reference_bounds, 'reference image')):
+        if bounds is not None and bounds[2] > bounds[0] and bounds[3] > bounds[1]:
+            return tuple(float(v) for v in bounds), label
+    if pose is not None:
+        half = float(min_side_m) / 2.
+        x, y = float(pose[0]), float(pose[1])
+        return (x - half, y - half, x + half, y + half), f'{min_side_m:g} m around the vehicle'
+    return None, 'no evidence, mission area, workspace, reference image or pose yet'
+
+
+def fallback_grid(bounds) -> EvidenceGrid:
+    """A never-observed grid covering ``bounds``: a transform and nothing else."""
+    x0, y0, x1, y1 = (float(v) for v in bounds)
+    side = max(x1 - x0, y1 - y0)
+    cell = max(side / FALLBACK_CELLS, 0.05)
+    geometry = GridGeometry.from_extent(x1 - x0, y1 - y0, cell, origin_x_m=x0, origin_y_m=y0)
+    return EvidenceGrid.blank(geometry)
+
+
+def nearest_handle(point_m, handles, radius_m: float):
+    """The key of the handle nearest ``point_m`` within ``radius_m``, or None.
+
+    ``handles`` is ``(key, x_m, y_m)`` triples. Pure, so an editor's hit test
+    can be checked without a window.
+    """
+    best, best_d = None, float(radius_m)
+    for key, x, y in handles:
+        d = math.hypot(float(x) - point_m[0], float(y) - point_m[1])
+        if d <= best_d: best, best_d = key, d
+    return best
+
+
 # -- the widget --------------------------------------------------------------
 
 @dataclass
@@ -539,6 +642,14 @@ class PaneState:
     never_observed: np.ndarray | None = None
     overlay: Overlay = field(default_factory=Overlay)
     background: Background | None = None
+    #: The never-observed stand-in drawn while there is no grid, and why that extent.
+    fallback: EvidenceGrid | None = None
+    fallback_label: str = ''
+
+    @property
+    def shown(self) -> EvidenceGrid | None:
+        """The grid the pane draws: the evidence, or its fallback stand-in."""
+        return self.grid if self.grid is not None else self.fallback
 
 
 class MapPane:
@@ -547,11 +658,27 @@ class MapPane:
     Owns no data and no clock: a host sets a grid and a simulated time and
     calls :meth:`refresh`, which repaints at most at ``MAP_HZ`` because a
     window is not part of the flight.
+
+    With ``zoom=True`` the operator can also scroll to zoom about the pointer
+    and drag to pan, and a stippled **Reset view** badge appears in the
+    image's top-right corner whenever the view is not the fitted one. The zoom
+    is a property of the *pane*, never of the data: :meth:`snapshot` renders
+    the whole grid at its own scale, so what a report contains does not depend
+    on where an operator happened to be looking. Left-drag and right-click
+    stay with the host's editing callbacks; panning is the middle button, or
+    control with the left, neither of which any editor uses. A pane that took
+    no pointer callbacks at all pans with the plain left button as well.
     """
 
     def __init__(self, parent, *, on_click: Callable[[float, float], None] | None = None,
                  mode: str = 'occupancy', hz: float = MAP_HZ, controls: bool = True,
-                 title: str = '', width: int = 320, height: int = 320) -> None:
+                 title: str = '', width: int = 320, height: int = 320,
+                 zoom: bool = False,
+                 on_press: Callable[[float, float, frozenset], None] | None = None,
+                 on_drag: Callable[[float, float, frozenset], None] | None = None,
+                 on_release: Callable[[float, float, frozenset], None] | None = None,
+                 on_context: Callable[[float, float, frozenset], None] | None = None,
+                 on_key: Callable[[str, tuple[float, float] | None], None] | None = None) -> None:
         import tkinter as tk
         from tkinter import ttk
         from PIL import ImageTk
@@ -560,17 +687,49 @@ class MapPane:
         self.tk, self.ttk, self.ImageTk = tk, ttk, ImageTk
         self.state = PaneState(mode=mode)
         self.on_click = on_click
+        # Editing callbacks, each given map metres and the held modifiers
+        # ('shift', 'control'); a key callback gets the key and the last
+        # pointer position over the map, if any.
+        self.on_press, self.on_drag, self.on_release = on_press, on_drag, on_release
+        self.on_context, self.on_key = on_context, on_key
+        self._pointer: tuple[float, float] | None = None
         self.view = MapView(cell=8., margin=0)
         self.photo = None
         self._paint = Paced(hz)
         self._raster_key: tuple | None = None
         self._image = None
+        #: Bumped whenever ``_image`` is rebuilt, so the scaled photo below can
+        #: be cached across repaints that only moved the view or the overlay.
+        self._image_serial = 0
+        self._photo_key: tuple | None = None
         self._resize_after: str | None = None
         self._notice = ''
+        # The view on top of the fit: a zoom factor, and a pan in pixels away
+        # from the fitted, centred position. Both are the operator's, so
+        # neither survives into a snapshot or a report.
+        self.zoomable = bool(zoom)
+        # A pane nobody clicks, edits or keys has no other use for the left
+        # button, so it pans with that too: on a map that is only ever looked
+        # at -- dway's live map, a replay -- dragging is the gesture people try
+        # first. Where a host has claimed the button (dmsn's editors, dnav's
+        # click-to-set-goal) it keeps every gesture it had, and panning is the
+        # middle button or control.
+        self._left_pans = self.zoomable and not any((on_click, on_press, on_drag, on_release))
+        self._zoom = 1.0
+        self._pan = (0.0, 0.0)
+        #: Where a pan drag started: ``(event x, event y, pan at press)``.
+        self._pan_from: tuple[float, float, tuple[float, float]] | None = None
+        #: Screen pixels per cell at the fitted scale, set by the next fit.
+        self._fitted_cell_px: float | None = None
+        #: The reset badge's canvas rectangle while it is on screen.
+        self._badge: tuple[float, float, float, float] | None = None
+        self._press_on_badge = False
+        self.prompt = HOVER_PROMPT + ((ZOOM_HINT_LEFT if self._left_pans else ZOOM_HINT)
+                                      if self.zoomable else '')
 
         self.widget = ttk.Frame(parent, style='Panel.TFrame')
         self.header = tk.StringVar(value=title)
-        self.readout = tk.StringVar(value=HOVER_PROMPT)
+        self.readout = tk.StringVar(value=self.prompt)
         if title or controls:
             bar = ttk.Frame(self.widget, style='Panel.TFrame')
             bar.pack(fill='x', padx=4, pady=(4, 0))
@@ -591,9 +750,35 @@ class MapPane:
         ttk.Label(self.widget, textvariable=self.readout, style='Dim.TLabel',
                   anchor='w').pack(fill='x', padx=6, pady=(0, 4))
         self.canvas.bind('<Motion>', self._hover)
-        self.canvas.bind('<Leave>', lambda _e: self.readout.set(self._notice or HOVER_PROMPT))
+        self.canvas.bind('<Leave>', lambda _e: self.readout.set(self._notice or self.prompt))
         self.canvas.bind('<Button-1>', self._click)
+        self.canvas.bind('<B1-Motion>', lambda e: self._pointer_event(self.on_drag, e))
+        self.canvas.bind('<ButtonRelease-1>', self._release)
+        self.canvas.bind('<Button-3>', lambda e: self._pointer_event(self.on_context, e))
+        self.canvas.bind('<Key>', self._key)
         self.canvas.bind('<Configure>', self._resized)
+        if self.zoomable:
+            # X11 reports the wheel as buttons 4 and 5; every other platform
+            # sends a signed delta. Each handler breaks, so an ancestor's
+            # bind_all scroller never also scrolls the page under the map.
+            for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+                self.canvas.bind(sequence, self._wheel)
+            # The middle button, and control with the left for a mouse that
+            # has no middle button. A more specific sequence wins over the
+            # plain one on the same widget, so the editing bindings above keep
+            # every gesture they had.
+            gestures = [('<Button-2>', '<B2-Motion>', '<ButtonRelease-2>'),
+                        ('<Control-Button-1>', '<Control-B1-Motion>', '<Control-ButtonRelease-1>')]
+            if self._left_pans:
+                gestures.append(('<Button-1>', '<B1-Motion>', '<ButtonRelease-1>'))
+            for press, motion, release in gestures:
+                self.canvas.bind(press, self._pan_press)
+                self.canvas.bind(motion, self._pan_move)
+                self.canvas.bind(release, self._pan_release)
+            self.canvas.tag_bind('viewreset', '<Enter>',
+                                 lambda _e: self.canvas.configure(cursor='hand2'))
+            self.canvas.tag_bind('viewreset', '<Leave>',
+                                 lambda _e: self.canvas.configure(cursor=''))
 
     # -- inputs ------------------------------------------------------------
 
@@ -644,6 +829,34 @@ class MapPane:
     def set_header(self, text: str) -> None:
         self.header.set(text)
 
+    def set_fallback_extent(self, bounds, label: str = '') -> None:
+        """The extent to draw and accept pointer input over while there is no grid.
+
+        Evidence always wins once it exists; the fallback only lets an
+        operator place a goal or a vertex before dalg has published. ``None``
+        clears it. The label says which extent it is (see
+        :func:`choose_fallback_extent`) and is shown in the readout.
+        """
+        current = self.state.fallback
+        if bounds is None:
+            self.state.fallback, self.state.fallback_label = None, label
+            return
+        wanted = tuple(round(float(v), 6) for v in bounds)
+        if current is None or tuple(round(v, 6) for v in current.geometry.bounds_m()) != wanted:
+            self.state.fallback = fallback_grid(bounds)
+        self.state.fallback_label = label
+
+    def metres_per_pixel(self) -> float | None:
+        """The current scale, for converting a pixel radius into map metres."""
+        if self._fit() is None: return None
+        return 1.0 / max(self.view.cell, 1e-9)
+
+    def handle_at(self, x_m: float, y_m: float, handles, *, radius_px: float = HANDLE_RADIUS_PX):
+        """The key of the handle under a pointer at map metres, or None."""
+        scale = self.metres_per_pixel()
+        if scale is None: return None
+        return nearest_handle((x_m, y_m), handles, radius_px * scale)
+
     # -- geometry ----------------------------------------------------------
 
     def _fit(self) -> GridGeometry | None:
@@ -654,14 +867,112 @@ class MapPane:
         belongs -- so a pane asked for a coordinate before its first
         ``<Configure>`` falls back to the size it asked for.
         """
-        grid = self.state.grid
+        grid = self.state.shown
         if grid is None: return None
+        width, height = self.canvas_size()
+        self.view.fit_canvas(_Extent(grid.geometry), width, height)
+        # Screen pixels per cell at the fitted scale: the zoom ceiling is a
+        # multiple of this, so it follows the grid and the canvas rather than
+        # being a constant that is wrong for both.
+        self._fitted_cell_px = self.view.cell * grid.geometry.cell_m
+        if self.zoomable and not self.default_view:
+            self._apply_view(grid.geometry, width, height)
+        return grid.geometry
+
+    def canvas_size(self) -> tuple[int, int]:
+        """The canvas as it is right now, falling back to the size it asked for."""
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         if width <= 1: width = max(1, self.canvas.winfo_reqwidth())
         if height <= 1: height = max(1, self.canvas.winfo_reqheight())
-        self.view.fit_canvas(_Extent(grid.geometry), width, height)
-        return grid.geometry
+        return width, height
+
+    # -- the operator's view ------------------------------------------------
+
+    @property
+    def default_view(self) -> bool:
+        """Whether the pane is showing the fitted, centred view it starts in."""
+        return self._zoom == 1.0 and self._pan == (0.0, 0.0)
+
+    @property
+    def zoom(self) -> float:
+        return self._zoom
+
+    @property
+    def max_zoom(self) -> float:
+        """How far this grid is worth zooming: until one cell fills MAX_CELL_PX.
+
+        A property of the grid and the canvas, not a constant: a coarse grid
+        runs out of detail at a few times the fit, a fine one has further to
+        go. Before the first fit there is no grid to answer for, and the fitted
+        view is the only one on offer.
+        """
+        if not self._fitted_cell_px: return MIN_ZOOM
+        return max(MIN_ZOOM, min(MAX_ZOOM, MAX_CELL_PX / self._fitted_cell_px))
+
+    def _apply_view(self, geometry: GridGeometry, width: int, height: int) -> None:
+        """Scale the fitted transform about the canvas centre, then pan it.
+
+        Composed on top of :meth:`MapView.fit_canvas` rather than replacing it,
+        so a resize, a new grid and a change of extent all keep working exactly
+        as they did and the zoom rides on whatever they produce.
+        """
+        # The fit may have changed under the zoom -- a resize, a new extent --
+        # so the ceiling is re-applied here rather than only where a gesture
+        # asked for it.
+        self._zoom = max(MIN_ZOOM, min(self.max_zoom, self._zoom))
+        extent_w, extent_h = geometry.extent_m
+        self._pan = self._clamp_pan(self._pan, extent_w * self.view.cell * self._zoom,
+                                    extent_h * self.view.cell * self._zoom, width, height)
+        centre_x, centre_y = width / 2.0, height / 2.0
+        self.view.offset_x = centre_x + self._zoom * (self.view.offset_x - centre_x) + self._pan[0]
+        self.view.offset_y = centre_y + self._zoom * (self.view.offset_y - centre_y) + self._pan[1]
+        self.view.cell *= self._zoom
+
+    @staticmethod
+    def _clamp_pan(pan, drawn_w: float, drawn_h: float, width: int, height: int):
+        """A pan that cannot drag the image off its own canvas.
+
+        The image may be moved only as far as its own edges: at the fitted zoom
+        it is contained, so there is nothing to pan and the clamp returns the
+        centred view -- which is what makes "not the default view" the same
+        question as "is there anything to reset".
+        """
+        limit_x = max(0.0, (drawn_w - width) / 2.0)
+        limit_y = max(0.0, (drawn_h - height) / 2.0)
+        return (min(limit_x, max(-limit_x, pan[0])), min(limit_y, max(-limit_y, pan[1])))
+
+    def zoom_at(self, px: float, py: float, factor: float) -> None:
+        """Zoom by ``factor`` about the canvas point ``(px, py)``.
+
+        The map point under the pointer stays under the pointer, which is the
+        one property that makes a wheel zoom feel like a magnifier rather than
+        a jump.
+        """
+        if not self.zoomable or self._fit() is None: return
+        previous = self._zoom
+        self._zoom = max(MIN_ZOOM, min(self.max_zoom, previous * float(factor)))
+        if self._zoom == previous: return
+        ratio = self._zoom / previous
+        width, height = self.canvas_size()
+        # The pointer's offset from the centre, scaled about the pointer: the
+        # inverse of _apply_view, solved for the pan that keeps px, py fixed.
+        offset_x, offset_y = px - width / 2.0, py - height / 2.0
+        self._pan = (offset_x - ratio * (offset_x - self._pan[0]),
+                     offset_y - ratio * (offset_y - self._pan[1]))
+        self.refresh(force=True)
+
+    def pan_by(self, dx: float, dy: float) -> None:
+        """Move the view by a pixel offset, clamped to the image's own edges."""
+        if not self.zoomable: return
+        self._pan = (self._pan[0] + float(dx), self._pan[1] + float(dy))
+        self.refresh(force=True)
+
+    def reset_view(self) -> None:
+        """Back to the fitted, centred view. Idempotent, and cheap when it is a no-op."""
+        if not self.zoomable or self.default_view: return
+        self._zoom, self._pan, self._pan_from = 1.0, (0.0, 0.0), None
+        self.refresh(force=True)
 
     def to_map(self, px: float, py: float) -> tuple[float, float] | None:
         """Canvas pixels to absolute map metres -- the goal picker's whole job.
@@ -707,16 +1018,18 @@ class MapPane:
 
         geometry = self._fit()
         self.canvas.delete('overlay')
+        self._badge = None
         if geometry is None:
             self.canvas.itemconfigure(self.item, image='')
             self.photo = None
             return True
         state = self.state
+        shown = state.shown
         # The age mode's raster changes with the clock even when the grid does
         # not, so simulated time is part of what identifies a rendering; a
         # background is part of it too, identified by revision and checksum so
         # a replacement image is a new rendering even at the same resolution.
-        key = (id(state.grid), state.grid.revision, state.mode, state.layer,
+        key = (id(shown), shown.revision, state.mode, state.layer,
                round(state.sim_now_s, 2) if state.mode == 'age' else 0,
                None if state.cost is None else state.cost.tobytes(),
                None if state.never_observed is None else state.never_observed.tobytes(),
@@ -726,34 +1039,66 @@ class MapPane:
         # screen.
         if self._notice:
             self._notice = ''
-            self.readout.set(HOVER_PROMPT)
+            self.readout.set(self.prompt)
+        # A fallback stand-in has no cost layer, whatever mode the host set.
+        mode = state.mode if state.grid is not None else 'occupancy'
+        cost = state.cost if state.grid is not None else None
+        never = state.never_observed if state.grid is not None else None
         if key != self._raster_key or self._image is None:
-            raster = render_raster(state.grid, mode=state.mode, layer=state.layer,
+            raster = render_raster(shown, mode=mode, layer=state.layer,
                                    sim_now_s=state.sim_now_s,
-                                   horizon_s=state.horizon_s, cost=state.cost,
-                                   never_observed=state.never_observed)
+                                   horizon_s=state.horizon_s, cost=cost,
+                                   never_observed=never)
             if raster is not None and state.background is not None:
-                mask = never_cells(state.grid, mode=state.mode, layer=state.layer,
-                                   never_observed=state.never_observed)
+                mask = never_cells(shown, mode=mode, layer=state.layer,
+                                   never_observed=never)
                 if mask is not None:
                     raster = compose_background(raster, state.background,
-                                                state.grid.geometry, mask)
+                                                shown.geometry, mask)
             self._raster_key = key
             self._image = None if raster is None else Image.fromarray(raster)
+            self._image_serial += 1
         if self._image is None:
             self.canvas.itemconfigure(self.item, image='')
             self.photo = None
             self._notice = 'no cost layer for this source'
             self.readout.set(self._notice)
             return True
-        size = (max(1, round(geometry.width * self.view.cell * geometry.cell_m)),
-                max(1, round(geometry.height * self.view.cell * geometry.cell_m)))
-        # NEAREST: every pixel of a measured cell has to stay that cell, or the
-        # pane invents evidence at the boundaries.
-        self.photo = self.ImageTk.PhotoImage(
-            self._image.resize(size, Image.Resampling.NEAREST))
-        self.canvas.coords(self.item, self.view.offset_x, self.view.offset_y)
-        self.canvas.itemconfigure(self.item, image=self.photo)
+        # Only the part of the raster the canvas can actually show is scaled
+        # and uploaded. Scaling the whole thing costs the square of the zoom --
+        # a 250x125 cell grid at 17x is an 8194x4032 image, 33 megapixels of
+        # which a 480x480 canvas displays 0.7% -- and at that size building one
+        # per repaint is what turns a zoomed pane into a slideshow. The crop is
+        # snapped out to whole cells, so every drawn pixel still belongs to
+        # exactly one measured cell, and at the fitted view it is the whole
+        # image again: an unzoomed pane draws exactly what it always did.
+        cell_px = self.view.cell * geometry.cell_m
+        width_px, height_px = self.canvas_size()
+        col0 = max(0, int(math.floor(-self.view.offset_x / cell_px)))
+        row0 = max(0, int(math.floor(-self.view.offset_y / cell_px)))
+        col1 = min(geometry.width, int(math.ceil((width_px - self.view.offset_x) / cell_px)))
+        row1 = min(geometry.height, int(math.ceil((height_px - self.view.offset_y) / cell_px)))
+        if col1 <= col0 or row1 <= row0:
+            # Nothing of it is on the canvas: reachable only in the middle of a
+            # resize, and drawing the overlay is still right.
+            self.canvas.itemconfigure(self.item, image='')
+            self.photo, self._photo_key = None, None
+            self._draw_overlay(geometry)
+            return True
+        box = (col0, row0, col1, row1)
+        size = (max(1, round((col1 - col0) * cell_px)), max(1, round((row1 - row0) * cell_px)))
+        # Rescaling is the expensive half of a repaint, so the scaled tile is
+        # kept until the raster, the visible cells or the scale actually change.
+        photo_key = (self._image_serial, box, size)
+        if self.photo is None or photo_key != self._photo_key:
+            tile = self._image if box == (0, 0, geometry.width, geometry.height) else self._image.crop(box)
+            # NEAREST: every pixel of a measured cell has to stay that cell, or
+            # the pane invents evidence at the boundaries.
+            self.photo = self.ImageTk.PhotoImage(tile.resize(size, Image.Resampling.NEAREST))
+            self._photo_key = photo_key
+            self.canvas.itemconfigure(self.item, image=self.photo)
+        self.canvas.coords(self.item, self.view.offset_x + col0 * cell_px,
+                           self.view.offset_y + row0 * cell_px)
         self._draw_overlay(geometry)
         return True
 
@@ -761,7 +1106,14 @@ class MapPane:
         for shape in shapes:
             x0, y0 = project(self.view, geometry, shape.x0, shape.y0)
             x1, y1 = project(self.view, geometry, shape.x1, shape.y1)
-            if shape.kind == 'rect':
+            if shape.kind == 'polygon':
+                flat = [c for x, y in shape.points for c in project(self.view, geometry, x, y)]
+                self.canvas.create_polygon(*flat, fill=shape.fill or '', outline=shape.outline or '',
+                                           width=shape.width, tags='overlay')
+            elif shape.kind == 'text':
+                self.canvas.create_text(x0, y0, text=shape.text, anchor='center',
+                                        fill=shape.outline or shape.fill or theme.TEXT, tags='overlay')
+            elif shape.kind == 'rect':
                 self.canvas.create_rectangle(x0, y0, x1, y1, fill=shape.fill or '',
                                              outline=shape.outline or '',
                                              width=shape.width, tags='overlay')
@@ -781,18 +1133,49 @@ class MapPane:
             # label, so what the picture is stays in front of the operator.
             self._paint_shapes_tk(geometry, background_shapes(background, geometry.cell_m))
             if background.label():
-                self.canvas.create_text(self.view.offset_x + 4, self.view.offset_y + 2,
+                # Clamped into the canvas: zoomed in, the image's own corner is
+                # off screen, and a label nobody can see says nothing.
+                self.canvas.create_text(max(4.0, self.view.offset_x + 4),
+                                        max(2.0, self.view.offset_y + 2),
                                         text=background.label(), anchor='nw',
                                         fill=theme.DIM, tags='overlay')
         self._paint_shapes_tk(geometry, overlay_shapes(self.state.overlay, geometry.cell_m))
+        if self.zoomable and not self.default_view: self._draw_reset_badge(geometry)
+
+    def _draw_reset_badge(self, geometry: GridGeometry) -> None:
+        """A translucent Reset view button in the image's top-right corner.
+
+        Only while the view is not the fitted one: a control that does nothing
+        is a control an operator has to think about. Stippled over whatever it
+        covers, because a Tk canvas has no alpha -- and placed inside both the
+        image and the canvas, so it is on the picture when the picture is
+        letterboxed and in the corner when the picture is larger than the pane.
+        """
+        width, height = self.canvas_size()
+        extent_w, extent_h = geometry.extent_m
+        right = min(float(width), self.view.offset_x + extent_w * self.view.cell) - BADGE_INSET_PX
+        top = max(0.0, self.view.offset_y) + BADGE_INSET_PX
+        label = f'Reset view ({self._zoom:.1f}x)'
+        text = self.canvas.create_text(right - BADGE_PAD_PX, top + BADGE_PAD_PX, text=label,
+                                       anchor='ne', fill=theme.TEXT, tags=('overlay', 'viewreset'))
+        bounds = self.canvas.bbox(text)
+        if bounds is None: return
+        x0, y0, x1, y1 = bounds
+        box = (x0 - BADGE_PAD_PX, y0 - BADGE_PAD_PX, x1 + BADGE_PAD_PX, y1 + BADGE_PAD_PX)
+        plate = self.canvas.create_rectangle(*box, fill=theme.PANEL, stipple='gray50',
+                                             outline=theme.GRID, width=1.,
+                                             tags=('overlay', 'viewreset'))
+        self.canvas.tag_lower(plate, text)
+        self._badge = box
 
     def snapshot(self, *, cell_px: int = SNAPSHOT_CELL_PX):
         """The same rendering as a PIL image, for a report."""
-        return snapshot_image(self.state.grid, mode=self.state.mode,
+        evidence = self.state.grid is not None
+        return snapshot_image(self.state.shown, mode=self.state.mode if evidence else 'occupancy',
                               layer=self.state.layer, sim_now_s=self.state.sim_now_s,
-                              horizon_s=self.state.horizon_s, cost=self.state.cost,
+                              horizon_s=self.state.horizon_s, cost=self.state.cost if evidence else None,
                               overlay=self.state.overlay, cell_px=cell_px,
-                              never_observed=self.state.never_observed,
+                              never_observed=self.state.never_observed if evidence else None,
                               background=self.state.background)
 
     # -- interaction -------------------------------------------------------
@@ -800,7 +1183,10 @@ class MapPane:
     def describe(self, x_m: float, y_m: float) -> str:
         """The hover readout: where, how likely, and how long ago."""
         grid = self.state.grid
-        if grid is None: return 'no grid'
+        if grid is None:
+            if self.state.fallback is None: return 'no grid'
+            label = self.state.fallback_label
+            return f'{x_m:.2f}, {y_m:.2f} m  no evidence yet' + (f' ({label})' if label else '')
         cell = grid.geometry.to_cell(x_m, y_m)
         if cell is None: return f'{x_m:.2f}, {y_m:.2f} m  outside the grid'
         col, row = cell
@@ -826,11 +1212,93 @@ class MapPane:
 
     def _hover(self, event) -> None:
         point = self.to_map(event.x, event.y)
-        self.readout.set('no grid' if point is None else self.describe(*point))
+        self._pointer = point
+        self.readout.set((self.state.fallback_label or 'no grid') if point is None
+                         else self.describe(*point))
+
+    @staticmethod
+    def modifiers(event) -> frozenset:
+        """The held modifiers of a Tk event, by name."""
+        state = int(getattr(event, 'state', 0) or 0)
+        return frozenset(name for name, bit in (('shift', 0x1), ('control', 0x4)) if state & bit)
+
+    def _pointer_event(self, callback, event) -> None:
+        if self._press_on_badge: return
+        point = self.to_map(event.x, event.y)
+        self._pointer = point
+        if point is not None and callback is not None: callback(point[0], point[1], self.modifiers(event))
 
     def _click(self, event) -> None:
+        # Focus follows a press, so Delete and Escape reach the editor the
+        # operator is pointing at.
+        try: self.canvas.focus_set()
+        except Exception: pass
+        # The badge is a control drawn on the map, so a press on it is not a
+        # press on the map: an editor must never get a vertex out of it.
+        self._press_on_badge = self._hit_badge(event.x, event.y)
+        if self._press_on_badge:
+            self.reset_view()
+            return
         point = self.to_map(event.x, event.y)
-        if point is not None and self.on_click is not None: self.on_click(*point)
+        self._pointer = point
+        if point is None: return
+        if self.on_press is not None: self.on_press(point[0], point[1], self.modifiers(event))
+        if self.on_click is not None: self.on_click(*point)
+
+    def _release(self, event) -> None:
+        self._pointer_event(self.on_release, event)
+        self._press_on_badge = False
+        # Any button coming up ends a pan, so control let go mid-drag cannot
+        # leave one half-started for the next gesture to inherit.
+        self._pan_from = None
+
+    def _key(self, event) -> None:
+        if self.on_key is not None: self.on_key(str(event.keysym), self._pointer)
+
+    # -- zooming and panning -----------------------------------------------
+
+    def _hit_badge(self, px: float, py: float) -> bool:
+        """Whether a canvas point is on the reset badge, when one is showing."""
+        if self._badge is None: return False
+        x0, y0, x1, y1 = self._badge
+        return x0 <= px <= x1 and y0 <= py <= y1
+
+    def _wheel(self, event) -> str:
+        """One notch of the wheel, whichever way the platform reports it."""
+        from dcmn.scroll import wheel_step
+        step = wheel_step(event)          # negative is up, which is closer in
+        if step: self.zoom_at(event.x, event.y, ZOOM_STEP ** -step)
+        return 'break'
+
+    def _pan_press(self, event) -> str:
+        # Reached with the left button on a viewing-only pane, so the badge is
+        # checked here too rather than only in _click.
+        if self._hit_badge(event.x, event.y):
+            self._press_on_badge = True
+            self.reset_view()
+            return 'break'
+        self._press_on_badge = False
+        self._pan_from = (float(event.x), float(event.y), self._pan)
+        return 'break'
+
+    def _pan_move(self, event) -> str | None:
+        if self._pan_from is None:
+            # Control pressed part-way through somebody else's drag: that drag
+            # is still theirs.
+            self._pointer_event(self.on_drag, event)
+            return None
+        x, y, pan = self._pan_from
+        self._pan = (pan[0] + (event.x - x), pan[1] + (event.y - y))
+        self.refresh(force=True)
+        return 'break'
+
+    def _pan_release(self, event) -> str | None:
+        if self._pan_from is None:
+            self._release(event)
+            return None
+        self._pan_from = None
+        self._press_on_badge = False
+        return 'break'
 
 
 # -- the opt-in background host -------------------------------------------------

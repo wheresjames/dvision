@@ -198,20 +198,20 @@ sensor:
 
 ## Correctness tests
 
-- `tests/test_sensor_contract.py` — envelope byte fixture, profile
+- `tests/sensors/test_sensor_contract.py` — envelope byte fixture, profile
   validation, transform goldens (translation rotates with heading; roll/pitch/
   yaw +90° goldens), registry/generation rollover, provider restart,
   reset-epoch, frame/metadata matching, pending-unmatched behaviour, record
   ring overrun.
-- `tests/test_dvision_calibration_render.py` — landmark fixtures prove FOV/
+- `tests/vision/test_dvision_calibration_render.py` — landmark fixtures prove FOV/
   intrinsics agree with rendered landmarks at every cardinal heading, channel
   order is RGB24, attitude signs move the horizon correctly.
-- `tests/test_dvision_perception_chain.py`, `tests/test_daic_frame_orientation.py`
+- `tests/vision/test_dvision_perception_chain.py`, `tests/daic/test_daic_frame_orientation.py`
   — delivered image orientation and the DAIC perception chain on the new
   transport.
-- `tests/test_sensor_stereo.py` — disparity sign and magnitude against
+- `tests/sensors/test_sensor_stereo.py` — disparity sign and magnitude against
   `fx · baseline / depth` at several baselines, depths and headings; both
   members rendered from one state; a per-camera misalignment moving only its
   own image.
-- `tests/test_dvision_scene_presets.py` — appearance presets do not change
+- `tests/vision/test_dvision_scene_presets.py` — appearance presets do not change
   geometric truth.

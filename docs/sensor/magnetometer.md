@@ -64,7 +64,7 @@ field vector implies, is the natural next version of this sensor.
 
 ## Correctness tests
 
-`tests/test_sensor_state.py` -- the heading convention, and independent noise sources combining in
+`tests/sensors/test_sensor_state.py` -- the heading convention, and independent noise sources combining in
 quadrature.
-`tests/test_sensor_release.py` -- the sensor is present in the reference
+`tests/sensors/test_sensor_release.py` -- the sensor is present in the reference
 profile and produces every configured sample inside the run budget.

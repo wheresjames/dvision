@@ -1,0 +1,36 @@
+{
+  "schema": "dvision2.archive.v2",
+  "module": "dmsn",
+  "metadata": {
+    "module": "dmsn",
+    "session_id": "fake-session",
+    "instance": "fixture",
+    "dmsn_session": "ee3280a754b740d083695d50e3c6b99f",
+    "writer": "dmsn:ee3280a754b740d0",
+    "provider_kind": "fixture"
+  },
+  "created_wall": 1789559669.357555,
+  "payload_semantics": {
+    "occupancy": "uint8 p*254, 255=never observed",
+    "observed_ms": "uint32 data-clock ms, 0=never observed",
+    "order": "layers,height,width C-contiguous",
+    "reference_image": "uint8 PNG bytes; sha256 of the bytes in metadata.checksum"
+  },
+  "chunk_policy": {
+    "commit_s": 1.0,
+    "chunk_bytes": 33554432
+  },
+  "state": "finalized",
+  "queued_bytes": 0,
+  "queue_limit_bytes": 16777216,
+  "bytes_written": 80087,
+  "disk_limit_bytes": 1073741824,
+  "events_recorded": 76,
+  "events_committed": 76,
+  "chunks": 0,
+  "dropped": 0,
+  "dropped_by": {},
+  "quota_exhausted": false,
+  "errors": [],
+  "complete": true
+}

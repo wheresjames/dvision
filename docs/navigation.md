@@ -1,5 +1,11 @@
 # Dynamic routes: planning, observation and flight
 
+This is the operational document: the chain, the execution profile and its
+measured limits, the retained protocol, admission, the UI and the reports. For
+how a route is actually computed -- the cost policy, the A\* search, the
+clearance geometry and the route object -- see
+[`docs/planners/`](planners/README.md).
+
 dnav plans and permits; dway observes (`--dry-run`) or flies. One selected dnav and
 one dway per vehicle, fixed altitude, position targets at a fixed heading, a stop at
 every corner and permission endpoint, and route changes only from a confirmed stop.
@@ -9,7 +15,7 @@ Static tour commands are unchanged. There is no automatic takeoff, landing or RT
 
 ### Observation without vehicle commands
 
-The same chain `tests/test_navigation_process.py` runs, against dsim:
+The same chain `tests/navigation/test_navigation_process.py` runs, against dsim:
 
 ```sh
 python3 apps/dsim/dsim.py --id area1 --map assets/maps/maze_012.txt &
@@ -74,7 +80,7 @@ lease held, everything it checked before acquiring it. The headless runner exits
 on COMPLETE, 1 on CANCELLED and 2 otherwise. SIGINT/SIGTERM in the window pauses;
 headless, they shut down (bounded HOLD wait, lease release, recording finished).
 
-The fully deterministic flights (`tests/test_dynamic_flight.py`) run the production
+The fully deterministic flights (`tests/navigation/test_dynamic_flight.py`) run the production
 publisher, clearance, snapshots, route source and executor against a real
 `DroneSimulator` on the loopback transport. Their evidence generator and small A*
 planner are declared fixtures in `dtest/dynamic_rig.py`. A live multi-process flight
@@ -93,33 +99,53 @@ python3 ./apps/dnav/dnav.py --id area1 --goal 52.444,2.389 --execution-profile s
 python3 ./apps/dway/dway.py --id area1 --mode target --wait-for algorithm
 ```
 
-`--goal` is optional. Without it dnav adopts the map target the simulator publishes
-(the `*` cell in the map, on dsim's status plane as `target.lat_deg`/`target.lon_deg`),
-converted with the published datum and the context's local NED origin, so no world file
-is read. It does this once per session, only when no goal is set, and never replaces
-another authority's goal. If the provider publishes no target it does nothing and says
-so. `--no-provider-goal` turns this off:
+Without `--goal` dnav plans nothing until a goal is set -- by a mission coordinator,
+its Plan tab, or `apps/dcmn/context.py`. `--provider-goal` makes it adopt the map
+target the simulator publishes instead (the `*` cell in the map, on dsim's status
+plane as `target.lat_deg`/`target.lon_deg`), converted with the published datum and the
+context's local NED origin, so no world file is read. It does this once per session,
+only when no goal is set, and never replaces another authority's goal. If the provider
+publishes no target it does nothing and says so. `--no-provider-goal` is still accepted
+and changes nothing:
 
 ```sh
 python3 ./apps/dsim/dsim.py --id area1 --map ./assets/maps/maze_002.txt --drone-profile camera-lidar --sim-speed 1.5 &
 python3 ./apps/dalg/dalg.py --id area1 --profiles lidar-baseline.json &
 python3 ./apps/dway/dway.py --id area1 --mode target --wait-for algorithm &
+python3 ./apps/dnav/dnav.py --id area1 --execution-profile sim-target --provider-goal &
+```
+
+With a mission coordinator in the chain, dway waits for it instead of taking off at
+once: `--wait-for-mission` holds target mode in `WAITING` until dmsn publishes a
+`launch` intent, and takes `hold`, `resume`, `cancel`, `land` and `yaw_to` from it
+too (`--land-timeout-s`, default 60 sim seconds, bounds a landing). See
+[missions](missions.md):
+
+```sh
+python3 ./apps/dsim/dsim.py --id area1 --map ./assets/maps/maze_020.txt --drone-profile camera-lidar --sim-speed 1.5 &
+python3 ./apps/dalg/dalg.py --id area1 --profile lidar-baseline &
 python3 ./apps/dnav/dnav.py --id area1 --execution-profile sim-target &
+python3 ./apps/dway/dway.py --id area1 --mode target --execution-profile sim-target --wait-for-mission &
+python3 ./apps/dmsn/dmsn.py --id area1
 ```
 
 Add `--no-ui` to any of them for a headless run; `dway --no-ui --exit-on-finish
 --timeout N` ends with exit code 0 on arrival. In target mode dway:
 
-1. waits for every `--wait-for` role to answer `run.prepare` (as the tour does);
+1. with `--wait-for-mission`, waits for a mission `launch` intent; then waits for every
+   `--wait-for` role to answer `run.prepare` (as the tour does);
 2. asks dalg for a mapping reset that includes the goal when the goal lies outside the
-   evidence coverage (recorded as `execution.coverage`);
+   evidence coverage (recorded as `execution.coverage`) -- except while a mission
+   coordinator it waits for holds the goal, because the mission owns the mapping extent;
 3. acquires an available control lease (never one another client holds), arms, climbs
    to the profile altitude unless it is already there, and confirms HOLD by measured
    low speed (`execution.launch` events: begin, arm, takeoff, hold, airborne);
 4. presses Start, and Resume after any stop, whenever a route is admitted. These are
    the ordinary controls, recorded with origin `auto`. An operator Pause or Cancel
    suppresses them;
-5. hovers in HOLD at the goal and keeps supervising. It never lands.
+5. hovers in HOLD at the goal and keeps supervising. It never lands on its own: only a
+   mission `land` intent takes it down (`LANDING`, confirmed by disarm within
+   `--land-timeout-s` or faulted), after which only a new `launch` intent flies again.
 
 dway loads `sim-target` unless `--execution-profile` names another. dnav must load
 the same profile with the same overrides; otherwise dway rejects every route with
@@ -193,7 +219,18 @@ publishing, in order:
    of the vehicle counts as used up.
 2. `route_mode: substitute`, a route to the reachable point nearest the goal within
    `goal_substitute_m`, with its end in `substitute_goal`. dnav does not re-issue one to
-   a point the vehicle already holds at.
+   a point the vehicle already holds at, and refuses with "the vehicle already holds the
+   reachable point nearest the goal" rather than offering the second-nearest, which would
+   oscillate.
+
+   A substitute is computed inside the publisher, so whatever it costs is added to the age
+   of every route dnav offers, against `max_age_s`. Its reachability pass is tens of
+   milliseconds; each attempt records `substitute_s` and the run summary carries
+   `substitute_worst_s`, because this is exactly where a whole run's time once went. In the
+   17 Sep area1 search run the pass took 2.8 s, dnav stopped publishing for three seconds
+   after every refused goal, and all 49 substitutes it offered were rejected — 22 of them
+   with dway's own `planner snapshot stream stalled`. See
+   [`docs/planners/astar.md`](planners/astar.md#the-reachability-pass).
 
 Both carry `fallback_reason` (the planner's). Every replan still aims at the real goal:
 as soon as one succeeds, dnav publishes it as `planned` and advances the stop generation,
@@ -226,7 +263,7 @@ lidar had not observed yet, and dnav reported the goal unreachable. The same sou
 earlier marked the drone's own cell occupied. Such starts are now rejected rather than
 assumed to be false obstacles. These are evidence-quality findings; a larger margin
 cannot correct occupied evidence at the vehicle's own position.
-`tests/test_target_flight_process.py` (`DVISION_NIGHTLY=1`) runs the four processes and
+`tests/navigation/test_target_flight_process.py` (`DVISION_NIGHTLY=1`) runs the four processes and
 checks the wiring: takeoff, automatic Start, targets, progress toward the goal, a
 written report and no world reads. It records arrival without requiring it.
 
@@ -266,7 +303,7 @@ Resume. `reports/area1/20260915-140020-efd23612` stopped 18 times that way, for 
 
 `assets/execution_profiles/dsim-position-v1.json` is the only calibrated profile. It
 was measured by `dtest/flight_calibration.py` and **re-measured** by
-`tests/test_flight_profile.py` on every run, so a simulator or link change that
+`tests/navigation/test_flight_profile.py` on every run, so a simulator or link change that
 invalidates it fails there.
 
 | Measured on dsim over 0.25/0.5 m/s, 0/50 ms latency, no wind, seeds 1234/4321 | Value |
@@ -430,6 +467,16 @@ dashed line, the permitted interval as a thick solid line with a square stop end
 and the observed pose and trail. dnav's Plan and Cost views use the same dashed
 proposal and interval overlay, and its status line shows the clearance reason.
 
+dnav's **Plan** map and dway's **live** map both zoom: the wheel zooms about the
+pointer as far as the grid has detail (one cell at 32 screen pixels), and a
+translucent Reset view badge in the corner puts it back. The Plan map keeps the
+left button for click-to-set-goal, so it pans with the middle button or
+control-drag; dway's live map takes no clicks and pans with a plain drag.
+Panning never sets a goal and never replans, and a zoomed pane costs no more to
+repaint than a fitted one -- only the visible cells are scaled. Report images
+are unaffected: they render the whole map at their own scale. The shared
+behaviour is described once in the README under "Zooming a pane".
+
 The flight window (`dway.flightui.FlightWindow`) adds Start/Pause/Resume/Cancel with
 their pending/accepted/refused results, the commanded target (a cross, distinct from
 the vehicle symbol and the published-pose trail), the segment being flown, and the
@@ -499,20 +546,20 @@ selected time; gaps and epoch changes are marked and the track is broken there,
 never interpolated. `--export` writes the frame as JSON, and as PNG when evidence exists.
 
 To share a run, copy the whole run directory (`reports/<id>/<run>/`), which holds the
-dway archive with its report and the sibling dnav archives. `tests/test_flight_reports.py`
+dway archive with its report and the sibling dnav archives. `tests/navigation/test_flight_reports.py`
 opens such a copy elsewhere, rebuilds the report and replays from it.
 
 ## Verification
 
-- `tests/test_navigation.py`: bounds, oversize refusal, fixtures, strict profiles,
+- `tests/navigation/test_navigation.py`: bounds, oversize refusal, fixtures, strict profiles,
   stale/conflicting evidence, joins/crossings/progress, the stop latch with missed
   withdrawals, planner restart, the dnav publisher against a fake executor, frames,
   tour/dynamic adapters, dry-run window and archive rollover.
-- `tests/test_navigation_process.py`: isolated dalg/dnav/dway dry-run processes
+- `tests/navigation/test_navigation_process.py`: isolated dalg/dnav/dway dry-run processes
   against a late synthetic provider and dsim; operational world/truth reads and
   mission imports are rejected.
-- `tests/test_flight_profile.py`: re-measures the calibration and refuses extrapolation.
-- `tests/test_dynamic_flight.py`: clear goal completion, explicit Start, airborne HOLD
+- `tests/navigation/test_flight_profile.py`: re-measures the calibration and refuses extrapolation.
+- `tests/navigation/test_dynamic_flight.py`: clear goal completion, explicit Start, airborne HOLD
   and foreign-planner refusal, unknown-space prefix stop and fresh-clearance resume,
   evidence expiry, newly blocked route with replanning from the stop, missed
   withdrawal, control-loop overrun, HOLD acknowledgement without a measured stop,
@@ -523,10 +570,10 @@ opens such a copy elsewhere, rebuilds the report and replays from it.
   with the calibration seeds, identical commands with recording/reports off, recording
   failure, bounded shutdown and the display view. Every flight asserts that no target
   lay outside the permitted interval it was checked against.
-- `tests/test_flight_window.py`: painting never steps control, buttons reach the
+- `tests/navigation/test_flight_window.py`: painting never steps control, buttons reach the
   executor, readouts/overlays separate proposal, permission, command and motion, and
   closing holds and releases without landing.
-- `tests/test_flight_reports.py`: report artifacts, null-with-reason values, replay
+- `tests/navigation/test_flight_reports.py`: report artifacts, null-with-reason values, replay
   lookup/gap/epoch rules, export, corrupted recording, copied run bundle, comparison
   with failures, and (`DVISION_NIGHTLY=1`) a thirty-minute recording.
 
@@ -539,7 +586,7 @@ included). At the end the executor's live history held at most 610 samples, the 
 all worked from the archive.
 
 Run GUI/process tests with a working display, for example `xvfb-run -a python3 -m
-pytest tests/test_navigation.py tests/test_navigation_process.py tests/test_flight_window.py`.
+pytest tests/navigation/test_navigation.py tests/navigation/test_navigation_process.py tests/navigation/test_flight_window.py`.
 
 ## Supported and deferred
 

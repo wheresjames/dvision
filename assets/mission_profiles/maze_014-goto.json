@@ -1,0 +1,34 @@
+{
+  "schema": "dvision2.mission-profile.v1",
+  "name": "maze_014-goto",
+  "mission": "goto",
+  "params": {
+    "goal_source": "provider_target",
+    "goal": null
+  },
+  "finish_action": "hold",
+  "coverage_margin_m": 10.0,
+  "workspace": null,
+  "arena": "maze_014",
+  "strategy": "",
+  "strategy_params": {},
+  "budgets": {
+    "time_s": 600.0,
+    "time_action": "hold",
+    "battery_reserve_pct": null,
+    "battery_action": "home",
+    "path_m": null,
+    "path_action": "hold"
+  },
+  "debounce": {
+    "min_commit_s": 3.0,
+    "min_shift_m": 1.0
+  },
+  "assisted": {
+    "reference_background": null,
+    "tour_import": false
+  },
+  "area": [],
+  "waypoints": [],
+  "imported_from": null
+}

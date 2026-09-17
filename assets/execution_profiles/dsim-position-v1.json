@@ -25,7 +25,7 @@
   "max_wind_mps": 0.0,
   "max_telemetry_latency_ms": 50.0,
   "calibration": {
-    "method": "dtest/flight_calibration.py measure_all (re-measured by tests/test_flight_profile.py)",
+    "method": "dtest/flight_calibration.py measure_all (re-measured by tests/navigation/test_flight_profile.py)",
     "vehicle": "dsim DroneSimulator via DsimLink loopback, fixed 0.05 s step; HOLD zeroes commanded and actual velocity immediately",
     "date": "2026-09-14",
     "conditions": {

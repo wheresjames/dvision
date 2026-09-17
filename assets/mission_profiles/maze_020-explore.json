@@ -1,0 +1,52 @@
+{
+  "schema": "dvision2.mission-profile.v1",
+  "name": "maze_020-explore",
+  "mission": "explore",
+  "params": {
+    "coverage_target_pct": null,
+    "stuck_s": 20.0,
+    "unreachable_s": 5.0
+  },
+  "finish_action": "land",
+  "coverage_margin_m": 10.0,
+  "workspace": null,
+  "arena": "maze_020",
+  "strategy": "frontier",
+  "strategy_params": {},
+  "budgets": {
+    "time_s": 600.0,
+    "time_action": "land",
+    "battery_reserve_pct": null,
+    "battery_action": "home",
+    "path_m": null,
+    "path_action": "hold"
+  },
+  "debounce": {
+    "min_commit_s": 3.0,
+    "min_shift_m": 1.0
+  },
+  "assisted": {
+    "reference_background": null,
+    "tour_import": false
+  },
+  "area": [
+    [
+      2.0,
+      2.0
+    ],
+    [
+      65.0,
+      2.0
+    ],
+    [
+      65.0,
+      33.0
+    ],
+    [
+      2.0,
+      33.0
+    ]
+  ],
+  "waypoints": [],
+  "imported_from": null
+}

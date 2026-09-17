@@ -73,6 +73,6 @@ Example, matching `assets/drone_profiles/stereo-nav-and-proximity.json`:
 
 ## Correctness tests
 
-`tests/test_sensor_contract.py` covers nested `body → PTZ → rig → camera`
+`tests/sensors/test_sensor_contract.py` covers nested `body → PTZ → rig → camera`
 composition in the documented order, translation rotating with body heading,
 PTZ state outside its limits, missing parents, and cycles.

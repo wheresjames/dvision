@@ -107,7 +107,7 @@ class Panda3DRenderer:
     Panda's Y is north-positive, so feeding map Y straight in mirrors the whole
     scene; ``render`` then mirrors the readback back again.  The delivered frame
     obeys the public image contract (verified by
-    ``tests/test_dvision_calibration_render.py``), but the Panda-space scene is
+    ``tests/vision/test_dvision_calibration_render.py``), but the Panda-space scene is
     chirality-flipped: model and texture handedness are mirrored, and the camera
     roll sign has to be negated below to compensate.  Un-mirroring the scene
     produces a geometrically identical camera image but changes ground/brick

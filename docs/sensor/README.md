@@ -122,7 +122,7 @@ reference machine: 12th Gen Intel Core i9-12900H, 20 threads, 31 GiB
                    Linux 7.1.5 x86_64, Python 3.13.14, NumPy 2.3.2
 ```
 
-`tests/test_sensor_release.py` runs the same measurement two ways: a
+`tests/sensors/test_sensor_release.py` runs the same measurement two ways: a
 reduced-resolution copy of the reference profile in the normal suite, and the
 committed profile for the full 60 seconds under
 `DVISION_NIGHTLY=1 pytest -m nightly`.

@@ -19,6 +19,7 @@ _MODULE_REQUIREMENTS = {
     "test_dvision_calibration_render": ("panda3d", "cv2"),
     "test_dvision_process_transport": ("panda3d", "cv2", "pymembus"),
     "test_dvision_nightly": ("panda3d", "pymembus"),
+    "test_dmsn_nightly": ("panda3d", "pymembus"),
     "test_dway_process": ("panda3d", "pymembus"),
     "test_dalg_process": ("panda3d", "pymembus", "cv2"),
     "test_dvision_perception_chain": ("panda3d", "cv2"),
@@ -36,13 +37,13 @@ def _missing(names: tuple[str, ...]) -> list[str]:
     return missing
 
 
-collect_ignore = []
+collect_ignore_glob = []
 _SKIPPED: dict[str, list[str]] = {}
 
 for _stem, _required in _MODULE_REQUIREMENTS.items():
     _gap = _missing(_required)
     if _gap:
-        collect_ignore.append(f"{_stem}.py")
+        collect_ignore_glob.append(f"*/{_stem}.py")
         _SKIPPED[_stem] = _gap
 
 

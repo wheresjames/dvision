@@ -1,5 +1,10 @@
 # Live camera evidence and planning
 
+This is the operational document: how to run a camera evidence source, what the
+window shows and what the report receives. For how each algorithm actually
+works -- its geometry, its arithmetic, every setting and its failure modes --
+see [`docs/algorithms/`](algorithms/README.md).
+
 Every camera algorithm in dalg publishes evidence: `ground_plane`,
 `optical_flow_triangulation`, `feature_triangulation`, `monocular_depth`,
 `plane_sweep` and `sgbm`, each with a source-only baseline profile. The list
@@ -85,11 +90,11 @@ For a short automated demonstration using a real simulator and dway corridor
 tour, including dnav planning and the offline evaluation:
 
 ```sh
-pytest -q tests/test_dalg_evidence.py -k tour_flown
+pytest -q tests/dalg/test_dalg_evidence.py -k tour_flown
 ```
 
 For widget and snapshot parity checks on a virtual display:
 
 ```sh
-xvfb-run -a pytest -q tests/test_dalg_evidence.py
+xvfb-run -a pytest -q tests/dalg/test_dalg_evidence.py
 ```

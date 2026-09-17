@@ -16,6 +16,9 @@ Test hooks mirror the provider-side events a session distinguishes:
 ``announce_localization_reset``, ``announce_clock_reset``, ``sensor_reset``,
 ``set_sensors`` (a manifest change), ``pose_valid`` (an unavailable pose),
 ``mute`` (a sample gap), ``rollover`` (a new recording session) and ``close``.
+``pads`` paints flat saturated red discs ``(x_m, y_m, radius_m)`` into the
+rendered floor, for detector tests: the fixture is the provider and may hold
+that truth; no consumer ever reads it except through the camera.
 ``publish_reference_image`` / ``withdraw_reference_image`` mirror the optional
 imagery channel: a caller-supplied PNG and affine, or a plan
 rendering of the scene's own boxes, on the plane no algorithm reads.
@@ -23,7 +26,7 @@ rendering of the scene's own boxes, on the plane no algorithm reads.
 As a process::
 
     python dtest/provider.py --id NAME --report-dir DIR [--sensors scan,front]
-        [--path x,y;x,y;...] [--speed 1.5] [--timeout 60]
+        [--path x,y;x,y;...] [--speed 1.5] [--pads x,y,r;...] [--timeout 60]
 """
 from __future__ import annotations
 
@@ -50,6 +53,11 @@ from dcmn.sensors import CAMERA_FRAME, LIDAR_FRAME, STATUS_INVALID, STATUS_VALID
 #: Height of every box, metres. Above any flight altitude a test uses.
 WALL_H = 3.0
 PHYSICS_HZ = 30.
+#: A pad's colour: the saturated red of the simulator's target marker.
+PAD_RGB = (220, 20, 20)
+#: The default pad radius: big enough that a camera at the fixture's height
+#: sees it within ``red_disc``'s area and aspect limits from a few metres away.
+PAD_RADIUS_M = 0.6
 #: The default scene: a room spanning negative and positive coordinates, with
 #: an interior wall and one doorway -- enough to force a detour and to exercise
 #: negative grid origins.
@@ -123,9 +131,10 @@ class FixtureProvider:
     """One provider instance. ``step`` advances the data clock by one physics tick."""
 
     def __init__(self, instance, report_root, *, sensors=('scan',), boxes=ROOM,
-                 start=(0., 0., 1.5, 90.), camera_frames=None, provider_kind='ideal-fixture'):
+                 start=(0., 0., 1.5, 90.), camera_frames=None, provider_kind='ideal-fixture', pads=()):
         self.instance = instance
         self.boxes = tuple(boxes)
+        self.pads = tuple((float(x), float(y), float(r)) for x, y, r in pads)
         self.sensor_ids = tuple(sensors)
         self.camera_frames = ('front' in sensors) if camera_frames is None else camera_frames
         self.time_s = 0.
@@ -144,6 +153,7 @@ class FixtureProvider:
         self.publisher = None
         self.profile = None
         self.imagery = None
+        self.status = None
         self.clock_epoch = uuid.uuid4().int & ((1 << 63) - 1)
         if sensors:
             self.profile = fixture_profile(sensors)
@@ -251,6 +261,8 @@ class FixtureProvider:
         floor = which == -2
         checker = ((np.floor(hit[..., 0]) + np.floor(hit[..., 1])) % 2).astype(bool)
         image[floor & checker] = (150, 140, 120); image[floor & ~checker] = (95, 90, 80)
+        for px, py, radius in self.pads:
+            image[floor & (np.hypot(hit[..., 0] - px, hit[..., 1] - py) <= radius)] = PAD_RGB
         wall = which >= 0
         along = np.where(face == 0, hit[..., 1], hit[..., 0])
         stripe = (np.floor(along*2) % 2).astype(bool)
@@ -363,12 +375,37 @@ class FixtureProvider:
             capture_s=capture_s, registration=registration,
             altitude_m=altitude_m, floor=floor)
 
+    def publish_status(self, values):
+        """Publish provider status keys (``sim.map``, ``drone.battery_pct``, ...) as dsim does.
+
+        Only the keys given exist; a consumer reading any other gets nothing,
+        exactly as it would from a provider that does not publish that key.
+        """
+        from dvision2_common import load_pymembus, memkv_aligned_name_len, shared_names
+        pm = load_pymembus()
+        name = shared_names(self.instance)['status']
+        values = {str(k): str(v) for k, v in values.items()}
+        if self.status is None:
+            pm.memkv.remove(name)
+            handle = pm.memkv()
+            if not handle.create(name, len(values), memkv_aligned_name_len(max(map(len, values)) + 1, 4096),
+                                 4096, True):
+                raise RuntimeError(pm.last_error_message())
+            for index, key in enumerate(values):
+                if not handle.setName(index, key): raise RuntimeError(pm.last_error_message())
+            self.status = handle
+        if not self.status.setAll(values): raise RuntimeError(pm.last_error_message())
+
     def withdraw_reference_image(self, image_id='world'):
         """Take an image back off the plane: the explicit opposite of ambient."""
         return self.imagery.withdraw(image_id) if self.imagery is not None else False
 
     def close(self):
         self.context.close()
+        if self.status is not None:
+            from dvision2_common import load_pymembus, shared_names
+            self.status.close(); self.status = None
+            load_pymembus().memkv.remove(shared_names(self.instance)['status'])
         if self.publisher is not None: self.publisher.close()
         if self.imagery is not None: self.imagery.close()
         self.bus.remove()
@@ -388,16 +425,23 @@ def main(argv=None):
     parser.add_argument('--start', default='0,0,1.5,90', help='x,y,z,heading_deg')
     parser.add_argument('--path', default='', help='x,y;x,y;... to fly, at --speed')
     parser.add_argument('--speed', type=float, default=1.5)
+    parser.add_argument('--pads', default='',
+                        help=f'x,y[,radius];... red floor pads for detector tests (radius {PAD_RADIUS_M} m by default)')
     parser.add_argument('--rate', type=float, default=1.0, help='data seconds per wall second')
     parser.add_argument('--timeout', type=float, default=60.)
+    parser.add_argument('--map-name', default='',
+                        help='publish sim.map on the provider status plane, as dsim names its map '
+                             '(a name only; no file is involved)')
     parser.add_argument('--imagery', action='store_true',
                         help='publish the scene plan as optional reference imagery')
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     sensors = tuple(s for s in args.sensors.split(',') if s)
+    pads = [(p[0], p[1], p[2] if len(p) > 2 else PAD_RADIUS_M) for p in parse_path(args.pads)]
     provider = FixtureProvider(args.id, Path(args.report_dir), sensors=sensors,
-                               start=tuple(float(v) for v in args.start.split(',')))
+                               start=tuple(float(v) for v in args.start.split(',')), pads=pads)
     if args.path: provider.fly(parse_path(args.path), args.speed)
     if args.imagery: provider.publish_reference_image()
+    if args.map_name: provider.publish_status({'sim.map': f'{args.map_name}.txt', 'drone.battery_pct': '100.0'})
     print(f'provider: {args.id} sensors={",".join(sensors) or "none"} report={args.report_dir}', flush=True)
     deadline = time.monotonic() + args.timeout
     dt = 1./PHYSICS_HZ

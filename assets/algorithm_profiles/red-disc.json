@@ -1,0 +1,19 @@
+{
+  "name": "red-disc",
+  "sources": [],
+  "detectors": [
+    {
+      "sensor": "primary_camera",
+      "detector": "red_disc",
+      "label": "landing_pad",
+      "settings": {
+        "hz": 5,
+        "max_range_m": 25,
+        "gate_m": 1.5,
+        "confirm_n": 3,
+        "expire_s": 30,
+        "record_frames_hz": 0
+      }
+    }
+  ]
+}

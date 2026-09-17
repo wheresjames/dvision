@@ -15,6 +15,7 @@ import numpy as np
 from dtest.artifacts import save_failure_bundle
 from dtest.backend import BackendCapabilities
 from dtest.calibration_scene import CALIBRATION_MAP, ROOT
+from dtest.owned_process import popen_owned
 from dcmn.sensors import open_camera
 from dsim.profiles import DroneProfile, default_profile
 from dvision2_common import controlled_command, load_pymembus, shared_names
@@ -75,17 +76,20 @@ class DsimProcessHarness:
         self._last_lease_heartbeat = 0.0
 
     def __enter__(self) -> "DsimProcessHarness":
-        try:
-            self.start()
-            return self
-        except Exception:
-            self.close()
-            raise
+        self.start()
+        return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if exc is not None:
-            self.save_failure(error=repr(exc))
-        self.close()
+        try:
+            if exc is not None:
+                try:
+                    self.save_failure(error=repr(exc))
+                except Exception as reporting_error:
+                    # Keep the test's original failure, with the diagnostic
+                    # problem attached, instead of replacing it.
+                    exc.add_note(f"Could not save DSIM failure artifacts: {reporting_error!r}")
+        finally:
+            self.close()
 
     def save_failure(self, **details) -> Path:
         """Write the full structured failure bundle for this instance."""
@@ -109,6 +113,15 @@ class DsimProcessHarness:
         )
 
     def start(self) -> None:
+        try:
+            self._start()
+        except BaseException:
+            # Includes Ctrl-C during readiness waits, for direct callers as
+            # well as context-manager users (whose __exit__ has not run yet).
+            self.close()
+            raise
+
+    def _start(self) -> None:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         profile_path = self.artifact_dir / 'drone-profile.json'
         profile = self.drone_profile or DroneProfile.parse(
@@ -130,7 +143,7 @@ class DsimProcessHarness:
         if self.sim_speed is not None:
             cmd += ["--sim-speed", self.sim_speed]
         self._stderr_fh = self._stderr_path.open("w", encoding="utf-8")
-        self.process = subprocess.Popen(
+        self.process = popen_owned(
             cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL,
             stderr=self._stderr_fh, text=True,
         )

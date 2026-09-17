@@ -410,7 +410,7 @@ to its painting only, and a test asserts the control calls sit outside every
 
 ## 8. How this is enforced
 
-`tests/test_dvision_wall_clock_independence.py` drives the simulator with a
+`tests/vision/test_dvision_wall_clock_independence.py` drives the simulator with a
 wall clock that can be stopped or made to lurch, and asserts that behaviour
 does not change: the published clock counts flight rather than room time, the
 guided failsafe counts seconds of flight, the perception chain learns the same

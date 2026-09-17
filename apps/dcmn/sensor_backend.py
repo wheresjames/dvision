@@ -84,7 +84,7 @@ class SensorBackend(Protocol):
         """The published compass heading for a private renderer yaw.
 
         The two are not the same number and their signs differ; see
-        ``tests/test_dvision_coordinate_contract.py``. A backend with its own
+        ``tests/vision/test_dvision_coordinate_contract.py``. A backend with its own
         yaw convention converts here rather than anywhere else.
         """
 

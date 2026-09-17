@@ -90,9 +90,9 @@ than from Doppler, so it does not degrade independently of position.
 
 ## Correctness tests
 
-`tests/test_sensor_state.py` -- the fix carrying the same error vehicle status publishes, a missing
+`tests/sensors/test_sensor_state.py` -- the fix carrying the same error vehicle status publishes, a missing
 fix reporting `null` rather than a wrong position, ground velocity including
 the wind, and installation, fix and estimator validity as three separate
 answers.
-`tests/test_sensor_release.py` -- the sensor is present in the reference
+`tests/sensors/test_sensor_release.py` -- the sensor is present in the reference
 profile and produces every configured sample inside the run budget.

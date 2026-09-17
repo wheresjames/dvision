@@ -1,0 +1,84 @@
+{
+  "schema": "dvision2.mission-profile.v1",
+  "name": "maze_020-waypoints",
+  "mission": "waypoints",
+  "params": {
+    "failure_policy": "skip",
+    "retries": 0,
+    "stuck_s": 20.0,
+    "unreachable_s": 5.0
+  },
+  "finish_action": "land",
+  "coverage_margin_m": 10.0,
+  "workspace": null,
+  "arena": "maze_020",
+  "strategy": "",
+  "strategy_params": {},
+  "budgets": {
+    "time_s": 900.0,
+    "time_action": "hold",
+    "battery_reserve_pct": null,
+    "battery_action": "home",
+    "path_m": null,
+    "path_action": "hold"
+  },
+  "debounce": {
+    "min_commit_s": 3.0,
+    "min_shift_m": 1.0
+  },
+  "assisted": {
+    "reference_background": null,
+    "tour_import": true
+  },
+  "area": [],
+  "waypoints": [
+    [
+      31.5,
+      27.556
+    ],
+    [
+      17.333,
+      27.5
+    ],
+    [
+      17.389,
+      15.5
+    ],
+    [
+      27.389,
+      15.444
+    ],
+    [
+      27.389,
+      7.389
+    ],
+    [
+      45.944,
+      7.333
+    ],
+    [
+      46.5,
+      14.5
+    ],
+    [
+      60.556,
+      14.556
+    ],
+    [
+      60.5,
+      2.444
+    ],
+    [
+      52.444,
+      2.389
+    ]
+  ],
+  "imported_from": {
+    "kind": "tour",
+    "tour_id": "maze_020.default.v1",
+    "digest": "81913485d17c90a284289b86b1d8e301a9428a95f5fda90db21fe8a438c227b3",
+    "map": "assets/maps/maze_020.txt",
+    "map_sha": "d0bbe67bbbd8771debe02aea46d2583e0bdadd1c97f9bd2cdcf3ec51b4f72325",
+    "waypoints": 10
+  }
+}

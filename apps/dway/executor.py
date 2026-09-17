@@ -23,7 +23,21 @@ methods) and are handled at the start of the next step, Pause/Cancel first.
 arms, climbs to the profile altitude, confirms HOLD, and then presses Start and
 Resume whenever an admitted route allows -- the same controls an operator would
 use, recorded with origin ``auto``. Pause and Cancel still belong to the
-operator and suppress it. It never lands.
+operator and suppress it. Landing is the one exception to "it never lands": a
+mission ``land`` intent (B4) commits the vehicle to the ground through the
+``LANDING`` state, which never re-arms, never retries and never turns back --
+after it, only a new ``launch`` intent flies again. A ``yaw_to`` intent turns
+in place from a confirmed HOLD, through the link's yaw-rate command, and ends
+back in HOLD.
+
+``wait_for_mission=True`` (target mode only) gates that launch on a mission
+coordinator: the executor stays in ``WAITING`` until the retained mission
+intent snapshot (:mod:`dcmn.mission`) carries a ``launch``. The same snapshot
+carries ``hold``, ``resume``, ``cancel``, ``land`` and ``yaw_to``, which become
+the ordinary controls (or the landing and turning paths) with origin
+``mission``. Each intent revision is acted on at most once, and its
+acknowledgement and outcome ride in the execution status this executor already
+publishes. Without the flag nothing reads the intent plane.
 """
 from __future__ import annotations
 
@@ -41,7 +55,7 @@ from dcmn.navigation import (Snapshot, STATUS_SCHEMA, distance_along, new_sessio
 from dcmn.pacing import PeriodicDeadline
 from dway.dynamic import DynamicRouteSource
 from dway.frames import ProviderFrame
-from dway.link import PositionTarget
+from dway.link import PositionTarget, VelocityTarget
 
 MOVING = ('EXECUTING', 'BRAKING')
 TERMINAL = ('COMPLETE', 'CANCELLED', 'FAILED')
@@ -58,9 +72,17 @@ NARROW_SPEED_FRACTION = 0.25
 #: Growth in cross-track tolerated while moving off from a stop that left the
 #: vehicle outside its allowance; more than this is real divergence.
 DEPARTURE_SLACK_M = 0.02
-NOTABLE = ('execution.shutdown_requested', 'execution.control', 'execution.transition', 'execution.hold', 'execution.lease',
+#: Simulated seconds a mission-requested turn in place may take, hold
+#: confirmation included (B4): a full circle at the slowest commanded rate
+#: still fits twice.
+YAW_TIMEOUT_S = 45.0
+#: Yaw-rate command limits, in degrees per second: proportional to the
+#: remaining turn error, never slower than the minimum nor faster than the cap.
+YAW_RATE_MIN_DPS = 10.0
+YAW_RATE_MAX_DPS = 45.0
+NOTABLE = ('execution.shutdown_requested', 'execution.control', 'execution.intent', 'execution.transition', 'execution.hold', 'execution.lease',
            'execution.health', 'execution.route', 'execution.shutdown', 'execution.launch', 'execution.readiness',
-           'execution.coverage', 'execution.turn', 'execution.handoff', 'execution.corner_blend')
+           'execution.coverage', 'execution.turn', 'execution.yaw', 'execution.land', 'execution.handoff', 'execution.corner_blend')
 
 
 def _turn_deg(a, b, c, d):
@@ -90,11 +112,41 @@ class DynamicExecutor:
                  sleep=time.sleep, context=None, navigation=None, output=None, maps=None,
                  record=True, recording_queue_bytes=32 << 20, recording_disk_bytes=1 << 30,
                  report=True, input_stall_s=1.0, overrun_s=None, auto=False, allow_uncalibrated=False,
-                 wait_for=(), bus=None, takeoff_timeout_s=30.0, bus_enabled=True):
+                 wait_for=(), bus=None, takeoff_timeout_s=30.0, bus_enabled=True, wait_for_mission=False,
+                 intent=None, land_timeout_s=60.0):
         if not allow_uncalibrated: profile.require_flight()
+        if wait_for_mission and not auto: raise ValueError('waiting for a mission launch intent requires target mode')
         self.auto, self.wait_for, self.bus = auto, tuple(wait_for), bus
+        #: Target mode gated on a mission coordinator's launch intent.
+        self.wait_for_mission = bool(wait_for_mission)
+        self.intent = intent if intent is not None or not wait_for_mission else Snapshot(instance, 'mission_intent')
+        self.launch_authorized = not self.wait_for_mission
+        #: A mission ``hold`` suppresses the automatic Start and Resume until its ``resume``.
+        self.mission_hold = False
+        #: What was done with the newest intent revision: session, revision, kind, state, reason.
+        self.intent_ack = None
+        self.intent_error = ''
+        #: The newest intent revision's args, for the handlers that need them.
+        self._intent_args = {}
+        self._intent_mark = None
         self.takeoff_timeout_s = takeoff_timeout_s
+        #: Simulated seconds a mission-requested landing may take before it
+        #: faults (B4, Q25); a dway flag, deliberately not a profile field.
+        self.land_timeout_s = float(land_timeout_s)
+        if self.land_timeout_s <= 0.0: raise ValueError('land timeout must be positive')
+        #: Landing bookkeeping: the command is sent from the LANDING state, and
+        #: the deadline that faults an unconfirmed landing.
+        self._land_sent = False
+        self._land_deadline = None
+        #: Turning in place (a ``yaw_to`` intent): target heading, deadline.
+        self.yawing = False
+        self._yaw_target_deg = None
+        self._yaw_sent_hold = False
+        self._yaw_deadline = None
+        self._yaw_return = ('HOLDING', '', None)
         self.launched = not auto
+        #: Set on a confirmed mission landing, cleared by the next launch.
+        self.landed = False
         self.launch_phase = None
         self.launch_note = ''
         self.ready_roles = set()
@@ -215,22 +267,28 @@ class DynamicExecutor:
         gap = None if self._last_wall is None else wall - self._last_wall
         self._last_wall = wall
         queued = [self.pending.popleft() for _ in range(len(self.pending))]
+        intended = self._poll_intent(now)
+        if intended is not None: queued.append((intended, 'mission'))
         for action, origin in queued:  # Pause and Cancel before any ordinary work
-            if action in ('pause', 'cancel'): self._control(action, origin, now)
+            if action in ('pause', 'cancel'): self._acknowledge(origin, *self._control(action, origin, now))
         self._read_inputs(now, wall)
         self._observe_vehicle(now, wall)
         if gap is not None and gap > self.overrun_s and self.state == 'EXECUTING':
             self._brake(now, 'overrun', f'control loop stalled {gap:.2f} s (limit {self.overrun_s:.2f} s); '
                                         'no obsolete target is sent')
         for action, origin in queued:
-            if action in ('start', 'resume'): self._control(action, origin, now)
+            if action in ('start', 'resume'): self._acknowledge(origin, *self._control(action, origin, now))
+            elif action == 'land': self._acknowledge(origin, *self._do_land(now))
+            elif action == 'yaw_to': self._acknowledge(origin, *self._do_yaw_to(now, self._intent_args))
         self._coordinate(now, wall)
         if self.auto: self._auto_step(now)
         if self.owns_control: self._supervise(now, wall)
-        {'WAITING': self._step_idle, 'READY': self._step_idle, 'TAKING_OFF': self._step_launch,
+        {'WAITING': self._step_idle, 'YAWING': self._step_yawing, 'READY': self._step_idle, 'TAKING_OFF': self._step_launch,
          'EXECUTING': self._step_executing,
          'BRAKING': self._step_braking, 'HOLDING': self._step_holding, 'COMPLETE': self._step_complete,
-         'CANCELLED': self._step_terminal, 'FAILED': self._step_terminal}[self.state](now)
+         'LANDING': self._step_landing,
+         'CANCELLED': self._step_terminal, 'FAILED': self._step_terminal}[
+            'YAWING' if self.yawing and self.state in ('HOLDING', 'COMPLETE') else self.state](now)
         self._publish(now)
         return self.status
 
@@ -322,6 +380,7 @@ class DynamicExecutor:
             self.vehicle_fault = f'control lease lost after {self.state.lower()}'
             return
         if self.state == 'TAKING_OFF': return  # climbing is outside the slab and not GUIDED/HOLD yet
+        if self.state == 'LANDING': return  # descending: not GUIDED/HOLD, and leaving the slab is the point
         fault = self._health(self.vehicle, wall)
         if fault and fault != self.vehicle_fault:
             self._record('execution.health', dict(fault=fault, state=self.state))
@@ -423,6 +482,8 @@ class DynamicExecutor:
     def _do_start(self, now):
         src, wall = self.source, self.wall()
         if self.state == 'TAKING_OFF': return False, f'taking off: {self.reason}'
+        if self.state == 'LANDING': return False, f'landing: {self.reason}'
+        if self.yawing: return False, 'turning in place; Start after the turn'
         if self.state in MOVING: return False, 'already executing'
         if self.state in ('FAILED', 'CANCELLED'):
             return False, f'mission {self.state.lower()}: {self.reason}; start dway again for a new mission'
@@ -487,6 +548,7 @@ class DynamicExecutor:
     def _do_resume(self, now):
         src, wall = self.source, self.wall()
         if self.state != 'HOLDING': return False, f'Resume applies to a held route, not {self.state}'
+        if self.yawing: return False, 'turning in place; Resume after the turn'
         if self.hold_kind in START_REQUIRED or src.start_required:
             return False, f'Start required: {self.reason}'
         if self.hold_kind in AUTO_CONTINUE: return False, 'this stop continues on its own once validated'
@@ -513,6 +575,11 @@ class DynamicExecutor:
 
     def _do_cancel(self, now):
         if self.state in TERMINAL: return False, f'mission already {self.state.lower()}'
+        if self.state == 'LANDING':
+            return False, 'the vehicle is committed to the ground; a landing is never taken back'
+        if self.yawing:
+            self.yawing = False
+            self._intent_outcome('yaw_to', 'failed', 'cancelled while turning')
         if self.state in ('EXECUTING', 'TAKING_OFF'):
             self.launched = True
             self._brake(now, 'cancel', 'cancelled by operator')
@@ -523,6 +590,59 @@ class DynamicExecutor:
         if self.source.active: self.source.release('stopped')
         self._transition('CANCELLED', 'cancelled by operator')
         return True, 'cancelled'
+
+    def _do_land(self, now):
+        """A mission ``land`` intent: commit the vehicle to the ground (B4).
+
+        The command itself is sent from the ``LANDING`` state; this only checks
+        the vehicle is up and gives up the route. Once landing, the executor
+        never re-arms, never retries and never takes it back -- after the
+        ground, only a new ``launch`` intent flies again.
+        """
+        if self.launch_phase != 'airborne':
+            return False, (f'not airborne ({self.launch_phase or "never launched"}); '
+                          'land applies to a flying vehicle')
+        if self.state == 'FAILED':
+            return False, f'executor failed: {self.reason}'
+        if not self.owns_control: return False, f'no control lease ({self.lease_state}); not landing'
+        if self.state == 'LANDING': return True, 'already landing'
+        if self.yawing:
+            self.yawing = False
+            self._intent_outcome('yaw_to', 'failed', 'superseded by a landing')
+        if self.source.active: self.source.release('stopped')
+        self.target = None
+        self._land_sent, self._land_deadline = False, None
+        self._record('execution.land', dict(phase='begin', pose=self.pose,
+                                            timeout_s=self.land_timeout_s))
+        self._transition('LANDING', 'landing')
+        return True, 'landing'
+
+    def _do_yaw_to(self, now, args):
+        """A mission ``yaw_to`` intent: turn in place from a confirmed HOLD, then hold again."""
+        try:
+            heading = float((args or {}).get('heading_deg'))
+        except (TypeError, ValueError):
+            return False, 'yaw_to needs a heading_deg argument'
+        if not math.isfinite(heading): return False, 'yaw_to needs a finite heading_deg'
+        if self.launch_phase != 'airborne':
+            return False, f'not airborne ({self.launch_phase or "never launched"}); yaw_to applies to a flying vehicle'
+        if self.state == 'HOLDING' and self.source.state == 'STOP_REQUIRED':
+            return False, 'yaw_to waits for the stop to be confirmed'
+        if self.state not in ('HOLDING', 'COMPLETE'):
+            return False, f'yaw_to applies to a confirmed HOLD, not {self.state}'
+        if self.yawing: return False, 'already turning; wait for the current turn to finish'
+        self.yawing = True
+        #: Where the turn returns to: a held route stays held, a reached goal stays reached.
+        self._yaw_return = (self.state, self.reason, self.hold_kind)
+        self._yaw_target_deg = heading % 360.0
+        self._yaw_sent_hold, self._yaw_deadline = False, now + YAW_TIMEOUT_S
+        self.turn_error_deg = heading_error_deg(self._yaw_target_deg,
+                                                 None if self.vehicle is None else self.vehicle.heading_deg)
+        self._record('execution.yaw', dict(phase='begin', to_deg=self._yaw_target_deg,
+                                            from_deg=None if self.vehicle is None else self.vehicle.heading_deg,
+                                            error_deg=self.turn_error_deg))
+        self._transition(self.state, f'turning to heading {self._yaw_target_deg:g}°', self.hold_kind)
+        return True, 'turning'
 
     # -- target mode: launch and automatic Start/Resume ---------------------
 
@@ -577,8 +697,76 @@ class DynamicExecutor:
     def missing_roles(self):
         return [r for r in self.wait_for if r not in self.ready_roles]
 
+    # -- mission intents ------------------------------------------------------
+
+    def _poll_intent(self, now):
+        """The control a new mission intent revision asks for, or None.
+
+        ``launch`` only authorizes the automatic launch (acknowledged now,
+        completed once airborne in HOLD). ``hold`` pauses a moving vehicle and,
+        moving or not, suppresses the automatic Start until ``resume``, which
+        presses whichever of Resume or Start a held route needs or otherwise
+        just lets the automatic Start run again. ``cancel`` cancels. ``land``
+        commits the vehicle to the ground (B4); ``yaw_to`` turns in place from
+        a confirmed HOLD. A revision is handled once, however many steps read it.
+        """
+        if self.intent is None: return None
+        try:
+            value = self.intent.read()
+            self.intent_error = ''
+        except (ValueError, RuntimeError) as exc:
+            self.intent_error = f'mission intent unreadable: {exc}'
+            return None
+        if not value: return None
+        mark = (value['session'], value['revision'])
+        if mark == self._intent_mark: return None
+        self._intent_mark = mark
+        kind = value['kind']
+        self._intent_args = dict(value.get('args') or {})
+        self.intent_ack = dict(session=value['session'], revision=value['revision'], kind=kind,
+                               state='pending', reason='', t_s=now)
+        self._record('execution.intent', dict(intent=value))
+        if kind == 'none':
+            self.intent_ack.update(state='accepted', reason='nothing requested')
+            return None
+        if kind == 'launch':
+            if self.launched and self.launch_phase == 'airborne':
+                self.intent_ack.update(state='completed', reason='already airborne in HOLD')
+            elif self.launched and self.state in ('FAILED', 'CANCELLED'):
+                self.intent_ack.update(state='refused', reason=f'executor {self.state.lower()}: {self.reason}')
+            else:
+                self.launch_authorized = True
+                self.intent_ack.update(state='accepted', reason='launch authorized')
+            return None
+        if kind == 'cancel': return 'cancel'
+        if kind == 'land': return 'land'
+        if kind == 'yaw_to': return 'yaw_to'
+        if kind == 'hold':
+            self.mission_hold = True
+            if self.state in MOVING + ('HOLDING',): return 'pause'
+            self.intent_ack.update(state='accepted', reason=f'{self.state.lower()}: automatic Start suppressed')
+            return None
+        self.mission_hold = False
+        if self.state != 'HOLDING':
+            self.intent_ack.update(state='accepted', reason=f'{self.state.lower()}: automatic Start re-enabled')
+            return None
+        src = self.source
+        restart = (self.hold_kind in START_REQUIRED or src.start_required
+                   or _goal_key(self.snapshot.get('goal')) != self.authorized_goal)
+        return 'start' if restart else 'resume'
+
+    def _acknowledge(self, origin, accepted, reason):
+        if origin != 'mission' or self.intent_ack is None or self.intent_ack['state'] != 'pending': return
+        self.intent_ack.update(state='accepted' if accepted else 'refused', reason=reason)
+
     def _request_coverage(self):
-        """Target mode owns the mission goal: ask dalg to map a region that contains it."""
+        """Target mode owns the mission goal: ask dalg to map a region that contains it.
+
+        Not while a mission coordinator holds the goal: it owns the mapping
+        extent, and a reset requested here would discard the evidence it is
+        exploring with.
+        """
+        if (self.snapshot.get('authority') or {}).get('role') == 'mission': return
         goal = (self.snapshot.get('goal') or {})
         position, revision = goal.get('position'), goal.get('revision')
         if not position or self.maps is None or revision == (self.coverage_request or {}).get('goal_revision'):
@@ -606,16 +794,23 @@ class DynamicExecutor:
         if self.state in ('CANCELLED', 'FAILED'): return
         if not self.launched:
             if self.state not in ('WAITING', 'READY'): return
+            if not self.launch_authorized or self.mission_hold:
+                self.launch_note = ('landed; waiting for a mission launch intent' if self.landed
+                                    else 'waiting for a mission launch intent')
+                return
             missing = self.missing_roles()
             if missing:
                 self.launch_note = (f'waiting for {", ".join(missing)} to report ready'
                                     + (f' ({self.bus_error})' if self.bus_error else ''))
                 return
             self.launch_phase, self._launch_sent = 'lease', False
+            self.landed = False
             self._record('execution.launch', dict(phase='begin', altitude_m=self.profile.altitude_m))
             self._transition('TAKING_OFF', 'acquiring an available control lease')
             return
         src = self.source
+        if self.mission_hold: return
+        if self.yawing: return  # a mission-requested turn is not a route to resume
         if now < self._auto_next and now >= self._auto_next - 5.0: return
         if src.state != 'READY': return
         if self.state in ('WAITING', 'READY'):
@@ -628,7 +823,11 @@ class DynamicExecutor:
 
     def _launch_fail(self, now, reason):
         self.launched = True
+        self._launch_outcome('failed', reason)
         self._fail(now, f'target mode launch failed: {reason}')
+
+    def _launch_outcome(self, state, reason):
+        self._intent_outcome('launch', state, reason)
 
     def _step_launch(self, now):
         p, v, link = self.profile, self.vehicle, self.link
@@ -688,6 +887,7 @@ class DynamicExecutor:
                 if now - self._launch_below >= p.hold_dwell_s:
                     self.launch_phase, self.launched = 'airborne', True
                     self._record('execution.launch', dict(phase='airborne', pose=self.pose))
+                    self._launch_outcome('completed', 'airborne in HOLD')
                     return self._transition('WAITING', 'airborne in HOLD; waiting for an admitted route')
             else:
                 self._launch_below = None
@@ -1041,6 +1241,104 @@ class DynamicExecutor:
         if self.source.state == 'READY' and _goal_key(self.snapshot.get('goal')) not in (None, self.authorized_goal):
             self._transition('READY', 'new goal admitted; Start required')
 
+    def _step_landing(self, now):
+        """Descend and disarm; never send another target, never re-arm, never retry (B4)."""
+        v, link = self.vehicle, self.link
+        if v is None or not v.link_connected:
+            return self._transition('LANDING', 'landing; waiting for the vehicle link')
+        if not self._land_sent:
+            try: result = link.land()
+            except Exception as exc:
+                return self._land_fail(now, f'land command failed: {exc}')
+            self._record('execution.land', dict(phase='requested', accepted=result.accepted,
+                                               reason=result.reason, request_id=result.request_id,
+                                               pose=self.pose))
+            if not result.accepted:
+                return self._land_fail(now, f'land rejected: {result.reason}')
+            self._land_sent, self._land_deadline = True, now + self.land_timeout_s
+            return self._transition('LANDING', f'landing (confirmed within {self.land_timeout_s:g} s or faulted)')
+        if not v.armed and v.mode in ('LAND', 'DISARMED'):
+            self._record('execution.land', dict(phase='landed', pose=self.pose))
+            self._intent_outcome('land', 'completed', 'landed; vehicle disarmed on the ground')
+            # Back on the ground: no lease, no launch authorization, no phase.
+            # A new mission launch intent is the only thing that flies again.
+            self._release_lease('landed')
+            self.launched, self.launch_authorized, self.launch_phase = False, False, None
+            self.landed = True
+            self.launch_note = 'landed; waiting for a mission launch intent'
+            self._transition('WAITING', 'landed; on the ground; a new launch intent is required')
+            return
+        if now > self._land_deadline:
+            detail = f'armed {bool(v.armed)}, mode {v.mode or "n/a"}'
+            if self.pose is not None: detail += f', altitude {self.pose[2]:.2f} m'
+            return self._land_fail(now, f'landing not confirmed within {self.land_timeout_s:g} s ({detail})')
+        self._transition('LANDING', f'descending (armed {bool(v.armed)}, mode {v.mode})')
+
+    def _land_fail(self, now, reason):
+        self._intent_outcome('land', 'failed', reason)
+        self._fail(now, f'target mode landing failed: {reason}')
+
+    def _step_yawing(self, now):
+        """Turn in place to the requested heading, then hold; a mission's eyes, not its legs."""
+        p, v, link = self.profile, self.vehicle, self.link
+        if v is None or not v.link_connected:
+            return self._transition(self.state, 'turning; waiting for the vehicle link', self.hold_kind)
+        if now > self._yaw_deadline:
+            self.yawing = False
+            reason = f'heading {self._yaw_target_deg:g}° not reached within {YAW_TIMEOUT_S:g} s'
+            self._intent_outcome('yaw_to', 'failed', reason)
+            return self._fail(now, f'target mode turn failed: {reason}')
+        error = heading_error_deg(self._yaw_target_deg, v.heading_deg)
+        self.turn_error_deg = error
+        if abs(error) <= p.turn_tolerance_deg:
+            if not self._yaw_sent_hold:
+                try: result = link.hold()
+                except Exception as exc:
+                    self.yawing = False
+                    self._intent_outcome('yaw_to', 'failed', f'HOLD could not be sent: {exc}')
+                    return self._fail(now, f'target mode turn failed: HOLD could not be sent ({exc})')
+                self._record('execution.yaw', dict(phase='hold', accepted=result.accepted,
+                                                  reason=result.reason, to_deg=self._yaw_target_deg))
+                if not result.accepted:
+                    self.yawing = False
+                    self._intent_outcome('yaw_to', 'failed', f'HOLD rejected: {result.reason}')
+                    return self._fail(now, f'target mode turn failed: HOLD rejected ({result.reason})')
+                self._yaw_sent_hold = True
+            if v.mode == 'HOLD' and self.speed is not None and self.speed <= p.hold_speed_mps:
+                self.yawing = False
+                self.heading_deg = self._yaw_target_deg  # the route resumes facing this way
+                self.turn_error_deg = None
+                self._intent_outcome('yaw_to', 'completed',
+                                     f'heading {self._yaw_target_deg:g}° reached; HOLD confirmed')
+                self._record('execution.yaw', dict(phase='completed', to_deg=self._yaw_target_deg,
+                                                   heading_deg=v.heading_deg))
+                state, reason, kind = self._yaw_return
+                return self._transition(state, f'{reason}; heading {self._yaw_target_deg:g}° reached', kind)
+            return self._transition(self.state, f'confirming HOLD at heading {self._yaw_target_deg:g}°',
+                                    self.hold_kind)
+        rate = max(YAW_RATE_MIN_DPS, min(YAW_RATE_MAX_DPS, abs(error) * 2.0))
+        target = VelocityTarget(0.0, 0.0, 0.0, rate if error > 0.0 else -rate)
+        try: result = self.link.send_velocity_target(target)
+        except Exception as exc:
+            self.yawing = False
+            self._intent_outcome('yaw_to', 'failed', f'yaw-rate command failed: {exc}')
+            return self._fail(now, f'target mode turn failed: yaw-rate command failed ({exc})')
+        self.targets_sent += 1
+        self._record('execution.yaw', dict(phase='turning', to_deg=self._yaw_target_deg, heading_deg=v.heading_deg,
+                                           error_deg=error, yaw_rate_dps=target.yaw_rate_dps,
+                                           accepted=result.accepted, reason=result.reason))
+        if not result.accepted:
+            self.yawing = False
+            self._intent_outcome('yaw_to', 'failed', f'yaw-rate target rejected: {result.reason}')
+            return self._fail(now, f'target mode turn failed: yaw-rate target rejected ({result.reason})')
+        self._transition(self.state, f'turning to heading {self._yaw_target_deg:g}°', self.hold_kind)
+
+    def _intent_outcome(self, kind, state, reason):
+        """Close the newest intent revision of ``kind`` with its outcome."""
+        ack = self.intent_ack
+        if ack is not None and ack['kind'] == kind and ack['state'] in ('pending', 'accepted'):
+            ack.update(state=state, reason=reason)
+
     def _step_terminal(self, now):
         pass
 
@@ -1092,7 +1390,11 @@ class DynamicExecutor:
             launch_phase=self.launch_phase, waiting_for=self.missing_roles(), permission=p.permission,
             bus_error=self.bus_error, coverage_request=self.coverage_request, profile=p.digest, profile_calibrated=p.calibrated,
             recording_error=self.report_error, vehicle_fault=self.vehicle_fault,
-            route_mode=route_mode, substitute_goal=substitute_goal)
+            route_mode=route_mode, substitute_goal=substitute_goal,
+            wait_for_mission=self.wait_for_mission, launch_authorized=self.launch_authorized,
+            mission_hold=self.mission_hold,
+            mission_intent=None if self.intent_ack is None else dict(self.intent_ack),
+            intent_error=self.intent_error)
         try: self.output.write(self.status)
         except (ValueError, RuntimeError) as exc: self.report_error = f'status not published: {exc}'
         if self._samples.due(now):
@@ -1167,7 +1469,10 @@ class DynamicExecutor:
             self.recorder = Recorder(directory, dict(mode='dynamic-flight', session=self.session, instance=self.id,
                                                      planner=self.source.planner, profile=asdict(self.profile),
                                                      profile_digest=self.profile.digest,
-                                                     client_id=getattr(self.link, 'client_id', '')),
+                                                     client_id=getattr(self.link, 'client_id', ''),
+                                                     settings=dict(auto=self.auto, wait_for_mission=self.wait_for_mission,
+                                                                   takeoff_timeout_s=self.takeoff_timeout_s,
+                                                                   land_timeout_s=self.land_timeout_s)),
                                      module='dway', queue_bytes=self.recording_queue_bytes,
                                      disk_bytes=self.recording_disk_bytes)
             self.report_dir = directory
@@ -1248,7 +1553,13 @@ class DynamicExecutor:
                                                              'watchdog applies')
             self.owns_control, self.lease_state = False, 'abandoned: vehicle status stale at shutdown'
             phase('hold_wait')
-        if self.owns_control:
+        if self.owns_control and self.state == 'LANDING':
+            # A HOLD would fight the descent the vehicle is committed to; the
+            # ground is the stop, and the lease is released without it.
+            result.update(hold=dict(accepted=False, reason='landing; not sent'), confirmed=False,
+                          released=self._release_lease('shutdown while landing'))
+            phase('hold_wait'); phase('release')
+        elif self.owns_control:
             try:
                 hold = self.link.hold()
                 result['hold'] = dict(accepted=hold.accepted, reason=hold.reason)

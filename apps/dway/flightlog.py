@@ -208,6 +208,9 @@ def analyse(archive_dir, *, dnav_archives=None):
         route_age_s=dict(min=_stat(route_ages, min), mean=_stat(route_ages, statistics.fmean), max=_stat(route_ages, max)),
         estimated_track_m=round(track_m, 4), samples=len(samples), gaps=gaps, recording=recording,
         profile=profile, conditions=[e['data'] for e in by_type.get('execution.conditions', [])],
+        landings=[e['data'] for e in by_type.get('execution.land', [])],
+        turns_in_place=[e['data'] for e in by_type.get('execution.yaw', [])
+                        if e['data'].get('phase') != 'turning'],
         definitions=DEFINITIONS, units='SI: metres, seconds, metres per second')
     return summary, reader, events
 

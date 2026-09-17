@@ -101,10 +101,10 @@ usefulness is bounded by that.
 
 ## Correctness tests
 
-`tests/test_sensor_geometry.py` — analytic distances downward, forward and
+`tests/sensors/test_sensor_geometry.py` — analytic distances downward, forward and
 tilted at every heading, the box-top case, min/max gates, misses staying
 invalid, cone spread and reducer selection, mount translation rotating with
 heading, and the determinism rules.
-`tests/test_sensor_contract.py` — the published schema, the invalid-reading
+`tests/sensors/test_sensor_contract.py` — the published schema, the invalid-reading
 representation with no NaN in JSON, per-sensor cadence, and the shared-ring
 behaviour under bulk LiDAR traffic.

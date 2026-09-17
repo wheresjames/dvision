@@ -107,10 +107,10 @@ sloped or 3D unit is a `lidar.range_image` instead.
 
 ## Correctness tests
 
-`tests/test_sensor_geometry.py` — full-circle and partial-sector angle
+`tests/sensors/test_sensor_geometry.py` — full-circle and partial-sector angle
 calibration, ray ordering around the vehicle, analytic distance to a known
 wall, misses staying invalid, and the determinism rules.
-`tests/test_sensor_contract.py` — the packed layout round-trips through the
+`tests/sensors/test_sensor_contract.py` — the packed layout round-trips through the
 manifest, metadata and array share a sequence, the dedicated ring absorbs bulk
 traffic without evicting compact records, and a disabled scanner leaves no
 manifest entry.

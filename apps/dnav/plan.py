@@ -122,6 +122,10 @@ class NavRun:
         self.control = build('control')
         self.goal: tuple[float, float, float] | None = None
         self.goal_error = ''
+        #: Set when goal authority moves between roles (a mission coordinator
+        #: and an operator), so both windows can say who now owns the goal.
+        self.authority_notice = ''
+        self._authority_mark = None
         self.pose_error = 'no session context yet'
         self._pending_goal: tuple | None = None
         self._pending_handoff = False
@@ -157,6 +161,14 @@ class NavRun:
         self._last_plan_key: tuple | None = None
         self._substitute: R.Route | None = None
         self._substitute_key: tuple | None = None
+        #: Wall seconds the last substitute took to compute, and the worst yet.
+        #: Recorded because this is where a whole run's time once went: a
+        #: reachability search that took 2.8 s, inside the publisher, so dnav
+        #: stopped publishing and every route it offered arrived past the
+        #: executor's validity window. A number in the report is how that gets
+        #: noticed next time instead of being reconstructed from an archive.
+        self.substitute_s: float | None = None
+        self.substitute_worst_s = 0.0
         self._last_heartbeat = -1e9
         self._hello_sent = False
         self._session_id: str | None = None
@@ -182,11 +194,25 @@ class NavRun:
             self.snapshot = {}; self.pose_error = str(exc)
         if self.snapshot:
             self._time_s = float(self.snapshot.get('time_s', self._time_s))
+            self._watch_authority()
             self._submit_pending_goal()
             self._adopt_provider_goal()
         self.bus.connect()
         self._adopt_session()
         return bool(self.snapshot)
+
+    def _watch_authority(self) -> None:
+        """Say so when goal authority changes role, e.g. from a mission to this dnav's operator."""
+        authority = self.snapshot.get('authority')
+        mark = None if not authority else (authority.get('id'), authority.get('role'))
+        if mark == self._authority_mark: return
+        previous, self._authority_mark = self._authority_mark, mark
+        if previous is None or mark is None or previous[1] == mark[1]: return
+        who = 'this dnav' if mark[0] == self.writer_id else mark[0][:18]
+        self.authority_notice = f'goal authority moved from {previous[1]} to {mark[1]} ({who})'
+        if previous[1] == 'mission':
+            self.authority_notice += '; the mission is paused until it is handed back'
+        self.note('goal.authority_changed', previous=list(previous), current=list(mark))
 
     def _adopt_provider_goal(self) -> None:
         sid = self.snapshot.get('session_id')
@@ -529,7 +555,10 @@ class NavRun:
             pose = self._pose()
             if pose is None: return None
             start = (pose['x_m'], pose['y_m'], pose['z_m'])
+            started = time.perf_counter()
             self._substitute = self.planner.plan_near(self.cost_map, start, self.goal, self.policy, radius)
+            self.substitute_s = time.perf_counter() - started
+            self.substitute_worst_s = max(self.substitute_worst_s, self.substitute_s)
             self._substitute_key = self._last_plan_key
         return self._substitute
 
@@ -566,6 +595,7 @@ class NavRun:
         control = self.control_route
         data = dict(schema=ATTEMPT_SCHEMA, attempt=self.attempts, trigger=trigger,
                     started_wall=started_wall, finished_wall=time.time(),
+                    substitute_s=None if self.substitute_s is None else round(self.substitute_s, 6),
                     pose=pose, pose_error=self.pose_error, goal=goal,
                     authority=self.authority, policy=self._policy_record(), planner=self.planner_name,
                     route=route.as_dict(), control=None if control is None else control.as_dict(),
@@ -702,6 +732,7 @@ class NavRun:
             'time_s': round(sim_now, 4), 'pose_provider': self.snapshot.get('provider_kind', ''),
             'planner': self.planner_name, 'planners': sorted(PLANNERS),
             'plans': self.plans, 'attempts': self.attempts,
+            'substitute_worst_s': round(self.substitute_worst_s, 6),
             'reference_display': self._reference_display,
             'reference_image': self._reference_image_record(),
             'policy': self._policy_record(),

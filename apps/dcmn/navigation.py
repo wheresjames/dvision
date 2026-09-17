@@ -396,17 +396,35 @@ def project_progress(points, xyz, previous=(0, 0.)):
     return best
 
 
+#: Endpoint kinds and their schemas. ``mission`` and ``mission_intent`` are the
+#: mission coordinator's planes; their validators live in :mod:`dcmn.mission`.
+#: ``detections`` is a detector producer's plane (:mod:`dcmn.detections`), named
+#: per producer like ``navigation``.
+ENDPOINT_KINDS = ('navigation', 'execution', 'mission', 'mission_intent', 'detections')
+
+
+def _validator(schema):
+    if schema in (SCHEMA, STATUS_SCHEMA): return lambda value: validate(value, schema)
+    from dcmn import detections, mission
+    if schema == detections.SCHEMA: return detections.validate
+    return mission.validate_status if schema == mission.STATUS_SCHEMA else mission.validate_intent
+
+
 class Snapshot:
     def __init__(self, vehicle, kind='navigation', planner='dnav'):
         vehicle, planner = validate_id(vehicle), validate_id(planner)
-        if kind not in ('navigation', 'execution'): raise ValueError('invalid endpoint kind')
-        self.schema = SCHEMA if kind == 'navigation' else STATUS_SCHEMA
-        suffix = f'{kind}.{planner}' if kind == 'navigation' else kind
+        if kind not in ENDPOINT_KINDS: raise ValueError('invalid endpoint kind')
+        from dcmn import detections, mission
+        self.schema = {'navigation': SCHEMA, 'execution': STATUS_SCHEMA, 'mission': mission.STATUS_SCHEMA,
+                       'mission_intent': mission.INTENT_SCHEMA, 'detections': detections.SCHEMA}[kind]
+        self._validate = _validator(self.schema)
+        suffix = f'{kind}.{planner}' if kind in ('navigation', 'detections') else kind
         self.name = f'/dvision2.{vehicle}.{suffix}'
         if len(self.name.encode()) > 254: raise ValueError('endpoint name too long')
         self.pm = load_pymembus()
         self.handle = self.lock = None
         self.last_raw = None
+        self.previous = None
 
     def start(self):
         if self.handle is not None: return
@@ -418,6 +436,9 @@ class Snapshot:
             lock.close()
             raise ValueError(f'live writer already owns {self.name}') from None
         try:
+            if self.schema == 'dvision2.mission.v1':
+                try: self.previous = self.read()
+                except (ValueError, RuntimeError): self.previous = None
             self.pm.memkv.remove(self.name)  # stale area, protected by lifetime lock
             handle = self.pm.memkv()
             if not handle.create(self.name, 1, memkv_aligned_name_len(32, MAX_BYTES), MAX_BYTES, True):
@@ -429,7 +450,8 @@ class Snapshot:
             raise
 
     def write(self, value):
-        validate(value, self.schema)
+        self._validate(value)
+        encode(value)
         self.start()
         if not self.handle.setAll({'snapshot': encode(value)}):
             raise RuntimeError(self.pm.last_error_message())
@@ -444,7 +466,8 @@ class Snapshot:
         if len(raw.encode()) > MAX_BYTES: raise ValueError('oversized snapshot')
         try: value = json.loads(raw)
         except (ValueError, RecursionError): raise ValueError('malformed snapshot') from None
-        return validate(value, self.schema)
+        encode(value)
+        return self._validate(value)
 
     def close(self):
         if self.handle is not None:

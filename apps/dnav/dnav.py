@@ -58,8 +58,12 @@ def parse_args(argv):
     parser.add_argument("--goal", default=None,
                         help="goal as x,y or x,y,z in local-frame metres, submitted to the "
                              "session context as this dnav's goal authority")
+    parser.add_argument("--provider-goal", action="store_true",
+                        help="without --goal, adopt the map target the simulator publishes "
+                             "(off by default: nothing moves until a goal is set)")
     parser.add_argument("--no-provider-goal", action="store_true",
-                        help="without --goal, do not adopt the map target the simulator publishes")
+                        help="accepted for compatibility and ignored: not adopting the provider's "
+                             "target is now the default")
     parser.add_argument("--goal-role", choices=("ui", "mission"), default="ui",
                         help="the authority role this dnav claims for goals it submits")
     parser.add_argument("--take-goal-authority", action="store_true",
@@ -146,7 +150,7 @@ class PlanTab:
         self.reference.widget.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.pane = MapPane(page, mode="cost", controls=False,
                             title="cost and route", on_click=self._clicked,
-                            width=440, height=440)
+                            width=440, height=440, zoom=True)
         self.pane.widget.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         # Four groups is more than a short window has room for, and a side
         # panel that sets the height of the whole window is how the map ends
@@ -318,7 +322,8 @@ class PlanTab:
         authority = run.authority
         goal = run.goal_descriptor
         self.authority.set(
-            (run.goal_error + "\n" if run.goal_error else "")
+            (run.authority_notice + "\n" if run.authority_notice else "")
+            + (run.goal_error + "\n" if run.goal_error else "")
             + ("authority: none" if not authority else
                f"authority: {authority['role']} {'(this dnav)' if authority['id'] == run.writer_id else authority['id'][:18]}")
             + ("" if goal is None else f"\nrevision {goal['revision']}, epoch {goal['localization_epoch']}"))
@@ -595,9 +600,13 @@ def run_headless(run, args):
     """Print each route as its status changes; the offline half of the window."""
     deadline = None if args.timeout <= 0 else time.monotonic() + args.timeout
     last = last_permit = provider_goal = None
+    notice = ''
     try:
         while not run.shutdown_requested:
             run.step()
+            if run.authority_notice != notice:
+                notice = run.authority_notice
+                if notice: print(f"[sim {run.sim_time_s():8.2f}] {notice}", flush=True)
             if run.provider_goal != provider_goal and run.provider_goal:
                 provider_goal = run.provider_goal
                 if provider_goal.get('adopted'):
@@ -668,7 +677,7 @@ def main(argv=None):
                      pose_max_age=args.pose_max_age, goal_role=args.goal_role,
                      execution_profile=args.execution_profile, navigation_name=args.navigation_name,
                      profile_overrides=args.profile_set,
-                     goal_from_provider=args.goal is None and not args.no_provider_goal)
+                     goal_from_provider=args.goal is None and args.provider_goal)
     except (OSError, ValueError, TypeError) as exc:
         print(f"dnav: cannot start navigation: {exc}", file=sys.stderr)
         return 1

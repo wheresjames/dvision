@@ -31,7 +31,7 @@ from dcmn.maps import DEFAULT_RING_SLOTS, MAX_GRID_CELLS, GridGeometry
 #: consumer's decoded copy, the recorder's snapshot, and the per-source cost
 #: layer (occupancy, never-observed, obstacle, inflation and float cost planes).
 #: Measured (tracemalloc, 2026-09-11) at about 40 B/cell/source for lidar and
-#: ground-plane sources; kept conservative. tests/test_dcmn_mapping.py holds the
+#: ground-plane sources; kept conservative. tests/dcmn/test_dcmn_mapping.py holds the
 #: estimate above the measured peak of representative configurations.
 SOURCE_CELL_BYTES = 48 + 5 * DEFAULT_RING_SLOTS + 64
 #: Per evidence cell, once: the combined cost surface and A* working arrays

@@ -601,12 +601,155 @@ def render_attempt(reader, sequence, out_path):
     return out_path
 
 
+def detections_listing(reader):
+    """Detector frames, detections and estimate histories, from an archive alone.
+
+    ``frames`` counts every processed frame per detector -- empty ones too --
+    with the capture times of the first and last and the frames with
+    detections; ``detections`` lists each detection with its projection and
+    the estimate it joined; ``estimates`` gives each estimate's lifecycle
+    events in order.
+    """
+    frames, detections, estimates, skipped, failed = {}, [], {}, {}, {}
+    for event in reader.events():
+        kind, data = event.get('type', ''), event.get('data') or {}
+        if kind == 'detector.frame':
+            row = frames.setdefault(data['detector'], dict(processed=0, with_detections=0, first_s=None, last_s=None))
+            row['processed'] += 1
+            row['with_detections'] += 1 if data.get('detections') else 0
+            if row['first_s'] is None: row['first_s'] = data.get('capture_time_s')
+            row['last_s'] = data.get('capture_time_s')
+        elif kind == 'detector.detection':
+            projection = data.get('projection') or {}
+            detections.append(dict(sequence=event['sequence'], id=data.get('id'), detector=data.get('detector'),
+                                   capture_time_s=data.get('capture_time_s'), label=data.get('label'),
+                                   confidence=data.get('confidence'), cx_px=data.get('cx_px'),
+                                   cy_px=data.get('cy_px'), projectable=projection.get('projectable'),
+                                   xy_m=projection.get('xy_m'), reason=projection.get('reason'),
+                                   estimate=data.get('estimate'), crop='crop' in (event.get('images') or {})))
+        elif kind.startswith('estimate.'):
+            estimate = data.get('estimate') or {}
+            estimates.setdefault(estimate.get('id'), []).append(dict(
+                sequence=event['sequence'], event=kind.partition('.')[2], xy_m=estimate.get('xy_m'),
+                spread_m=estimate.get('spread_m'), count=estimate.get('count'), revision=estimate.get('revision'),
+                confirmed=estimate.get('confirmed'), stale=estimate.get('stale'), cause=data.get('cause')))
+        elif kind == 'detector.skipped':
+            skipped[data.get('detector')] = skipped.get(data.get('detector'), 0) + int(data.get('count') or 1)
+        elif kind == 'detector.failed':
+            failed[data.get('detector')] = failed.get(data.get('detector'), 0) + 1
+    for detector, row in frames.items():
+        row.update(skipped=skipped.get(detector, 0), failed=failed.get(detector, 0))
+    return dict(frames=frames, detections=detections, estimates=estimates)
+
+
+def _detection_event(reader, which):
+    """A ``detector.detection`` event by detection ID (``D7`` or ``7``)."""
+    wanted = str(which) if str(which).startswith('D') else f'D{int(which)}'
+    for event in reader.events():
+        if event.get('type') == 'detector.detection' and (event.get('data') or {}).get('id') == wanted:
+            return event
+    raise KeyError(f'no detection {wanted} in this archive')
+
+
+def estimate_trace(reader, estimate_id):
+    """One estimate's observations and lifecycle, in recording order."""
+    rows = []
+    for event in reader.events():
+        kind, data = event.get('type', ''), event.get('data') or {}
+        if kind == 'detector.detection' and data.get('estimate') == estimate_id:
+            rows.append(dict(sequence=event['sequence'], event='observation', detection=data.get('id'),
+                             capture_time_s=data.get('capture_time_s'), confidence=data.get('confidence'),
+                             xy_m=(data.get('projection') or {}).get('xy_m')))
+        elif kind.startswith('estimate.') and (data.get('estimate') or {}).get('id') == estimate_id:
+            estimate = data['estimate']
+            rows.append(dict(sequence=event['sequence'], event=kind.partition('.')[2], xy_m=estimate.get('xy_m'),
+                             spread_m=estimate.get('spread_m'), count=estimate.get('count'),
+                             revision=estimate.get('revision'), confirmed=estimate.get('confirmed'),
+                             stale=estimate.get('stale'), cause=data.get('cause')))
+    if not rows: raise KeyError(f'no estimate {estimate_id} in this archive')
+    return rows
+
+
+def render_detection(reader, which, out_path):
+    """One detection as a PNG from the archive alone: its crop (or frame) with the overlay, and the top-down projection.
+
+    Left, the archived crop -- or the full frame when that detection opened an
+    estimate -- with the detection circled; right, the camera, the ray's
+    ground point, the range and the estimate it joined, in map metres.
+    """
+    from PIL import Image, ImageDraw
+    from dcmn import theme
+    event = _detection_event(reader, which)
+    data = event['data']
+    images = event.get('images') or {}
+    picture, box = None, None
+    for key in ('frame', 'crop'):
+        if key not in images: continue
+        try:
+            picture = reader.image(key, images[key]).image.convert('RGB')
+            box = None if key == 'frame' else (data.get('crop_box_px') or images[key]['metadata'].get('box_px'))
+            break
+        except (IncompleteInput, ValueError, OSError) as exc:
+            reader.warnings.append(f'{key}: image unavailable: {exc}')
+    side = 320
+    canvas = Image.new('RGB', (2 * side, side), theme.CANVAS)
+    draw = ImageDraw.Draw(canvas)
+    if picture is not None:
+        scale = min(side / picture.width, side / picture.height)
+        shown = picture.resize((max(1, int(picture.width * scale)), max(1, int(picture.height * scale))))
+        canvas.paste(shown, (0, 0))
+        cx, cy, r = float(data['cx_px']), float(data['cy_px']), max(float(data['extent_px']), 2.0)
+        if box is not None:
+            x0, y0, x1, y1 = box
+            sx, sy = picture.width / max(x1 - x0, 1), picture.height / max(y1 - y0, 1)
+            cx, cy, r = (cx - x0) * sx, (cy - y0) * sy, r * sx
+        draw.ellipse(((cx - r) * scale, (cy - r) * scale, (cx + r) * scale, (cy + r) * scale),
+                     outline=theme.HIGHLIGHT, width=2)
+    else:
+        draw.text((8, 8), 'no image survived for this detection', fill=theme.DIM)
+    draw.text((8, side - 16), f"{data['id']} {data['label']} {float(data['confidence']):.2f} "
+                              f"t={float(data['capture_time_s']):.2f}s", fill=theme.TEXT)
+    projection = data.get('projection') or {}
+    inputs = data.get('projection_inputs') or {}
+    camera = inputs.get('camera')
+    ox = side
+    if camera is not None and projection.get('projectable'):
+        cam = (float(camera['x_m']), float(camera['y_m']))
+        point = tuple(projection['xy_m'])
+        span = max(4.0, 1.4 * max(abs(point[0] - cam[0]), abs(point[1] - cam[1])))
+        centre = ((cam[0] + point[0]) / 2, (cam[1] + point[1]) / 2)
+        scale = (side - 40) / (2 * span)
+
+        def at(x, y):
+            return ox + side / 2 + (x - centre[0]) * scale, side / 2 + (y - centre[1]) * scale
+        draw.line((*at(*cam), *at(*point)), fill=theme.WARN, width=2)
+        cx, cy = at(*cam)
+        draw.ellipse((cx - 5, cy - 5, cx + 5, cy + 5), outline=theme.ACCENT, width=2)
+        px, py = at(*point)
+        sigma = float(projection.get('sigma_m') or 0.) * scale
+        draw.ellipse((px - sigma, py - sigma, px + sigma, py + sigma), outline=theme.DIM)
+        draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=theme.TARGET_FILL)
+        draw.text((ox + 8, 8), f"range {float(projection['range_m']):.2f} m, bearing "
+                               f"{float(projection['bearing_deg']):.0f}°, sigma {float(projection['sigma_m']):.2f} m",
+                  fill=theme.TEXT)
+        draw.text((ox + 8, 24), f"ground {point[0]:.2f}, {point[1]:.2f} m -> {data.get('estimate') or 'no estimate'}",
+                  fill=theme.TEXT)
+    else:
+        draw.text((ox + 8, 8), f"not projectable: {projection.get('reason') or 'no projection recorded'}",
+                  fill=theme.DIM)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path)
+    return out_path
+
+
 def main(argv=None):
     import argparse
     import sys
     parser = argparse.ArgumentParser(description='validate a numeric output archive, '
-                                     'reconstruct one planning attempt from it, or render '
-                                     'that attempt to a PNG -- all without dsim')
+                                     'reconstruct one planning attempt from it, render '
+                                     'that attempt to a PNG, or list, trace and render its '
+                                     'detections -- all without dsim')
     parser.add_argument('directory')
     parser.add_argument('--attempt', type=int, default=None, help='planning attempt sequence to resolve')
     parser.add_argument('--render', type=int, default=None, metavar='ATTEMPT',
@@ -614,12 +757,32 @@ def main(argv=None):
                              'with the archived reference image behind it when one was '
                              'displayed and its bytes survived')
     parser.add_argument('--out', default=None,
-                        help='output path for --render (default: render-ATTEMPT.png '
-                             'beside the archive)')
+                        help='output path for --render or --detection (default: beside the archive)')
+    parser.add_argument('--detections', action='store_true',
+                        help='list detector frames, detections and estimate histories')
+    parser.add_argument('--detection', default=None, metavar='N',
+                        help='render detection N (or DN): its crop or frame with the overlay, and its projection')
+    parser.add_argument('--estimate', default=None, metavar='ID',
+                        help="trace one estimate's observations and lifecycle in order")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     try: reader = ArchiveReader(args.directory)
     except (OSError, ValueError) as exc:
         print(f'dcmn.archive: {exc}', file=sys.stderr); return 2
+    if args.detections:
+        print(json.dumps(detections_listing(reader), indent=2, default=str)); return 0
+    if args.estimate is not None:
+        try: print(json.dumps(estimate_trace(reader, args.estimate), indent=2, default=str))
+        except KeyError as exc:
+            print(f'dcmn.archive: {exc}', file=sys.stderr); return 1
+        return 0
+    if args.detection is not None:
+        try:
+            label = str(args.detection).lstrip('D')
+            path = render_detection(reader, args.detection, args.out or reader.directory/f'detection-{label}.png')
+        except (KeyError, ValueError, OSError) as exc:
+            print(f'dcmn.archive: {exc}', file=sys.stderr); return 1
+        print(f'dcmn.archive: rendered detection {args.detection} -> {path}')
+        return 0
     if args.render is not None:
         try:
             path = render_attempt(reader, args.render,
