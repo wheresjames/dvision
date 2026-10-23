@@ -78,5 +78,5 @@ that leaks data across a boundary the design says it should not cross:
 ## What runs automatically
 
 CI runs `pip-audit` against the pinned dependencies and `gitleaks` over the
-full history on every push and nightly, and CodeQL on pushes to `master` and
-weekly. These catch the ordinary cases; they are not a substitute for a report.
+full history on pushes to `master` and on pull requests, and CodeQL on pushes
+to `master`. These catch the ordinary cases; they are not a substitute for a report.

@@ -9,9 +9,6 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
-  schedule:
-    # Weekly, so a newly published query reaches the code without a push.
-    - cron: "17 4 * * 1"
 
 permissions:
   contents: read

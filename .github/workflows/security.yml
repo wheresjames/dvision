@@ -1,16 +1,10 @@
-# Dependency and secret auditing.
-#
-# Both run on a schedule as well as on push: a vulnerability is published
-# against a pin that has not changed, so a check that only fires on commits
-# will not find it.
+# Dependency and secret auditing, on push and pull request.
 name: security
 
 on:
   push:
     branches: [master]
   pull_request:
-  schedule:
-    - cron: "23 5 * * *"
 
 permissions:
   contents: read

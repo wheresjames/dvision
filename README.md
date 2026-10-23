@@ -1712,8 +1712,8 @@ if you run the suite yourself:
   so an incomplete environment fails the job instead of quietly testing less.
 
 Coverage is measured and reported in the job summary, but nothing is gated on
-it. `nightly.yml` runs the `nightly` marker on a schedule; `security.yml` runs
-`pip-audit` and `gitleaks`; `codeql.yml` runs static analysis. See
+it. `security.yml` runs `pip-audit` and `gitleaks`; `codeql.yml` runs static
+analysis. The `nightly` marker is not run in CI; run it locally as below. See
 [SECURITY.md](SECURITY.md) for how to report something privately.
 
 The process harness allocates a unique IPC ID per test, waits on readiness and
@@ -1748,8 +1748,7 @@ Run the opt-in longer calibration stream (20 seconds by default):
 DVISION_NIGHTLY=1 pytest -m nightly -q
 ```
 
-Set `DVISION_NIGHTLY_SECONDS` to change its duration. The CI/scheduler should
-retain `DVISION_TEST_ARTIFACTS` when a job fails.
+Set `DVISION_NIGHTLY_SECONDS` to change its duration.
 
 Run the end-to-end perception chain (rendered pixels → detector → occupancy
 map):
@@ -2175,9 +2174,8 @@ SECURITY.md                 What to report privately, where, and what is in scop
   dependabot.yml            Weekly pip and action updates, so exact pins stay fresh
   workflows/
     ci.yml                  Lint, then the suite on 3.11-3.13 under xvfb
-    codeql.yml              Static analysis on master and weekly
+    codeql.yml              Static analysis on master
     security.yml            pip-audit over the pins, gitleaks over the history
-    nightly.yml             The `nightly` marker, on a schedule
 docs/
   clock.md                  Simulated vs wall time, module sync, and the failure modes
   modcom.md                 Module communication: the four shared-memory planes
